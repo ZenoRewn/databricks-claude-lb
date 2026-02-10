@@ -8,6 +8,7 @@ import re
 import asyncio
 import json
 import time
+import random
 import logging
 from typing import Optional
 from dataclasses import dataclass, field
@@ -105,7 +106,7 @@ class GlobalStats:
 
 class LoadBalancer:
     def __init__(
-        self, 
+        self,
         endpoints: list[WorkspaceEndpoint],
         strategy: str = "least_requests",
         circuit_breaker_threshold: int = 5,
@@ -115,11 +116,12 @@ class LoadBalancer:
         self.strategy = strategy
         self.circuit_breaker_threshold = circuit_breaker_threshold
         self.circuit_breaker_timeout = circuit_breaker_timeout
-    
+        self._rr_index = 0  # round_robin 计数器
+
     def get_available_endpoints(self) -> list[WorkspaceEndpoint]:
         now = time.time()
         available = []
-        
+
         for ep in self.endpoints:
             if ep.circuit_open:
                 if ep.last_error_time and now - ep.last_error_time > self.circuit_breaker_timeout:
@@ -129,21 +131,48 @@ class LoadBalancer:
                 else:
                     continue
             available.append(ep)
-        
+
         return available
-    
+
     def select_endpoint(self) -> Optional[WorkspaceEndpoint]:
         available = self.get_available_endpoints()
         if not available:
             logger.error("No available endpoints!")
             return None
-        
-        if self.strategy == "least_requests":
-            return min(available, key=lambda ep: ep.active_requests)
-        elif self.strategy == "round_robin":
+
+        if len(available) == 1:
             return available[0]
-        else:  # random
-            return available[int(time.time() * 1000) % len(available)]
+
+        if self.strategy == "least_requests":
+            # 加权最少请求: active_requests / weight 最小的优先
+            # 平局时用 total_requests / weight 作为二级排序（均摊历史负载）
+            # 仍然平局则随机打散，避免总是选第一个
+            min_active = min(ep.active_requests / ep.weight for ep in available)
+            # 筛选出 active_requests 最少的一组
+            candidates = [ep for ep in available if ep.active_requests / ep.weight == min_active]
+            if len(candidates) == 1:
+                return candidates[0]
+            # 在候选中选 total_requests / weight 最少的（均摊历史负载）
+            min_total = min(ep.total_requests / ep.weight for ep in candidates)
+            finalists = [ep for ep in candidates if ep.total_requests / ep.weight == min_total]
+            return random.choice(finalists)
+
+        elif self.strategy == "round_robin":
+            # 加权轮询: 按 weight 展开
+            total_weight = sum(ep.weight for ep in available)
+            idx = self._rr_index % total_weight
+            self._rr_index += 1
+            cumulative = 0
+            for ep in available:
+                cumulative += ep.weight
+                if idx < cumulative:
+                    return ep
+            return available[-1]
+
+        else:  # random / weighted_random
+            # 加权随机
+            weights = [ep.weight for ep in available]
+            return random.choices(available, weights=weights, k=1)[0]
     
     async def on_request_start(self, endpoint: WorkspaceEndpoint):
         endpoint.active_requests += 1
