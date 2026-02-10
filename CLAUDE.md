@@ -26,28 +26,32 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml claude-lb
 
 整个项目是单文件架构 (`main.py`)，包含以下核心模块：
 
-### 模型映射 (第 25-56 行)
+### 模型映射 (第 25-65 行)
 - `get_databricks_model()`: 将 Claude 模型名映射到 Databricks 模型
 - `claude-*-sonnet-*` → `databricks-claude-sonnet-4-5`
-- `claude-*-opus-*` → `databricks-claude-opus-4-5`
-- `claude-*-haiku-*` → `databricks-claude-sonnet-4-5` (Databricks 无 haiku)
+- `claude-*-opus-*` → `databricks-claude-opus-4-6`（默认），支持显式指定 4-5/4-6
+- `claude-*-haiku-*` → `databricks-claude-haiku-4-5`
 
-### 负载均衡 (第 60-143 行)
-- `WorkspaceEndpoint`: 端点数据类，包含配置和运行时状态
+### 负载均衡 (第 68-183 行)
+- `WorkspaceEndpoint`: 端点数据类，包含配置和运行时状态（含 token 用量、延迟追踪、按模型维度统计）
+- `GlobalStats`: 全局统计数据类
 - `LoadBalancer`: 支持三种策略
   - `least_requests`: 最少活跃请求数
   - `round_robin`: 轮询
   - `random`: 随机
-- 熔断器机制: 错误达阈值自动禁用端点，超时后自动恢复
+- 熔断器机制: 错误达阈值自动禁用端点，超时后自动恢复；429 也触发熔断，4xx 客户端错误不触发
 
-### 代理核心 (第 148-272 行)
+### 代理核心 (第 186-478 行)
 - `ClaudeProxy`: 请求代理主类
 - `proxy_request()`: 代理请求入口，最多 3 次重试
-- `_stream_request()`: SSE 流式响应处理
+- `_record_usage()`: 记录 token 用量和延迟指标（端点级别 + 全局级别）
+- `_stream_request()`: SSE 流式响应处理，支持流内重试和 token 用量嗅探
 - `_normal_request()`: 普通 JSON 响应处理
+- `get_stats()`: 返回全局和端点统计数据
 - 请求路径: `{endpoint.api_base}/anthropic/v1/messages`
+- Thinking 参数自动转换: Opus 4.6 使用 `adaptive`（移除多余 `budget_tokens`）；旧模型将 `adaptive` 转为 `enabled` + 自动计算 `budget_tokens`
 
-### 配置管理 (第 277-308 行)
+### 配置管理 (第 481-516 行)
 - `load_config()`: 加载 YAML 配置
 - `expand_env_vars()`: 支持 `${VAR_NAME}` 环境变量语法
 
@@ -58,8 +62,9 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml claude-lb
 | `/v1/messages` | POST | 需要 | 主消息 API |
 | `/v1/messages/count_tokens` | POST | 不需要 | Token 估算 |
 | `/health` | GET | 不需要 | 健康检查 |
-| `/stats` | GET | 不需要 | 端点统计 |
-| `/reset` | POST | 不需要 | 重置熔断器 |
+| `/stats` | GET | 不需要 | 端点统计（JSON） |
+| `/stats/dashboard` | GET | 不需要 | 可视化监控面板（HTML） |
+| `/reset` | POST | 不需要 | 重置熔断器和统计数据 |
 
 ## 配置文件
 
