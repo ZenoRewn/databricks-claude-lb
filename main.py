@@ -254,12 +254,65 @@ class ClaudeProxy:
             original_model = body["model"]
             body["model"] = get_databricks_model(original_model)
         
-        # 移除 Databricks 不支持的字段（如新版 Claude Code 发送的 context_management 等）
-        unsupported_fields = ["context_management"]
+        # 移除 Databricks 不支持的顶层字段（如新版 Claude Code 发送的 context_management 等）
+        unsupported_fields = ["context_management", "output_config"]
         for field in unsupported_fields:
             if field in body:
                 logger.info(f"Removing unsupported field: {field}")
                 del body[field]
+
+        # 清理 tools 中 Databricks 不支持的嵌套字段
+        # Claude Code 2.1.69+ 新增了 defer_loading, input_examples 等字段
+        unsupported_tool_fields = ["defer_loading", "input_examples"]
+        if "tools" in body and isinstance(body["tools"], list):
+            cleaned_count = 0
+            for tool in body["tools"]:
+                if isinstance(tool, dict):
+                    for tf in unsupported_tool_fields:
+                        if tf in tool:
+                            del tool[tf]
+                            cleaned_count += 1
+                        # 也检查 custom 子对象（错误信息指向 tools.0.custom.defer_loading）
+                        if "custom" in tool and isinstance(tool["custom"], dict) and tf in tool["custom"]:
+                            del tool["custom"][tf]
+                            cleaned_count += 1
+            if cleaned_count > 0:
+                logger.info(f"Cleaned {cleaned_count} unsupported fields from tools")
+
+        # 清理 messages 中 Databricks 不支持的 content type
+        # Databricks 仅支持: document, image, search_result, text
+        # Claude Code 2.1.69+ 新增了 tool_reference 等类型
+        # 注意: tool_reference 可能嵌套在 tool_result.content 内部
+        # 错误路径示例: messages.3.content.0.tool_result.content.0
+        unsupported_content_types = {"tool_reference"}
+        if "messages" in body and isinstance(body["messages"], list):
+            for msg in body["messages"]:
+                if not isinstance(msg, dict):
+                    continue
+                content = msg.get("content")
+                if isinstance(content, list):
+                    # 清理顶层 content blocks
+                    original_len = len(content)
+                    msg["content"] = [
+                        block for block in content
+                        if not (isinstance(block, dict) and block.get("type") in unsupported_content_types)
+                    ]
+                    removed = original_len - len(msg["content"])
+                    if removed > 0:
+                        logger.info(f"Removed {removed} unsupported content blocks from message")
+                    # 清理 tool_result 内部嵌套的 content blocks
+                    for block in msg["content"]:
+                        if isinstance(block, dict) and block.get("type") == "tool_result":
+                            inner_content = block.get("content")
+                            if isinstance(inner_content, list):
+                                original_inner = len(inner_content)
+                                block["content"] = [
+                                    inner for inner in inner_content
+                                    if not (isinstance(inner, dict) and inner.get("type") in unsupported_content_types)
+                                ]
+                                inner_removed = original_inner - len(block["content"])
+                                if inner_removed > 0:
+                                    logger.info(f"Removed {inner_removed} unsupported content blocks from tool_result")
 
         # 处理 thinking 参数兼容性
         # Opus 4.6: 支持 adaptive（推荐），enabled + budget_tokens 已废弃
