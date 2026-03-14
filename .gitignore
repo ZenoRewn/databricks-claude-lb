@@ -33,6 +33,7 @@ ENV/
 # 本地测试
 .env
 .env.local
+test_api.sh
 
 # video 项目（如有）
 video/

@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-Databricks Claude Load Balancer - 一个用于 Claude Code 的智能负载均衡代理，将 Claude API 请求分发到多个 Databricks workspace 端点。使用 Databricks 原生 Anthropic 端点 (`/anthropic/v1/messages`) 直接透传请求。
+Databricks Claude Load Balancer - 一个智能负载均衡代理，支持：
+- **Databricks Claude**: 将 Claude API 请求分发到多个 Databricks workspace 端点（`/anthropic/v1/messages`）
+- **Azure OpenAI**: 将 OpenAI API 请求分发到多个 Azure OpenAI 区域端点（可选，支持 Responses API 和 Chat Completions API）
 
 ## 常用命令
 
@@ -32,39 +34,47 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml claude-lb
 - `claude-*-opus-*` → `databricks-claude-opus-4-6`（默认），支持显式指定 4-5/4-6
 - `claude-*-haiku-*` → `databricks-claude-haiku-4-5`
 
-### 负载均衡 (第 68-183 行)
-- `WorkspaceEndpoint`: 端点数据类，包含配置和运行时状态（含 token 用量、延迟追踪、按模型维度统计）
+### 负载均衡
+- `WorkspaceEndpoint`: Databricks 端点数据类
+- `AzureOpenAIEndpoint`: Azure OpenAI 端点数据类，含 `endpoint`（完整 Azure URL）和 `deployments` 列表用于按模型路由
 - `GlobalStats`: 全局统计数据类
 - `LoadBalancer`: 支持三种策略
   - `least_requests`: 最少活跃请求数
   - `round_robin`: 轮询
   - `random`: 随机
+- `select_endpoint()`: 全池选择（Databricks 用）
+- `select_endpoint_for_model(model)`: 按模型过滤后选择（Azure OpenAI 用）
 - 熔断器机制: 错误达阈值自动禁用端点，超时后自动恢复；429 也触发熔断，4xx 客户端错误不触发
 
-### 代理核心 (第 186-478 行)
-- `ClaudeProxy`: 请求代理主类
+### Databricks 代理 (ClaudeProxy)
 - `proxy_request()`: 代理请求入口，最多 3 次重试
-- `_record_usage()`: 记录 token 用量和延迟指标（端点级别 + 全局级别）
 - `_stream_request()`: SSE 流式响应处理，支持流内重试和 token 用量嗅探
 - `_normal_request()`: 普通 JSON 响应处理
-- `get_stats()`: 返回全局和端点统计数据
 - 请求路径: `{endpoint.api_base}/anthropic/v1/messages`
 - Thinking 参数自动转换: Opus 4.6 使用 `adaptive`（移除多余 `budget_tokens`）；旧模型将 `adaptive` 转为 `enabled` + 自动计算 `budget_tokens`
 
-### 配置管理 (第 481-516 行)
-- `load_config()`: 加载 YAML 配置
+### Azure OpenAI 代理 (AzureOpenAIProxy)
+- `proxy_responses()`: Responses API 代理（主路径），URL: `{endpoint}/openai/v1/responses`
+- `proxy_chat_completions()`: Chat Completions API 代理（降级路径），URL: `{endpoint}/openai/deployments/{model}/chat/completions`
+- Auth Header: `api-key: {endpoint.api_key}`
+- 端点选择通过 `select_endpoint_for_model()` 按模型过滤
+
+### 配置管理
+- `load_config()`: 加载 YAML 配置，返回 `(ClaudeProxy, Optional[AzureOpenAIProxy])`
 - `expand_env_vars()`: 支持 `${VAR_NAME}` 环境变量语法
 
 ## API 端点
 
 | 端点 | 方法 | 认证 | 说明 |
 |------|------|------|------|
-| `/v1/messages` | POST | 需要 | 主消息 API |
+| `/v1/messages` | POST | 需要 | Databricks Claude 消息 API |
 | `/v1/messages/count_tokens` | POST | 不需要 | Token 估算 |
+| `/v1/responses` | POST | 需要 | Azure OpenAI Responses API（需配置 azure_openai） |
+| `/v1/chat/completions` | POST | 需要 | Azure OpenAI Chat Completions API（需配置 azure_openai） |
 | `/health` | GET | 不需要 | 健康检查 |
-| `/stats` | GET | 不需要 | 端点统计（JSON） |
+| `/stats` | GET | 不需要 | 端点统计（含 Azure OpenAI，JSON） |
 | `/stats/dashboard` | GET | 不需要 | 可视化监控面板（HTML） |
-| `/reset` | POST | 不需要 | 重置熔断器和统计数据 |
+| `/reset` | POST | 不需要 | 重置所有端点的熔断器和统计数据 |
 
 ## 配置文件
 
@@ -83,6 +93,19 @@ endpoints:
     api_base: https://adb-xxx.azuredatabricks.net/serving-endpoints
     token: dapi_xxx               # Databricks 访问令牌，支持 ${ENV_VAR}
     weight: 1
+
+# Azure OpenAI 配置（可选）
+azure_openai:
+  load_balancer:                    # 可选，不填则使用全局 load_balancer 配置
+    strategy: least_requests
+  endpoints:
+    - name: eastus-region
+      endpoint: https://my-openai-eastus.openai.azure.com  # 完整 Azure 端点 URL
+      api_key: ${AZURE_KEY_EASTUS}  # 支持环境变量
+      deployments:                  # 该资源上可用的部署列表
+        - gpt-4o
+        - gpt-5
+      weight: 1
 ```
 
 ## 环境变量
@@ -90,3 +113,4 @@ endpoints:
 - `CONFIG_PATH`: 配置文件路径（默认 `config.yaml`）
 - `ANTHROPIC_BASE_URL`: Claude Code 需设为 `http://localhost:8000`
 - `ANTHROPIC_API_KEY`: Claude Code 需设为与 `config.yaml` 中 `api_key` 一致的值
+- `AZURE_KEY_*`: Azure OpenAI API 密钥（按区域配置）

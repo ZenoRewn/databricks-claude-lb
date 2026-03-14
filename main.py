@@ -84,12 +84,37 @@ class WorkspaceEndpoint:
     # Token 用量
     total_input_tokens: int = field(default=0, repr=False)
     total_output_tokens: int = field(default=0, repr=False)
+    total_cache_creation_tokens: int = field(default=0, repr=False)
+    total_cache_read_tokens: int = field(default=0, repr=False)
 
     # 延迟追踪
     total_response_time: float = field(default=0.0, repr=False)
     successful_requests: int = field(default=0, repr=False)
 
-    # 按模型维度统计: {"model_name": {"input_tokens": int, "output_tokens": int, "requests": int}}
+    # 按模型维度统计: {"model_name": {"input_tokens": int, "output_tokens": int, "cache_creation_tokens": int, "cache_read_tokens": int, "requests": int}}
+    model_stats: dict = field(default_factory=dict, repr=False)
+
+
+@dataclass
+class AzureOpenAIEndpoint:
+    name: str
+    endpoint: str   # 完整的 Azure 端点 URL，如 https://xxx.cognitiveservices.azure.com
+    api_key: str
+    deployments: list = field(default_factory=list)  # 可服务的模型/部署列表
+    weight: int = 1
+
+    # 运行时统计字段（与 WorkspaceEndpoint 保持一致）
+    active_requests: int = field(default=0, repr=False)
+    total_requests: int = field(default=0, repr=False)
+    total_errors: int = field(default=0, repr=False)
+    last_error_time: Optional[float] = field(default=None, repr=False)
+    circuit_open: bool = field(default=False, repr=False)
+    total_input_tokens: int = field(default=0, repr=False)
+    total_output_tokens: int = field(default=0, repr=False)
+    total_cache_creation_tokens: int = field(default=0, repr=False)
+    total_cache_read_tokens: int = field(default=0, repr=False)
+    total_response_time: float = field(default=0.0, repr=False)
+    successful_requests: int = field(default=0, repr=False)
     model_stats: dict = field(default_factory=dict, repr=False)
 
 
@@ -99,6 +124,8 @@ class GlobalStats:
     total_errors: int = 0
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    total_cache_creation_tokens: int = 0
+    total_cache_read_tokens: int = 0
     total_response_time: float = 0.0
     successful_requests: int = 0
     start_time: float = field(default_factory=time.time)
@@ -107,7 +134,7 @@ class GlobalStats:
 class LoadBalancer:
     def __init__(
         self,
-        endpoints: list[WorkspaceEndpoint],
+        endpoints: list,
         strategy: str = "least_requests",
         circuit_breaker_threshold: int = 5,
         circuit_breaker_timeout: float = 60,
@@ -173,7 +200,39 @@ class LoadBalancer:
             # 加权随机
             weights = [ep.weight for ep in available]
             return random.choices(available, weights=weights, k=1)[0]
-    
+
+    def select_endpoint_for_model(self, model: str):
+        """从可用端点中筛选支持指定模型的端点，再按策略选择"""
+        available = self.get_available_endpoints()
+        matched = [ep for ep in available if model in ep.deployments]
+        if not matched:
+            return None
+
+        if len(matched) == 1:
+            return matched[0]
+
+        if self.strategy == "least_requests":
+            min_active = min(ep.active_requests / ep.weight for ep in matched)
+            candidates = [ep for ep in matched if ep.active_requests / ep.weight == min_active]
+            if len(candidates) == 1:
+                return candidates[0]
+            min_total = min(ep.total_requests / ep.weight for ep in candidates)
+            finalists = [ep for ep in candidates if ep.total_requests / ep.weight == min_total]
+            return random.choice(finalists)
+        elif self.strategy == "round_robin":
+            total_weight = sum(ep.weight for ep in matched)
+            idx = self._rr_index % total_weight
+            self._rr_index += 1
+            cumulative = 0
+            for ep in matched:
+                cumulative += ep.weight
+                if idx < cumulative:
+                    return ep
+            return matched[-1]
+        else:
+            weights = [ep.weight for ep in matched]
+            return random.choices(matched, weights=weights, k=1)[0]
+
     async def on_request_start(self, endpoint: WorkspaceEndpoint):
         endpoint.active_requests += 1
         endpoint.total_requests += 1
@@ -191,25 +250,28 @@ class LoadBalancer:
                 logger.warning(f"Circuit breaker opened for {endpoint.name}")
     
     def get_stats(self) -> dict:
-        return {
-            "endpoints": [
-                {
-                    "name": ep.name,
-                    "active_requests": ep.active_requests,
-                    "total_requests": ep.total_requests,
-                    "total_errors": ep.total_errors,
-                    "successful_requests": ep.successful_requests,
-                    "error_rate": round(ep.total_errors / ep.total_requests * 100, 2) if ep.total_requests > 0 else 0,
-                    "circuit_open": ep.circuit_open,
-                    "total_input_tokens": ep.total_input_tokens,
-                    "total_output_tokens": ep.total_output_tokens,
-                    "total_tokens": ep.total_input_tokens + ep.total_output_tokens,
-                    "avg_response_time_ms": round(ep.total_response_time / ep.successful_requests * 1000, 1) if ep.successful_requests > 0 else 0,
-                    "model_stats": ep.model_stats,
-                }
-                for ep in self.endpoints
-            ]
-        }
+        endpoints_stats = []
+        for ep in self.endpoints:
+            stat = {
+                "name": ep.name,
+                "active_requests": ep.active_requests,
+                "total_requests": ep.total_requests,
+                "total_errors": ep.total_errors,
+                "successful_requests": ep.successful_requests,
+                "error_rate": round(ep.total_errors / ep.total_requests * 100, 2) if ep.total_requests > 0 else 0,
+                "circuit_open": ep.circuit_open,
+                "total_input_tokens": ep.total_input_tokens,
+                "total_output_tokens": ep.total_output_tokens,
+                "total_cache_creation_tokens": ep.total_cache_creation_tokens,
+                "total_cache_read_tokens": ep.total_cache_read_tokens,
+                "total_tokens": ep.total_input_tokens + ep.total_output_tokens,
+                "avg_response_time_ms": round(ep.total_response_time / ep.successful_requests * 1000, 1) if ep.successful_requests > 0 else 0,
+                "model_stats": ep.model_stats,
+            }
+            if hasattr(ep, "deployments"):
+                stat["deployments"] = ep.deployments
+            endpoints_stats.append(stat)
+        return {"endpoints": endpoints_stats}
 
 
 # ==================== Claude Proxy (使用原生 Anthropic 端点) ====================
@@ -221,21 +283,28 @@ class ClaudeProxy:
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
         self.global_stats = GlobalStats()
 
-    def _record_usage(self, endpoint: WorkspaceEndpoint, model: str, input_tokens: int, output_tokens: int, elapsed: float):
+    def _record_usage(self, endpoint: WorkspaceEndpoint, model: str, input_tokens: int, output_tokens: int, elapsed: float,
+                      cache_creation_tokens: int = 0, cache_read_tokens: int = 0):
         """记录 token 用量和延迟指标"""
         # 端点级别
         endpoint.total_input_tokens += input_tokens
         endpoint.total_output_tokens += output_tokens
+        endpoint.total_cache_creation_tokens += cache_creation_tokens
+        endpoint.total_cache_read_tokens += cache_read_tokens
         endpoint.total_response_time += elapsed
         endpoint.successful_requests += 1
         if model not in endpoint.model_stats:
-            endpoint.model_stats[model] = {"input_tokens": 0, "output_tokens": 0, "requests": 0}
+            endpoint.model_stats[model] = {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0, "requests": 0}
         endpoint.model_stats[model]["input_tokens"] += input_tokens
         endpoint.model_stats[model]["output_tokens"] += output_tokens
+        endpoint.model_stats[model]["cache_creation_tokens"] += cache_creation_tokens
+        endpoint.model_stats[model]["cache_read_tokens"] += cache_read_tokens
         endpoint.model_stats[model]["requests"] += 1
         # 全局级别
         self.global_stats.total_input_tokens += input_tokens
         self.global_stats.total_output_tokens += output_tokens
+        self.global_stats.total_cache_creation_tokens += cache_creation_tokens
+        self.global_stats.total_cache_read_tokens += cache_read_tokens
         self.global_stats.total_response_time += elapsed
         self.global_stats.successful_requests += 1
         self.global_stats.total_requests += 1
@@ -415,10 +484,13 @@ class ClaudeProxy:
         usage = resp_json.get("usage", {})
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
-        self._record_usage(endpoint, model, input_tokens, output_tokens, elapsed)
+        cache_creation_tokens = usage.get("cache_creation_input_tokens", 0)
+        cache_read_tokens = usage.get("cache_read_input_tokens", 0)
+        self._record_usage(endpoint, model, input_tokens, output_tokens, elapsed,
+                          cache_creation_tokens=cache_creation_tokens, cache_read_tokens=cache_read_tokens)
 
         return JSONResponse(content=resp_json, status_code=response.status_code)
-    
+
     async def _stream_request(self, endpoint, url, body, headers, max_retries: int = 3, model: str = "unknown", start_time: float = 0) -> StreamingResponse:
         """流式请求 - 直接透传 Databricks 的 Anthropic 格式响应，支持重试"""
 
@@ -430,6 +502,8 @@ class ClaudeProxy:
             current_headers = headers
             input_tokens = 0
             output_tokens = 0
+            cache_creation_tokens = 0
+            cache_read_tokens = 0
 
             for attempt in range(max_retries):
                 success = False
@@ -487,7 +561,10 @@ class ClaudeProxy:
                                         if line.startswith("data: "):
                                             data = json.loads(line[6:])
                                             if data.get("type") == "message_start":
-                                                input_tokens = data.get("message", {}).get("usage", {}).get("input_tokens", 0)
+                                                msg_usage = data.get("message", {}).get("usage", {})
+                                                input_tokens = msg_usage.get("input_tokens", 0)
+                                                cache_creation_tokens = msg_usage.get("cache_creation_input_tokens", 0)
+                                                cache_read_tokens = msg_usage.get("cache_read_input_tokens", 0)
                                             elif data.get("type") == "message_delta":
                                                 output_tokens = data.get("usage", {}).get("output_tokens", 0)
                             if len(buffer) > 65536:
@@ -498,7 +575,8 @@ class ClaudeProxy:
                     success = True
                     await proxy_self.load_balancer.on_request_end(current_endpoint, success=True)
                     elapsed = time.time() - start_time
-                    proxy_self._record_usage(current_endpoint, model, input_tokens, output_tokens, elapsed)
+                    proxy_self._record_usage(current_endpoint, model, input_tokens, output_tokens, elapsed,
+                                            cache_creation_tokens=cache_creation_tokens, cache_read_tokens=cache_read_tokens)
                     return
 
                 except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError) as e:
@@ -552,6 +630,320 @@ class ClaudeProxy:
                 "total_errors": gs.total_errors,
                 "total_input_tokens": gs.total_input_tokens,
                 "total_output_tokens": gs.total_output_tokens,
+                "total_cache_creation_tokens": gs.total_cache_creation_tokens,
+                "total_cache_read_tokens": gs.total_cache_read_tokens,
+                "total_tokens": gs.total_input_tokens + gs.total_output_tokens,
+                "avg_response_time_ms": round(gs.total_response_time / gs.successful_requests * 1000, 1) if gs.successful_requests > 0 else 0,
+                "requests_per_minute": round(gs.total_requests / (uptime / 60), 2) if uptime > 0 else 0,
+            },
+            **self.load_balancer.get_stats(),
+        }
+
+
+# ==================== Azure OpenAI Proxy ====================
+
+class AzureOpenAIProxy:
+    def __init__(self, load_balancer: LoadBalancer, api_key: str):
+        self.load_balancer = load_balancer
+        self.api_key = api_key
+        self.client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
+        self.global_stats = GlobalStats()
+
+    def verify_api_key(self, key: str) -> bool:
+        return key == self.api_key
+
+    async def close(self):
+        await self.client.aclose()
+
+    def _record_usage(self, endpoint: AzureOpenAIEndpoint, model: str, input_tokens: int, output_tokens: int, elapsed: float,
+                      cache_creation_tokens: int = 0, cache_read_tokens: int = 0):
+        """记录 token 用量和延迟指标"""
+        endpoint.total_input_tokens += input_tokens
+        endpoint.total_output_tokens += output_tokens
+        endpoint.total_cache_creation_tokens += cache_creation_tokens
+        endpoint.total_cache_read_tokens += cache_read_tokens
+        endpoint.total_response_time += elapsed
+        endpoint.successful_requests += 1
+        if model not in endpoint.model_stats:
+            endpoint.model_stats[model] = {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0, "requests": 0}
+        endpoint.model_stats[model]["input_tokens"] += input_tokens
+        endpoint.model_stats[model]["output_tokens"] += output_tokens
+        endpoint.model_stats[model]["cache_creation_tokens"] += cache_creation_tokens
+        endpoint.model_stats[model]["cache_read_tokens"] += cache_read_tokens
+        endpoint.model_stats[model]["requests"] += 1
+        self.global_stats.total_input_tokens += input_tokens
+        self.global_stats.total_output_tokens += output_tokens
+        self.global_stats.total_cache_creation_tokens += cache_creation_tokens
+        self.global_stats.total_cache_read_tokens += cache_read_tokens
+        self.global_stats.total_response_time += elapsed
+        self.global_stats.successful_requests += 1
+        self.global_stats.total_requests += 1
+
+    async def proxy_responses(self, body: dict, stream: bool = False):
+        """代理 Azure OpenAI Responses API"""
+        model = body.get("model", "unknown")
+        max_retries = 3
+        last_error = None
+        start_time = time.time()
+
+        for attempt in range(max_retries):
+            endpoint = self.load_balancer.select_endpoint_for_model(model)
+            if not endpoint:
+                raise HTTPException(status_code=404, detail={"error": {"message": f"No endpoint available for model '{model}'"}})
+
+            await self.load_balancer.on_request_start(endpoint)
+            url = f"{endpoint.endpoint}/openai/v1/responses"
+            headers = {
+                "api-key": endpoint.api_key,
+                "Content-Type": "application/json",
+            }
+
+            logger.info(f"[Azure Responses][{model}] -> {endpoint.name} (attempt {attempt + 1})")
+
+            try:
+                if stream:
+                    return await self._stream_response(endpoint, url, body, headers, model, "responses", start_time)
+                else:
+                    return await self._normal_request(endpoint, url, body, headers, model, "responses", start_time)
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                self.global_stats.total_errors += 1
+                is_client_error = 400 <= e.response.status_code < 500 and e.response.status_code != 429
+                await self.load_balancer.on_request_end(endpoint, success=False, is_client_error=is_client_error)
+                if e.response.status_code in (429, 500, 502, 503, 504):
+                    logger.warning(f"{endpoint.name} returned {e.response.status_code}, retrying...")
+                    await asyncio.sleep(min(2 ** attempt, 8))
+                    continue
+                else:
+                    try:
+                        error_body = e.response.json()
+                    except Exception:
+                        error_body = {"error": {"message": e.response.text}}
+                    raise HTTPException(status_code=e.response.status_code, detail=error_body)
+            except Exception as e:
+                last_error = e
+                self.global_stats.total_errors += 1
+                logger.error(f"{endpoint.name} failed: {e}")
+                await self.load_balancer.on_request_end(endpoint, success=False)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(min(2 ** attempt, 8))
+                    continue
+
+        raise HTTPException(status_code=503, detail={"error": {"message": f"All retries failed: {last_error}"}})
+
+    async def proxy_chat_completions(self, body: dict, stream: bool = False):
+        """代理 Azure OpenAI Chat Completions API"""
+        model = body.get("model", "unknown")
+        max_retries = 3
+        last_error = None
+        start_time = time.time()
+
+        for attempt in range(max_retries):
+            endpoint = self.load_balancer.select_endpoint_for_model(model)
+            if not endpoint:
+                raise HTTPException(status_code=404, detail={"error": {"message": f"No endpoint available for model '{model}'"}})
+
+            await self.load_balancer.on_request_start(endpoint)
+            url = f"{endpoint.endpoint}/openai/deployments/{model}/chat/completions?api-version=2024-10-21"
+            headers = {
+                "api-key": endpoint.api_key,
+                "Content-Type": "application/json",
+            }
+
+            # 流式请求注入 stream_options 以获取 usage
+            if stream and "stream_options" not in body:
+                body["stream_options"] = {"include_usage": True}
+
+            logger.info(f"[Azure Chat][{model}] -> {endpoint.name} (attempt {attempt + 1})")
+
+            try:
+                if stream:
+                    return await self._stream_response(endpoint, url, body, headers, model, "chat", start_time)
+                else:
+                    return await self._normal_request(endpoint, url, body, headers, model, "chat", start_time)
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                self.global_stats.total_errors += 1
+                is_client_error = 400 <= e.response.status_code < 500 and e.response.status_code != 429
+                await self.load_balancer.on_request_end(endpoint, success=False, is_client_error=is_client_error)
+                if e.response.status_code in (429, 500, 502, 503, 504):
+                    logger.warning(f"{endpoint.name} returned {e.response.status_code}, retrying...")
+                    await asyncio.sleep(min(2 ** attempt, 8))
+                    continue
+                else:
+                    try:
+                        error_body = e.response.json()
+                    except Exception:
+                        error_body = {"error": {"message": e.response.text}}
+                    raise HTTPException(status_code=e.response.status_code, detail=error_body)
+            except Exception as e:
+                last_error = e
+                self.global_stats.total_errors += 1
+                logger.error(f"{endpoint.name} failed: {e}")
+                await self.load_balancer.on_request_end(endpoint, success=False)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(min(2 ** attempt, 8))
+                    continue
+
+        raise HTTPException(status_code=503, detail={"error": {"message": f"All retries failed: {last_error}"}})
+
+    async def _normal_request(self, endpoint, url, body, headers, model: str, api_type: str, start_time: float) -> JSONResponse:
+        """非流式请求"""
+        response = await self.client.post(url, json=body, headers=headers)
+        response.raise_for_status()
+        await self.load_balancer.on_request_end(endpoint, success=True)
+
+        elapsed = time.time() - start_time
+        resp_json = response.json()
+        usage = resp_json.get("usage", {})
+        if api_type == "chat":
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+            cache_read_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+        else:
+            input_tokens = usage.get("input_tokens", 0)
+            output_tokens = usage.get("output_tokens", 0)
+            cache_read_tokens = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
+        self._record_usage(endpoint, model, input_tokens, output_tokens, elapsed,
+                          cache_read_tokens=cache_read_tokens)
+
+        return JSONResponse(content=resp_json, status_code=response.status_code)
+
+    async def _stream_response(self, endpoint, url, body, headers, model: str, api_type: str, start_time: float) -> StreamingResponse:
+        """流式请求 - 透传 SSE，支持流内重试"""
+
+        proxy_self = self
+        max_retries = 3
+
+        async def stream_generator():
+            current_endpoint = endpoint
+            current_url = url
+            current_headers = headers
+            input_tokens = 0
+            output_tokens = 0
+            cache_read_tokens = 0
+
+            for attempt in range(max_retries):
+                try:
+                    req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
+                    response = await proxy_self.client.send(req, stream=True)
+
+                    if response.status_code >= 400:
+                        error_body = await response.aread()
+                        is_client_error = 400 <= response.status_code < 500 and response.status_code != 429
+                        try:
+                            error_json = json.loads(error_body)
+                            error_msg = json.dumps(error_json)
+                        except Exception:
+                            error_msg = error_body.decode("utf-8") if isinstance(error_body, bytes) else str(error_body)
+
+                        logger.error(f"Azure stream failed ({response.status_code}): {error_msg}")
+                        await proxy_self.load_balancer.on_request_end(current_endpoint, success=False, is_client_error=is_client_error)
+
+                        if response.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                            logger.warning(f"{current_endpoint.name} returned {response.status_code}, retrying stream...")
+                            await asyncio.sleep(min(2 ** attempt, 8))
+                            new_endpoint = proxy_self.load_balancer.select_endpoint_for_model(model)
+                            if new_endpoint:
+                                current_endpoint = new_endpoint
+                                if api_type == "responses":
+                                    current_url = f"{current_endpoint.endpoint}/openai/v1/responses"
+                                else:
+                                    current_url = f"{current_endpoint.endpoint}/openai/deployments/{model}/chat/completions?api-version=2024-10-21"
+                                current_headers = {"api-key": current_endpoint.api_key, "Content-Type": "application/json"}
+                                await proxy_self.load_balancer.on_request_start(current_endpoint)
+                                continue
+
+                        yield f"data: {json.dumps({'error': {'message': error_msg}})}\n\n".encode()
+                        return
+
+                    # 透传响应，同时嗅探 usage
+                    buffer = ""
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+                        try:
+                            buffer += chunk.decode("utf-8", errors="ignore")
+                            while "\n\n" in buffer:
+                                event_str, buffer = buffer.split("\n\n", 1)
+                                for line in event_str.split("\n"):
+                                    if not line.startswith("data: ") or line.strip() == "data: [DONE]":
+                                        continue
+                                    data = json.loads(line[6:])
+                                    if api_type == "responses":
+                                        # Responses API: usage 在 response.completed 事件中
+                                        if data.get("type") == "response.completed":
+                                            usage = data.get("response", {}).get("usage", {})
+                                            input_tokens = usage.get("input_tokens", 0)
+                                            output_tokens = usage.get("output_tokens", 0)
+                                            cache_read_tokens = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
+                                    else:
+                                        # Chat Completions: usage 在末尾 chunk
+                                        usage = data.get("usage")
+                                        if usage:
+                                            input_tokens = usage.get("prompt_tokens", 0)
+                                            output_tokens = usage.get("completion_tokens", 0)
+                                            cache_read_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+                                if len(buffer) > 65536:
+                                    buffer = ""
+                        except Exception:
+                            pass
+
+                    await proxy_self.load_balancer.on_request_end(current_endpoint, success=True)
+                    elapsed = time.time() - start_time
+                    proxy_self._record_usage(current_endpoint, model, input_tokens, output_tokens, elapsed,
+                                            cache_read_tokens=cache_read_tokens)
+                    return
+
+                except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError) as e:
+                    error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
+                    logger.error(f"Azure stream network error on {current_endpoint.name}: {error_detail}")
+                    await proxy_self.load_balancer.on_request_end(current_endpoint, success=False)
+
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(min(2 ** attempt, 8))
+                        new_endpoint = proxy_self.load_balancer.select_endpoint_for_model(model)
+                        if new_endpoint:
+                            current_endpoint = new_endpoint
+                            if api_type == "responses":
+                                current_url = f"{current_endpoint.endpoint}/openai/v1/responses"
+                            else:
+                                current_url = f"{current_endpoint.endpoint}/openai/deployments/{model}/chat/completions?api-version=2024-10-21"
+                            current_headers = {"api-key": current_endpoint.api_key, "Content-Type": "application/json"}
+                            await proxy_self.load_balancer.on_request_start(current_endpoint)
+                            continue
+
+                    yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\n".encode()
+                    return
+
+                except Exception as e:
+                    error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
+                    logger.error(f"Azure stream error: {error_detail}")
+                    await proxy_self.load_balancer.on_request_end(current_endpoint, success=False)
+                    yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\n".encode()
+                    return
+
+        return StreamingResponse(
+            stream_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+        )
+
+    def get_stats(self) -> dict:
+        gs = self.global_stats
+        uptime = time.time() - gs.start_time
+        return {
+            "global": {
+                "uptime_seconds": round(uptime, 1),
+                "total_requests": gs.total_requests,
+                "total_errors": gs.total_errors,
+                "total_input_tokens": gs.total_input_tokens,
+                "total_output_tokens": gs.total_output_tokens,
+                "total_cache_creation_tokens": gs.total_cache_creation_tokens,
+                "total_cache_read_tokens": gs.total_cache_read_tokens,
                 "total_tokens": gs.total_input_tokens + gs.total_output_tokens,
                 "avg_response_time_ms": round(gs.total_response_time / gs.successful_requests * 1000, 1) if gs.successful_requests > 0 else 0,
                 "requests_per_minute": round(gs.total_requests / (uptime / 60), 2) if uptime > 0 else 0,
@@ -569,13 +961,15 @@ def expand_env_vars(value: str) -> str:
     return re.sub(pattern, replace, value)
 
 
-def load_config(config_path: str = "config.yaml") -> ClaudeProxy:
+def load_config(config_path: str = "config.yaml") -> tuple:
+    """返回 (ClaudeProxy, Optional[AzureOpenAIProxy])"""
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
-    
+
     lb_config = config.get("load_balancer", {})
     api_key = expand_env_vars(config.get("auth", {}).get("api_key", ""))
-    
+
+    # Databricks 端点
     endpoints = []
     for ep in config.get("endpoints", []):
         endpoints.append(WorkspaceEndpoint(
@@ -584,32 +978,62 @@ def load_config(config_path: str = "config.yaml") -> ClaudeProxy:
             token=expand_env_vars(ep["token"]),
             weight=ep.get("weight", 1),
         ))
-        logger.info(f"Loaded endpoint: {ep['name']}")
-    
+        logger.info(f"Loaded Databricks endpoint: {ep['name']}")
+
     load_balancer = LoadBalancer(
         endpoints=endpoints,
         strategy=lb_config.get("strategy", "least_requests"),
         circuit_breaker_threshold=lb_config.get("circuit_breaker_threshold", 5),
         circuit_breaker_timeout=lb_config.get("circuit_breaker_timeout", 60),
     )
-    
-    return ClaudeProxy(load_balancer, api_key)
+    claude_proxy = ClaudeProxy(load_balancer, api_key)
+
+    # Azure OpenAI 端点（可选）
+    azure_proxy = None
+    azure_config = config.get("azure_openai")
+    if azure_config:
+        azure_lb_config = azure_config.get("load_balancer", lb_config)
+        azure_endpoints = []
+        for ep in azure_config.get("endpoints", []):
+            azure_endpoints.append(AzureOpenAIEndpoint(
+                name=ep["name"],
+                endpoint=ep["endpoint"],
+                api_key=expand_env_vars(ep["api_key"]),
+                deployments=ep.get("deployments", []),
+                weight=ep.get("weight", 1),
+            ))
+            logger.info(f"Loaded Azure OpenAI endpoint: {ep['name']} (deployments: {ep.get('deployments', [])})")
+
+        azure_lb = LoadBalancer(
+            endpoints=azure_endpoints,
+            strategy=azure_lb_config.get("strategy", "least_requests"),
+            circuit_breaker_threshold=azure_lb_config.get("circuit_breaker_threshold", 5),
+            circuit_breaker_timeout=azure_lb_config.get("circuit_breaker_timeout", 60),
+        )
+        azure_proxy = AzureOpenAIProxy(azure_lb, api_key)
+
+    return claude_proxy, azure_proxy
 
 
 # ==================== FastAPI App ====================
 
 proxy: Optional[ClaudeProxy] = None
+azure_proxy: Optional[AzureOpenAIProxy] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global proxy
+    global proxy, azure_proxy
     config_path = os.getenv("CONFIG_PATH", "config.yaml")
-    proxy = load_config(config_path)
-    logger.info(f"Proxy started with {len(proxy.load_balancer.endpoints)} endpoints (using native Anthropic endpoint)")
+    proxy, azure_proxy = load_config(config_path)
+    logger.info(f"Proxy started with {len(proxy.load_balancer.endpoints)} Databricks endpoints")
+    if azure_proxy:
+        logger.info(f"Azure OpenAI proxy enabled with {len(azure_proxy.load_balancer.endpoints)} endpoints")
     yield
     if proxy:
         await proxy.close()
+    if azure_proxy:
+        await azure_proxy.close()
 
 
 app = FastAPI(title="Databricks Claude Proxy (Native Anthropic)", lifespan=lifespan)
@@ -659,6 +1083,41 @@ async def count_tokens(request: Request):
     return {"input_tokens": estimated_tokens}
 
 
+def _extract_api_key(request: Request, x_api_key: Optional[str] = None) -> str:
+    auth_header = request.headers.get("authorization", "")
+    return x_api_key or (auth_header[7:] if auth_header.startswith("Bearer ") else "")
+
+
+@app.post("/v1/responses")
+async def responses(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    if not azure_proxy:
+        raise HTTPException(status_code=404, detail={"error": {"message": "Azure OpenAI is not configured"}})
+
+    actual_key = _extract_api_key(request, x_api_key)
+    if not azure_proxy.verify_api_key(actual_key):
+        raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
+
+    body = await request.json()
+    stream = body.get("stream", False)
+    logger.info(f"[Azure Responses] model={body.get('model')}, stream={stream}")
+    return await azure_proxy.proxy_responses(body, stream=stream)
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    if not azure_proxy:
+        raise HTTPException(status_code=404, detail={"error": {"message": "Azure OpenAI is not configured"}})
+
+    actual_key = _extract_api_key(request, x_api_key)
+    if not azure_proxy.verify_api_key(actual_key):
+        raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
+
+    body = await request.json()
+    stream = body.get("stream", False)
+    logger.info(f"[Azure Chat] model={body.get('model')}, stream={stream}")
+    return await azure_proxy.proxy_chat_completions(body, stream=stream)
+
+
 @app.post("/api/event_logging/batch")
 async def event_logging():
     return {"status": "ok"}
@@ -671,7 +1130,10 @@ async def health():
 
 @app.get("/stats")
 async def stats():
-    return proxy.get_stats()
+    result = proxy.get_stats()
+    if azure_proxy:
+        result["azure_openai"] = azure_proxy.get_stats()
+    return result
 
 
 @app.post("/reset")
@@ -681,10 +1143,24 @@ async def reset():
         ep.total_errors = 0
         ep.total_input_tokens = 0
         ep.total_output_tokens = 0
+        ep.total_cache_creation_tokens = 0
+        ep.total_cache_read_tokens = 0
         ep.total_response_time = 0.0
         ep.successful_requests = 0
         ep.model_stats = {}
     proxy.global_stats = GlobalStats()
+    if azure_proxy:
+        for ep in azure_proxy.load_balancer.endpoints:
+            ep.circuit_open = False
+            ep.total_errors = 0
+            ep.total_input_tokens = 0
+            ep.total_output_tokens = 0
+            ep.total_cache_creation_tokens = 0
+            ep.total_cache_read_tokens = 0
+            ep.total_response_time = 0.0
+            ep.successful_requests = 0
+            ep.model_stats = {}
+        azure_proxy.global_stats = GlobalStats()
     return {"status": "reset"}
 
 
@@ -721,22 +1197,43 @@ tr:hover td{background:#1e293b80}
 .model-section{margin-bottom:24px}
 .model-section h2{font-size:1.1rem;margin-bottom:10px;color:#cbd5e1}
 .error-banner{background:#7f1d1d40;color:#fca5a5;padding:12px;border-radius:8px;margin-bottom:16px;display:none}
+.tab-bar{display:flex;border-bottom:2px solid #334155;margin-bottom:24px}
+.tab-btn{background:none;border:none;padding:12px 24px;font-size:.95rem;font-weight:600;color:#64748b;cursor:pointer;border-bottom:3px solid transparent;margin-bottom:-2px;transition:color .15s,border-color .15s;font-family:inherit}
+.tab-btn:hover{color:#94a3b8}
+.tab-btn.active{color:#60a5fa;border-bottom-color:#60a5fa}
+.tab-panel{display:none}
+.tab-panel.active{display:block}
+.info-box{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:32px;text-align:center;color:#94a3b8;font-size:1rem;margin-top:24px}
 </style>
 </head>
 <body>
 <h1>Databricks Claude LB Dashboard</h1>
 <div class="refresh-info" id="refreshInfo">Updating...</div>
 <div class="error-banner" id="errorBanner"></div>
+<div class="tab-bar">
+  <button class="tab-btn active" data-tab="anthropic" onclick="switchTab('anthropic')">Anthropic Models</button>
+  <button class="tab-btn" data-tab="azure" onclick="switchTab('azure')">Azure OpenAI Models</button>
+</div>
+<div class="tab-panel active" id="tab-anthropic">
 <div class="global-grid" id="globalGrid"></div>
-<h2 style="color:#cbd5e1;margin-bottom:10px">Endpoints</h2>
+<h2 style="color:#cbd5e1;margin-bottom:10px">Databricks Endpoints</h2>
 <div style="overflow-x:auto"><table id="endpointTable"><thead><tr>
 <th>Name</th><th>Active</th><th>Total</th><th>Success</th><th>Errors</th><th>Error Rate</th><th>Circuit</th>
-<th>Input Tokens</th><th>Output Tokens</th><th>Total Tokens</th><th>Avg Latency</th>
+<th>Input Tokens</th><th>Output Tokens</th><th>Cache Create</th><th>Cache Read</th><th>Total Tokens</th><th>Avg Latency</th>
 </tr></thead><tbody id="endpointBody"></tbody></table></div>
-<div class="model-section"><h2>Model Stats</h2><div id="modelStats"></div></div>
+<div class="model-section"><h2>Model Stats (Databricks)</h2><div id="modelStats"></div></div>
+</div>
+<div class="tab-panel" id="tab-azure"><div id="azureContent"></div></div>
 <script>
 function fmt(n){if(n>=1e6)return(n/1e6).toFixed(2)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return n.toString()}
 function fmtTime(s){if(s>=3600)return(s/3600).toFixed(1)+'h';if(s>=60)return(s/60).toFixed(1)+'m';return s.toFixed(0)+'s'}
+
+let activeTab='anthropic';
+function switchTab(t){
+  activeTab=t;
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));
+  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.toggle('active',p.id==='tab-'+t));
+}
 
 async function refresh(){
   try{
@@ -751,6 +1248,8 @@ async function refresh(){
       {label:'Total Requests',value:fmt(g.total_requests),cls:'blue'},
       {label:'Input Tokens',value:fmt(g.total_input_tokens),cls:''},
       {label:'Output Tokens',value:fmt(g.total_output_tokens),cls:''},
+      {label:'Cache Create',value:fmt(g.total_cache_creation_tokens||0),cls:''},
+      {label:'Cache Read',value:fmt(g.total_cache_read_tokens||0),cls:''},
       {label:'Total Tokens',value:fmt(g.total_tokens),cls:'amber'},
       {label:'Avg Latency',value:g.avg_response_time_ms.toFixed(0)+'ms',cls:''},
       {label:'RPM',value:g.requests_per_minute.toFixed(2),cls:'green'},
@@ -769,22 +1268,76 @@ async function refresh(){
       '<td><span class="badge '+(e.circuit_open?'open':'ok')+'">'+(e.circuit_open?'OPEN':'OK')+'</span></td>'+
       '<td>'+fmt(e.total_input_tokens)+'</td>'+
       '<td>'+fmt(e.total_output_tokens)+'</td>'+
+      '<td>'+fmt(e.total_cache_creation_tokens||0)+'</td>'+
+      '<td>'+fmt(e.total_cache_read_tokens||0)+'</td>'+
       '<td>'+fmt(e.total_tokens)+'</td>'+
       '<td>'+e.avg_response_time_ms.toFixed(0)+'ms</td>'+
     '</tr>').join('');
 
-    // Model stats aggregation
+    // Model stats aggregation (Databricks)
     const models={};
     d.endpoints.forEach(e=>{Object.entries(e.model_stats||{}).forEach(([m,s])=>{
-      if(!models[m])models[m]={input_tokens:0,output_tokens:0,requests:0};
-      models[m].input_tokens+=s.input_tokens;models[m].output_tokens+=s.output_tokens;models[m].requests+=s.requests;
+      if(!models[m])models[m]={input_tokens:0,output_tokens:0,cache_creation_tokens:0,cache_read_tokens:0,requests:0};
+      models[m].input_tokens+=s.input_tokens;models[m].output_tokens+=s.output_tokens;models[m].cache_creation_tokens+=(s.cache_creation_tokens||0);models[m].cache_read_tokens+=(s.cache_read_tokens||0);models[m].requests+=s.requests;
     })});
     const ms=document.getElementById('modelStats');
     const entries=Object.entries(models);
-    if(entries.length===0){ms.innerHTML='<div style="color:#64748b">No data yet</div>';return;}
-    ms.innerHTML='<table><thead><tr><th>Model</th><th>Requests</th><th>Input Tokens</th><th>Output Tokens</th><th>Total Tokens</th></tr></thead><tbody>'+
-      entries.map(([m,s])=>'<tr><td>'+m+'</td><td>'+fmt(s.requests)+'</td><td>'+fmt(s.input_tokens)+'</td><td>'+fmt(s.output_tokens)+'</td><td>'+fmt(s.input_tokens+s.output_tokens)+'</td></tr>').join('')+
-    '</tbody></table>';
+    if(entries.length===0){ms.innerHTML='<div style="color:#64748b">No data yet</div>';}
+    else{ms.innerHTML='<table><thead><tr><th>Model</th><th>Requests</th><th>Input Tokens</th><th>Output Tokens</th><th>Cache Create</th><th>Cache Read</th><th>Total Tokens</th></tr></thead><tbody>'+
+      entries.map(([m,s])=>'<tr><td>'+m+'</td><td>'+fmt(s.requests)+'</td><td>'+fmt(s.input_tokens)+'</td><td>'+fmt(s.output_tokens)+'</td><td>'+fmt(s.cache_creation_tokens)+'</td><td>'+fmt(s.cache_read_tokens)+'</td><td>'+fmt(s.input_tokens+s.output_tokens)+'</td></tr>').join('')+
+    '</tbody></table>';}
+
+    // Azure OpenAI section
+    const azContent=document.getElementById('azureContent');
+    if(d.azure_openai){
+      const ag=d.azure_openai.global;
+      let html='<div class="global-grid">'+
+        [{label:'Requests',value:fmt(ag.total_requests),cls:'blue'},
+         {label:'Input Tokens',value:fmt(ag.total_input_tokens),cls:''},
+         {label:'Output Tokens',value:fmt(ag.total_output_tokens),cls:''},
+         {label:'Cache Create',value:fmt(ag.total_cache_creation_tokens||0),cls:''},
+         {label:'Cache Read',value:fmt(ag.total_cache_read_tokens||0),cls:''},
+         {label:'Total Tokens',value:fmt(ag.total_tokens),cls:'amber'},
+         {label:'Avg Latency',value:ag.avg_response_time_ms.toFixed(0)+'ms',cls:''},
+         {label:'RPM',value:ag.requests_per_minute.toFixed(2),cls:'green'}
+        ].map(c=>'<div class="card"><div class="label">'+c.label+'</div><div class="value '+(c.cls||'')+'">'+c.value+'</div></div>').join('')+'</div>';
+
+      html+='<h2 style="color:#cbd5e1;margin-bottom:10px">Azure OpenAI Endpoints</h2>'+
+        '<div style="overflow-x:auto"><table><thead><tr>'+
+        '<th>Name</th><th>Deployments</th><th>Active</th><th>Total</th><th>Success</th><th>Errors</th><th>Error Rate</th><th>Circuit</th>'+
+        '<th>Input Tokens</th><th>Output Tokens</th><th>Cache Create</th><th>Cache Read</th><th>Total Tokens</th><th>Avg Latency</th>'+
+        '</tr></thead><tbody>'+
+        (d.azure_openai.endpoints||[]).map(e=>'<tr>'+
+          '<td><strong>'+e.name+'</strong></td>'+
+          '<td style="font-size:.75rem;color:#94a3b8">'+(e.deployments||[]).join(', ')+'</td>'+
+          '<td>'+e.active_requests+'</td>'+
+          '<td>'+fmt(e.total_requests)+'</td>'+
+          '<td>'+fmt(e.successful_requests)+'</td>'+
+          '<td>'+e.total_errors+'</td>'+
+          '<td>'+e.error_rate+'%</td>'+
+          '<td><span class="badge '+(e.circuit_open?'open':'ok')+'">'+(e.circuit_open?'OPEN':'OK')+'</span></td>'+
+          '<td>'+fmt(e.total_input_tokens)+'</td>'+
+          '<td>'+fmt(e.total_output_tokens)+'</td>'+
+          '<td>'+fmt(e.total_cache_creation_tokens||0)+'</td>'+
+          '<td>'+fmt(e.total_cache_read_tokens||0)+'</td>'+
+          '<td>'+fmt(e.total_tokens)+'</td>'+
+          '<td>'+e.avg_response_time_ms.toFixed(0)+'ms</td>'+
+        '</tr>').join('')+'</tbody></table></div>';
+
+      const azModels={};
+      (d.azure_openai.endpoints||[]).forEach(e=>{Object.entries(e.model_stats||{}).forEach(([m,s])=>{
+        if(!azModels[m])azModels[m]={input_tokens:0,output_tokens:0,cache_creation_tokens:0,cache_read_tokens:0,requests:0};
+        azModels[m].input_tokens+=s.input_tokens;azModels[m].output_tokens+=s.output_tokens;azModels[m].cache_creation_tokens+=(s.cache_creation_tokens||0);azModels[m].cache_read_tokens+=(s.cache_read_tokens||0);azModels[m].requests+=s.requests;
+      })});
+      const azEntries=Object.entries(azModels);
+      html+='<div class="model-section"><h2>Model Stats (Azure OpenAI)</h2>';
+      if(azEntries.length===0){html+='<div style="color:#64748b">No data yet</div>';}
+      else{html+='<table><thead><tr><th>Model</th><th>Requests</th><th>Input Tokens</th><th>Output Tokens</th><th>Cache Create</th><th>Cache Read</th><th>Total Tokens</th></tr></thead><tbody>'+
+        azEntries.map(([m,s])=>'<tr><td>'+m+'</td><td>'+fmt(s.requests)+'</td><td>'+fmt(s.input_tokens)+'</td><td>'+fmt(s.output_tokens)+'</td><td>'+fmt(s.cache_creation_tokens)+'</td><td>'+fmt(s.cache_read_tokens)+'</td><td>'+fmt(s.input_tokens+s.output_tokens)+'</td></tr>').join('')+
+      '</tbody></table>';}
+      html+='</div>';
+      azContent.innerHTML=html;
+    }else{azContent.innerHTML='<div class="info-box">Azure OpenAI is not configured. Add <code>azure_openai</code> section to your config.yaml to enable this tab.</div>';}
   }catch(err){
     const b=document.getElementById('errorBanner');b.textContent='Failed to fetch stats: '+err.message;b.style.display='block';
   }

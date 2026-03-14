@@ -28,3 +28,25 @@ endpoints:
   #   api_base: https://adb-zzzzzzzzzzzz.zz.azuredatabricks.net/serving-endpoints
   #   token: ${DATABRICKS_TOKEN_3}
   #   weight: 1
+
+# Azure OpenAI 端点配置（可选）
+# 配置后可通过 /v1/responses 和 /v1/chat/completions 路由访问
+# azure_openai:
+#   load_balancer:                    # 可选，不填则使用全局 load_balancer 配置
+#     strategy: least_requests
+#   endpoints:
+#     - name: eastus-region
+#       endpoint: https://my-openai-eastus.openai.azure.com  # 完整 Azure 端点 URL
+#       api_key: ${AZURE_KEY_EASTUS}  # 支持环境变量
+#       deployments:                  # 该资源上可用的部署列表
+#         - gpt-4o
+#         - gpt-5
+#         - o4-mini
+#       weight: 1
+#     - name: westeurope-region
+#       endpoint: https://my-openai-westeu.openai.azure.com
+#       api_key: ${AZURE_KEY_WESTEU}
+#       deployments:
+#         - gpt-4o
+#         - gpt-5
+#       weight: 2
