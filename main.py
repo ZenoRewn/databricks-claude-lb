@@ -66,6 +66,56 @@ def get_databricks_model(model: str) -> str:
     return mapped
 
 
+def strip_cache_control_extras(body: dict) -> int:
+    """Strip extra fields from cache_control, keeping only 'type'.
+    Databricks 仅接受 cache_control: {"type": "ephemeral"}，
+    但 Claude Code 会发送额外字段如 scope。
+    返回被清理的 cache_control 对象数量。"""
+    stripped_count = 0
+
+    def _clean(obj: dict):
+        nonlocal stripped_count
+        cc = obj.get("cache_control")
+        if isinstance(cc, dict):
+            extra_keys = [k for k in cc if k != "type"]
+            if extra_keys:
+                for k in extra_keys:
+                    del cc[k]
+                stripped_count += 1
+
+    # system blocks（system 为数组格式时）
+    system = body.get("system")
+    if isinstance(system, list):
+        for block in system:
+            if isinstance(block, dict):
+                _clean(block)
+
+    # tools
+    if isinstance(body.get("tools"), list):
+        for tool in body["tools"]:
+            if isinstance(tool, dict):
+                _clean(tool)
+
+    # messages -> content blocks（含 tool_result 内嵌 content）
+    if isinstance(body.get("messages"), list):
+        for msg in body["messages"]:
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        _clean(block)
+                        if block.get("type") == "tool_result":
+                            inner = block.get("content")
+                            if isinstance(inner, list):
+                                for item in inner:
+                                    if isinstance(item, dict):
+                                        _clean(item)
+
+    return stripped_count
+
+
 # ==================== Load Balancer ====================
 
 @dataclass
@@ -382,6 +432,12 @@ class ClaudeProxy:
                                 inner_removed = original_inner - len(block["content"])
                                 if inner_removed > 0:
                                     logger.info(f"Removed {inner_removed} unsupported content blocks from tool_result")
+
+        # 清理 cache_control 中 Databricks 不支持的额外字段
+        # Claude Code 发送 {"type": "ephemeral", "scope": "turn"}，Databricks 仅接受 {"type": "ephemeral"}
+        cc_cleaned = strip_cache_control_extras(body)
+        if cc_cleaned > 0:
+            logger.info(f"Stripped extra fields from {cc_cleaned} cache_control objects")
 
         # 处理 thinking 参数兼容性
         # Opus 4.6: 支持 adaptive（推荐），enabled + budget_tokens 已废弃
