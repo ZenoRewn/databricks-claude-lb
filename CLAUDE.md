@@ -28,10 +28,10 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml claude-lb
 
 整个项目是单文件架构 (`main.py`)，包含以下核心模块：
 
-### 模型映射 (第 25-65 行)
+### 模型映射 (第 25-75 行)
 - `get_databricks_model()`: 将 Claude 模型名映射到 Databricks 模型
-- `claude-*-sonnet-*` → `databricks-claude-sonnet-4-5`
-- `claude-*-opus-*` → `databricks-claude-opus-4-6`（默认），支持显式指定 4-5/4-6
+- `claude-*-sonnet-*` → `databricks-claude-sonnet-4-6`（默认），支持显式指定 4-5/4-6
+- `claude-*-opus-*` → `databricks-claude-opus-4-7`（默认），支持显式指定 4-5/4-6/4-7
 - `claude-*-haiku-*` → `databricks-claude-haiku-4-5`
 
 ### 负载均衡
@@ -51,7 +51,7 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml claude-lb
 - `_stream_request()`: SSE 流式响应处理，支持流内重试和 token 用量嗅探
 - `_normal_request()`: 普通 JSON 响应处理
 - 请求路径: `{endpoint.api_base}/anthropic/v1/messages`
-- Thinking 参数自动转换: Opus 4.6 使用 `adaptive`（移除多余 `budget_tokens`）；旧模型将 `adaptive` 转为 `enabled` + 自动计算 `budget_tokens`
+- Thinking 参数自动转换: 新模型（Opus 4.6+、Sonnet 4.6+）使用 `adaptive`（移除多余 `budget_tokens`）；旧模型将 `adaptive` 转为 `enabled` + 自动计算 `budget_tokens`
 
 ### Azure OpenAI 代理 (AzureOpenAIProxy)
 - `proxy_responses()`: Responses API 代理（主路径），URL: `{endpoint}/openai/v1/responses`

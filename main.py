@@ -26,14 +26,17 @@ logger = logging.getLogger(__name__)
 # ==================== 模型名称映射 ====================
 
 DATABRICKS_MODELS = {
-    "sonnet": "databricks-claude-sonnet-4-5",
-    "opus": "databricks-claude-opus-4-6",  # 默认使用 4-6
+    "sonnet": "databricks-claude-sonnet-4-6",  # 默认使用最新版本
+    "sonnet-4-5": "databricks-claude-sonnet-4-5",
+    "sonnet-4-6": "databricks-claude-sonnet-4-6",
+    "opus": "databricks-claude-opus-4-7",  # 默认使用最新版本
     "opus-4-5": "databricks-claude-opus-4-5",
     "opus-4-6": "databricks-claude-opus-4-6",
+    "opus-4-7": "databricks-claude-opus-4-7",
     "haiku": "databricks-claude-haiku-4-5",
 }
 
-DEFAULT_MODEL = "databricks-claude-sonnet-4-5"
+DEFAULT_MODEL = "databricks-claude-sonnet-4-6"
 
 
 def get_databricks_model(model: str) -> str:
@@ -44,16 +47,23 @@ def get_databricks_model(model: str) -> str:
     if model_lower.startswith("databricks-"):
         return model
 
-    # 检查是否指定了具体版本 (如 claude-opus-4-5, opus-4-5)
+    # 检查是否指定了具体版本 (如 claude-opus-4-7, opus-4-5)
     if "opus" in model_lower:
         if "4-5" in model_lower or "4.5" in model_lower:
             mapped = DATABRICKS_MODELS["opus-4-5"]
         elif "4-6" in model_lower or "4.6" in model_lower:
             mapped = DATABRICKS_MODELS["opus-4-6"]
+        elif "4-7" in model_lower or "4.7" in model_lower:
+            mapped = DATABRICKS_MODELS["opus-4-7"]
         else:
-            mapped = DATABRICKS_MODELS["opus"]  # 默认 4-6
+            mapped = DATABRICKS_MODELS["opus"]  # 默认最新版本
     elif "sonnet" in model_lower:
-        mapped = DATABRICKS_MODELS["sonnet"]
+        if "4-5" in model_lower or "4.5" in model_lower:
+            mapped = DATABRICKS_MODELS["sonnet-4-5"]
+        elif "4-6" in model_lower or "4.6" in model_lower:
+            mapped = DATABRICKS_MODELS["sonnet-4-6"]
+        else:
+            mapped = DATABRICKS_MODELS["sonnet"]  # 默认最新版本
     elif "haiku" in model_lower:
         mapped = DATABRICKS_MODELS["haiku"]
     else:
@@ -440,18 +450,18 @@ class ClaudeProxy:
             logger.info(f"Stripped extra fields from {cc_cleaned} cache_control objects")
 
         # 处理 thinking 参数兼容性
-        # Opus 4.6: 支持 adaptive（推荐），enabled + budget_tokens 已废弃
+        # 新模型 (Opus 4.6+, Sonnet 4.6+): 支持 adaptive（推荐），enabled + budget_tokens 已废弃
         # 旧模型 (Sonnet 4.5, Opus 4.5 等): 仅支持 enabled + budget_tokens
         if "thinking" in body and isinstance(body["thinking"], dict):
             thinking_type = body["thinking"].get("type")
             model = body.get("model", "")
-            is_opus_4_6 = "opus-4-6" in model
+            supports_adaptive = any(x in model for x in ["opus-4-6", "opus-4-7", "sonnet-4-6"])
 
-            if is_opus_4_6:
-                # Opus 4.6: 使用 adaptive，移除多余的 budget_tokens
+            if supports_adaptive:
+                # 新模型: 使用 adaptive，移除多余的 budget_tokens
                 if thinking_type == "adaptive" and "budget_tokens" in body["thinking"]:
                     del body["thinking"]["budget_tokens"]
-                    logger.info("Removed budget_tokens for adaptive thinking (Opus 4.6)")
+                    logger.info(f"Removed budget_tokens for adaptive thinking ({model})")
             else:
                 # 旧模型: 不支持 adaptive，需转换为 enabled + budget_tokens
                 if thinking_type == "adaptive":
