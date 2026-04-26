@@ -2,3 +2,5 @@ fastapi>=0.100.0
 uvicorn>=0.23.0
 httpx>=0.24.0
 pyyaml>=6.0
+# MySQL 存储后端（可选，仅 usage_storage.type=mysql 时需要）
+# aiomysql>=0.2.0

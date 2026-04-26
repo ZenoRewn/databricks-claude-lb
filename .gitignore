@@ -35,5 +35,8 @@ ENV/
 .env.local
 test_api.sh
 
+# Usage 数据持久化
+usage_data/
+
 # video 项目（如有）
 video/

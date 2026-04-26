@@ -29,6 +29,26 @@ endpoints:
   #   token: ${DATABRICKS_TOKEN_3}
   #   weight: 1
 
+# Token 用量数据持久化（可选）
+# 方式 1: JSON 文件（默认）
+# usage_data_dir: ./usage_data
+#
+# 方式 2: 高级配置（支持 JSON 或 MySQL）
+# usage_storage:
+#   type: json                        # json 或 mysql
+#   path: ./usage_data                # type=json 时的存储目录
+#   retention_days: 90                # 自动清理超过 N 天的数据（可选）
+#
+# usage_storage:
+#   type: mysql                       # 使用 MySQL 8.x 存储（需安装 aiomysql）
+#   host: localhost
+#   port: 3306
+#   user: root
+#   password: ${MYSQL_PASSWORD}
+#   database: claude_lb
+#   pool_size: 5                      # 连接池大小（可选，默认 5）
+#   retention_days: 90                # 自动清理（可选）
+
 # Azure OpenAI 端点配置（可选）
 # 配置后可通过 /v1/responses 和 /v1/chat/completions 路由访问
 # azure_openai:
