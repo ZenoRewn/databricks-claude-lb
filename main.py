@@ -676,6 +676,8 @@ class ClaudeProxy:
         self.api_key = api_key
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
         self.global_stats = GlobalStats()
+        self.today_model_stats: dict = {}
+        self.today_date: str = date.today().isoformat()
 
     def _record_usage(self, endpoint: WorkspaceEndpoint, model: str, input_tokens: int, output_tokens: int, elapsed: float,
                       cache_creation_tokens: int = 0, cache_read_tokens: int = 0):
@@ -702,6 +704,17 @@ class ClaudeProxy:
         self.global_stats.total_response_time += elapsed
         self.global_stats.successful_requests += 1
         self.global_stats.total_requests += 1
+        # 当天 per-model 累加（跨 0 点自动滚动）
+        today_iso = date.today().isoformat()
+        if today_iso != self.today_date:
+            self.today_model_stats = {}
+            self.today_date = today_iso
+        tm = self.today_model_stats.setdefault(model, {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0, "requests": 0})
+        tm["input_tokens"] += input_tokens
+        tm["output_tokens"] += output_tokens
+        tm["cache_creation_tokens"] += cache_creation_tokens
+        tm["cache_read_tokens"] += cache_read_tokens
+        tm["requests"] += 1
         if usage_store:
             usage_store.record(model, input_tokens, output_tokens,
                                cache_creation_tokens, cache_read_tokens)
@@ -711,7 +724,7 @@ class ClaudeProxy:
 
     def verify_api_key(self, key: str) -> bool:
         return key == self.api_key
-    
+
     async def proxy_request(self, body: dict, stream: bool = False):
         """代理请求到 Databricks 原生 Anthropic 端点"""
         
@@ -1457,6 +1470,14 @@ async def lifespan(app: FastAPI):
             proxy.global_stats.total_cache_read_tokens += mstats.get("cache_read_tokens", 0)
             proxy.global_stats.total_requests += mstats.get("requests", 0)
             proxy.global_stats.successful_requests += mstats.get("requests", 0)
+            # 按模型恢复当天快照（供 /stats 计算 KPI Est. Cost 及 Anthropic Models 表使用）
+            proxy.today_model_stats[model_name] = {
+                "input_tokens": mstats.get("input_tokens", 0),
+                "output_tokens": mstats.get("output_tokens", 0),
+                "cache_creation_tokens": mstats.get("cache_creation_tokens", 0),
+                "cache_read_tokens": mstats.get("cache_read_tokens", 0),
+                "requests": mstats.get("requests", 0),
+            }
         if restore.get("totals", {}).get("errors"):
             proxy.global_stats.total_errors += restore["totals"]["errors"]
         logger.info(f"Restored today's usage data: {restore['totals'].get('requests', 0)} requests")
@@ -1569,14 +1590,26 @@ async def health():
 @app.get("/stats")
 async def stats():
     result = proxy.get_stats()
-    total_cost = 0.0
+    # 端点级 per-model Est. Cost 仍反映本次会话内的负载分布
     for ep in result.get("endpoints", []):
         for model_name, mstats in (ep.get("model_stats") or {}).items():
             cost = calculate_cost(model_name, mstats["input_tokens"], mstats["output_tokens"],
                                   mstats.get("cache_creation_tokens", 0), mstats.get("cache_read_tokens", 0))
             if cost is not None:
                 mstats["estimated_cost_usd"] = cost
-                total_cost += cost
+    # KPI Est. Cost 和 Anthropic Models 表格统一以当天（per-model）累计为准
+    today_models = {}
+    total_cost = 0.0
+    for model_name, mstats in (proxy.today_model_stats or {}).items():
+        entry = dict(mstats)
+        cost = calculate_cost(model_name, mstats["input_tokens"], mstats["output_tokens"],
+                              mstats.get("cache_creation_tokens", 0), mstats.get("cache_read_tokens", 0))
+        if cost is not None:
+            entry["estimated_cost_usd"] = cost
+            total_cost += cost
+        today_models[model_name] = entry
+    result["today_model_stats"] = today_models
+    result["today_date"] = proxy.today_date
     result["global"]["estimated_total_cost_usd"] = round(total_cost, 4)
     if azure_proxy:
         result["azure_openai"] = azure_proxy.get_stats()
@@ -1630,6 +1663,8 @@ async def reset():
         ep.successful_requests = 0
         ep.model_stats = {}
     proxy.global_stats = GlobalStats()
+    proxy.today_model_stats = {}
+    proxy.today_date = date.today().isoformat()
     if azure_proxy:
         for ep in azure_proxy.load_balancer.endpoints:
             ep.circuit_open = False
@@ -2680,7 +2715,10 @@ async function refresh() {
     renderKpiGrid('globalGrid', KPI_DEFS, g, 'kpi-anthropic');
     diffEndpoints('endpointBody', d.endpoints, 'anthropic');
 
-    const models = aggregateModels(d.endpoints);
+    // Anthropic Models 表格以“当天(含重启前)累计”为准，与 KPI Est. Cost 保持一致
+    const models = d.today_model_stats && Object.keys(d.today_model_stats).length
+      ? d.today_model_stats
+      : aggregateModels(d.endpoints);
     renderModelTable('modelBody', models, true);
 
     // Update anthropic charts
