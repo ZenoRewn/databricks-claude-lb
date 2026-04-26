@@ -24,6 +24,7 @@
 - **用量持久化** - 按天存储 token 用量数据，支持 JSON 文件或 MySQL 8.x 后端
 - **成本估算** - 内置 Anthropic 模型定价，Dashboard 实时展示使用成本
 - **历史数据** - Dashboard 可视化历史用量趋势，支持自动/手动清理
+- **双主题 Dashboard** - 支持深色 / 浅色主题切换，默认跟随系统 `prefers-color-scheme`，选择持久化到 `localStorage`
 
 ## 快速开始
 
@@ -188,6 +189,8 @@ Dashboard 包含三个标签页：
 - **Anthropic Models** - 实时端点状态、模型统计、成本估算
 - **Azure OpenAI Models** - Azure 端点状态和统计
 - **Usage History** - 历史用量表格、成本趋势、数据清理操作
+
+**主题切换**：右上角的太阳 / 月亮按钮可在深色与浅色主题间切换。首次打开跟随操作系统 `prefers-color-scheme`；手动切换后写入 `localStorage['lb-theme']`，下次访问自动恢复。图表（Chart.js）会同步更新 legend、tooltip、grid、ticks 颜色，无需刷新页面。
 
 ## 支持的模型
 

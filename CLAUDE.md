@@ -80,6 +80,14 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 - `expand_env_vars()`: 支持 `${VAR_NAME}` 环境变量语法
 - 存储配置优先级: `usage_storage` > `usage_data_dir` > 默认 `./usage_data`
 
+### Dashboard 前端（单文件内嵌）
+- Dashboard HTML/CSS/JS 全部内嵌在 `DASHBOARD_HTML` 字符串常量中（`main.py` 内），不引入构建系统
+- **设计 token**: `:root` 定义深色主题 CSS 变量（`--card-bg`、`--tooltip-bg`、`--chart-grid`、`--brand-gradient` 等），`:root[data-theme="light"]` 覆盖为浅色；所有 CSS 均通过 `var(--xxx)` 引用，禁止直接硬编码 rgba 色值
+- **主题切换**: hero 区 `#themeToggle` 按钮；`initTheme()` 先读 `localStorage['lb-theme']`，未设置则回退到 `prefers-color-scheme`；`setTheme(t)` 写 `data-theme` 属性 + localStorage + 调用 `applyChartTheme()`
+- **Chart.js 主题同步**: 创建图表时用 `cssVar()` 读当前 CSS 变量作为初始 tooltip/grid/border 颜色；切主题时 `applyChartTheme()` 更新 `Chart.defaults` 并 walk `charts` 单例字典，刷新每个实例的 `plugins.tooltip/legend.labels/scales.*.grid/ticks/title` 颜色及 doughnut `dataset.borderColor`，然后 `update('none')` 无动画重绘
+- **Badge / 输入框强调色**: 使用 `color-mix(in srgb, var(--accent) 12%, transparent)` 让强调色在两主题下自动衰减为合适的背景透明度
+- **数据刷新**: `refresh()` 每 5 秒轮询 `/stats`，通过 `tickTo()` 平滑过渡 KPI 数字、`diffEndpoints()` 按 name 增删改端点行，避免 innerHTML 全量重绘闪烁
+
 ## API 端点
 
 | 端点 | 方法 | 认证 | 说明 |
@@ -92,7 +100,7 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 | `/stats` | GET | 不需要 | 端点统计（含成本估算、Azure OpenAI） |
 | `/stats/history` | GET | 不需要 | 历史用量数据（`?days=7`，含每日成本） |
 | `/stats/history` | DELETE | 不需要 | 清理历史数据（`?keep_days=30`） |
-| `/stats/dashboard` | GET | 不需要 | 可视化监控面板（三标签页：实时统计 / Azure / 历史） |
+| `/stats/dashboard` | GET | 不需要 | 可视化监控面板（三标签页：实时统计 / Azure / 历史，支持深色/浅色主题切换） |
 | `/reset` | POST | 不需要 | 重置内存统计（持久化数据保留） |
 
 ## 配置文件
