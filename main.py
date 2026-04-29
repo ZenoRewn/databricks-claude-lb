@@ -674,7 +674,15 @@ class ClaudeProxy:
     def __init__(self, load_balancer: LoadBalancer, api_key: str):
         self.load_balancer = load_balancer
         self.api_key = api_key
-        self.client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=None, write=60.0, pool=30.0),
+            limits=httpx.Limits(
+                max_connections=200,
+                max_keepalive_connections=50,
+                keepalive_expiry=30.0,
+            ),
+            http2=False,
+        )
         self.global_stats = GlobalStats()
         self.today_model_stats: dict = {}
         self.today_date: str = date.today().isoformat()
@@ -920,10 +928,14 @@ class ClaudeProxy:
             output_tokens = 0
             cache_creation_tokens = 0
             cache_read_tokens = 0
+            sent_message_start = False
+
+            MESSAGE_STOP_EVENT = b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+            HEARTBEAT = b": keep-alive\n\n"
 
             for attempt in range(max_retries):
-                success = False
-                is_client_error = False
+                response = None
+                pump_task = None
 
                 try:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
@@ -938,7 +950,7 @@ class ClaudeProxy:
                             error_json = json.loads(error_body)
                             error_msg = error_json.get('message', 'Request failed')
                             logger.error(f"Stream request failed ({response.status_code}): {error_json}")
-                        except:
+                        except Exception:
                             error_msg = error_body.decode('utf-8') if isinstance(error_body, bytes) else str(error_body)
                             logger.error(f"Stream request failed ({response.status_code}): {error_msg}")
 
@@ -948,7 +960,6 @@ class ClaudeProxy:
                         if response.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
                             logger.warning(f"{current_endpoint.name} returned {response.status_code}, retrying stream...")
                             await asyncio.sleep(min(2 ** attempt, 8))
-                            # 选择新的 endpoint 重试
                             new_endpoint = proxy_self.load_balancer.select_endpoint()
                             if new_endpoint:
                                 current_endpoint = new_endpoint
@@ -961,13 +972,45 @@ class ClaudeProxy:
                                 logger.info(f"[{body.get('model')}] -> {current_endpoint.name} (stream attempt {attempt + 2})")
                                 continue
 
-                        yield f"data: {json.dumps({'type': 'error', 'error': {'message': error_msg}})}\n\n".encode()
+                        if sent_message_start:
+                            yield MESSAGE_STOP_EVENT
+                        yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': error_msg}})}\n\n".encode()
                         return
 
-                    # 透传响应，同时嗅探 token 用量（先 yield 再解析，零延迟影响）
+                    # ---- 透传流 + 15s 心跳 + 后台 pump ----
+                    queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+
+                    async def _pump(resp):
+                        try:
+                            async for c in resp.aiter_bytes():
+                                await queue.put(("chunk", c))
+                            await queue.put(("eof", None))
+                        except asyncio.CancelledError:
+                            raise
+                        except BaseException as ex:  # noqa: BLE001
+                            await queue.put(("err", ex))
+
+                    pump_task = asyncio.create_task(_pump(response))
+
                     buffer = ""
-                    async for chunk in response.aiter_bytes():
-                        yield chunk  # 立即转发，不影响流式体验
+                    stream_error: Optional[BaseException] = None
+
+                    while True:
+                        try:
+                            kind, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            # 长 thinking 静默期间发 SSE 注释作为心跳, 防止中间链路空闲超时
+                            yield HEARTBEAT
+                            continue
+
+                        if kind == "err":
+                            stream_error = payload
+                            break
+                        if kind == "eof":
+                            break
+
+                        chunk = payload
+                        yield chunk  # 立即透传, 零延迟
                         try:
                             buffer += chunk.decode("utf-8", errors="ignore")
                             while "\n\n" in buffer:
@@ -977,6 +1020,7 @@ class ClaudeProxy:
                                         if line.startswith("data: "):
                                             data = json.loads(line[6:])
                                             if data.get("type") == "message_start":
+                                                sent_message_start = True
                                                 msg_usage = data.get("message", {}).get("usage", {})
                                                 input_tokens = msg_usage.get("input_tokens", 0)
                                                 cache_creation_tokens = msg_usage.get("cache_creation_input_tokens", 0)
@@ -988,18 +1032,28 @@ class ClaudeProxy:
                         except Exception:
                             pass  # 指标提取绝不能阻断流
 
-                    success = True
+                    if stream_error is not None:
+                        raise stream_error
+
                     await proxy_self.load_balancer.on_request_end(current_endpoint, success=True)
                     elapsed = time.time() - start_time
                     proxy_self._record_usage(current_endpoint, model, input_tokens, output_tokens, elapsed,
                                             cache_creation_tokens=cache_creation_tokens, cache_read_tokens=cache_read_tokens)
                     return
 
-                except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError) as e:
-                    # 网络超时/连接错误 - 应该触发熔断并重试
+                except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
+                        httpx.ConnectError, httpx.RemoteProtocolError,
+                        httpx.ReadError, httpx.WriteError) as e:
+                    # 网络超时/连接错误/上游中断 - 触发熔断, 可重试
                     error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
                     logger.error(f"Stream network error on {current_endpoint.name}: {error_detail}")
                     await proxy_self.load_balancer.on_request_end(current_endpoint, success=False, is_client_error=False)
+
+                    # 已向客户端 yield 过 message_start, 不能再切端点重放 (会产生两段消息), 只能优雅收尾
+                    if sent_message_start:
+                        yield MESSAGE_STOP_EVENT
+                        yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': error_detail}})}\n\n".encode()
+                        return
 
                     if attempt < max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt, 8))
@@ -1015,7 +1069,7 @@ class ClaudeProxy:
                             logger.info(f"[{body.get('model')}] -> {current_endpoint.name} (stream retry {attempt + 2})")
                             continue
 
-                    yield f"data: {json.dumps({'type': 'error', 'error': {'message': error_detail}})}\n\n".encode()
+                    yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': error_detail}})}\n\n".encode()
                     return
 
                 except Exception as e:
@@ -1023,8 +1077,23 @@ class ClaudeProxy:
                     error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
                     logger.error(f"Stream error: {error_detail}\n{traceback.format_exc()}")
                     await proxy_self.load_balancer.on_request_end(current_endpoint, success=False, is_client_error=False)
-                    yield f"data: {json.dumps({'type': 'error', 'error': {'message': error_detail}})}\n\n".encode()
+                    if sent_message_start:
+                        yield MESSAGE_STOP_EVENT
+                    yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': error_detail}})}\n\n".encode()
                     return
+
+                finally:
+                    if pump_task is not None and not pump_task.done():
+                        pump_task.cancel()
+                        try:
+                            await pump_task
+                        except BaseException:  # noqa: BLE001
+                            pass
+                    if response is not None:
+                        try:
+                            await response.aclose()
+                        except Exception:
+                            pass
 
         return StreamingResponse(
             stream_generator(),
@@ -1062,7 +1131,15 @@ class AzureOpenAIProxy:
     def __init__(self, load_balancer: LoadBalancer, api_key: str):
         self.load_balancer = load_balancer
         self.api_key = api_key
-        self.client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=None, write=60.0, pool=30.0),
+            limits=httpx.Limits(
+                max_connections=200,
+                max_keepalive_connections=50,
+                keepalive_expiry=30.0,
+            ),
+            http2=False,
+        )
         self.global_stats = GlobalStats()
 
     def verify_api_key(self, key: str) -> bool:
@@ -1241,8 +1318,14 @@ class AzureOpenAIProxy:
             input_tokens = 0
             output_tokens = 0
             cache_read_tokens = 0
+            sent_any_chunk = False
+
+            HEARTBEAT = b": keep-alive\n\n"
 
             for attempt in range(max_retries):
+                response = None
+                pump_task = None
+
                 try:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
                     response = await proxy_self.client.send(req, stream=True)
@@ -1276,10 +1359,40 @@ class AzureOpenAIProxy:
                         yield f"data: {json.dumps({'error': {'message': error_msg}})}\n\n".encode()
                         return
 
-                    # 透传响应，同时嗅探 usage
+                    # ---- 透传 + 心跳 + 后台 pump ----
+                    queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+
+                    async def _pump(resp):
+                        try:
+                            async for c in resp.aiter_bytes():
+                                await queue.put(("chunk", c))
+                            await queue.put(("eof", None))
+                        except asyncio.CancelledError:
+                            raise
+                        except BaseException as ex:  # noqa: BLE001
+                            await queue.put(("err", ex))
+
+                    pump_task = asyncio.create_task(_pump(response))
+
                     buffer = ""
-                    async for chunk in response.aiter_bytes():
+                    stream_error: Optional[BaseException] = None
+
+                    while True:
+                        try:
+                            kind, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            yield HEARTBEAT
+                            continue
+
+                        if kind == "err":
+                            stream_error = payload
+                            break
+                        if kind == "eof":
+                            break
+
+                        chunk = payload
                         yield chunk
+                        sent_any_chunk = True
                         try:
                             buffer += chunk.decode("utf-8", errors="ignore")
                             while "\n\n" in buffer:
@@ -1289,14 +1402,12 @@ class AzureOpenAIProxy:
                                         continue
                                     data = json.loads(line[6:])
                                     if api_type == "responses":
-                                        # Responses API: usage 在 response.completed 事件中
                                         if data.get("type") == "response.completed":
                                             usage = data.get("response", {}).get("usage", {})
                                             input_tokens = usage.get("input_tokens", 0)
                                             output_tokens = usage.get("output_tokens", 0)
                                             cache_read_tokens = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
                                     else:
-                                        # Chat Completions: usage 在末尾 chunk
                                         usage = data.get("usage")
                                         if usage:
                                             input_tokens = usage.get("prompt_tokens", 0)
@@ -1307,18 +1418,24 @@ class AzureOpenAIProxy:
                         except Exception:
                             pass
 
+                    if stream_error is not None:
+                        raise stream_error
+
                     await proxy_self.load_balancer.on_request_end(current_endpoint, success=True)
                     elapsed = time.time() - start_time
                     proxy_self._record_usage(current_endpoint, model, input_tokens, output_tokens, elapsed,
                                             cache_read_tokens=cache_read_tokens)
                     return
 
-                except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError) as e:
+                except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
+                        httpx.ConnectError, httpx.RemoteProtocolError,
+                        httpx.ReadError, httpx.WriteError) as e:
                     error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
                     logger.error(f"Azure stream network error on {current_endpoint.name}: {error_detail}")
                     await proxy_self.load_balancer.on_request_end(current_endpoint, success=False)
 
-                    if attempt < max_retries - 1:
+                    # 已向客户端输出过 chunk 就不能再重放; 否则可以切端点重试
+                    if not sent_any_chunk and attempt < max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt, 8))
                         new_endpoint = proxy_self.load_balancer.select_endpoint_for_model(model)
                         if new_endpoint:
@@ -1340,6 +1457,19 @@ class AzureOpenAIProxy:
                     await proxy_self.load_balancer.on_request_end(current_endpoint, success=False)
                     yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\n".encode()
                     return
+
+                finally:
+                    if pump_task is not None and not pump_task.done():
+                        pump_task.cancel()
+                        try:
+                            await pump_task
+                        except BaseException:  # noqa: BLE001
+                            pass
+                    if response is not None:
+                        try:
+                            await response.aclose()
+                        except Exception:
+                            pass
 
         return StreamingResponse(
             stream_generator(),
@@ -2846,4 +2976,11 @@ setInterval(refresh, REFRESH_MS);
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        timeout_keep_alive=600,
+        timeout_graceful_shutdown=30,
+    )

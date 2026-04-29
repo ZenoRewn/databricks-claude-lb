@@ -65,6 +65,17 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 - Auth Header: `api-key: {endpoint.api_key}`
 - 端点选择通过 `select_endpoint_for_model()` 按模型过滤
 
+### 流式代理健壮性（`_stream_request` / `_stream_response`）
+- **httpx 客户端**: `timeout=Timeout(connect=10.0, read=None, write=60.0, pool=30.0)`；`limits=Limits(max_connections=200, max_keepalive_connections=50, keepalive_expiry=30.0)`；`http2=False`。`read=None` 必要 —— 流式请求不能整体 read 超时，由逐 chunk 节奏决定
+- **异常覆盖**: 网络异常 `except` 分支同时捕获 `ConnectTimeout / ReadTimeout / WriteTimeout / ConnectError / RemoteProtocolError / ReadError / WriteError`，上游中途断流（最常见症状即是客户端报 "socket connection closed unexpectedly"）也走熔断 + 切端点重试路径
+- **响应清理**: `response = None` 局部变量 + `finally: await response.aclose()`，避免 httpx 连接池堆积半开连接
+- **后台 pump + 心跳**: 将 `aiter_bytes()` 放入 `asyncio.create_task(_pump(response))`，主循环 `await asyncio.wait_for(queue.get(), timeout=15.0)`；15 秒无 chunk 则 yield 一次 `: keep-alive\n\n`（SSE 注释，Anthropic SDK 会忽略），刷新中间链路 idle 计时。pump 退出时由 `finally` 分支 `pump_task.cancel()` 回收
+- **SSE 终止规范化**: `sent_message_start` 跟踪是否已向客户端发出 `event: message_start`；若在已发送后 upstream 失败，先补发 `event: message_stop\ndata: {"type":"message_stop"}\n\n` 再发 `event: error`，让 Anthropic SDK 得到合法的流终止序列而不是 socket 异常关闭
+- **重试守卫**: 已 yield 过 `message_start`（Claude）或任意 chunk（Azure `sent_any_chunk`）后，不再切换端点重试，避免客户端看到两段拼接的响应
+
+### 服务启动参数
+- `uvicorn.run(..., timeout_keep_alive=600, timeout_graceful_shutdown=30)`，覆盖最长合理的 thinking 响应时间，避免 uvicorn 默认 5s keep-alive 中断下游连接
+
 ### Token 用量持久化
 - `UsageDataStore` (基类): 缓冲 + 30 秒定时刷盘框架，子类实现存储后端
   - `JsonUsageStore`: JSON 文件后端，目录结构 `{path}/{YYYY}/{MM}/{YYYY-MM-DD}.json`
