@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# 应用顺序：configmap & secrets 先于 deployment（kubectl apply -k 会自动按 kind 排序，无需手动）
+resources:
+  - configmap.yaml
+  - pvc.yaml
+  - service.yaml
+  - deployment.yaml
+  # 多副本时再追加 PDB（单副本 + RWO PVC 场景 PDB 会卡住 drain）
+
+# 把镜像统一在这里改，比逐个 yaml 改更干净
+images:
+  - name: <REGISTRY>/databricks-claude-lb
+    newName: <REGISTRY>/databricks-claude-lb
+    newTag: latest
+
+# 注：secret.example.yaml 不在 resources 里
+# 实际生产请：cp secret.example.yaml secret.yaml → 填真值 → kubectl apply -f secret.yaml
+# 或用 kubectl create secret 命令式生成（见 secret.example.yaml 内说明）
+
+commonLabels:
+  app.kubernetes.io/name: claude-lb
+  app.kubernetes.io/component: ai-gateway

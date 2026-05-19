@@ -5,11 +5,16 @@ Databricks Claude Load Balancer Proxy for Claude Code
 
 import os
 import re
+import sys
 import asyncio
+import base64
 import json
 import time
 import random
 import logging
+import stat
+from io import BytesIO
+from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
@@ -18,9 +23,62 @@ from datetime import date, datetime, timedelta
 import yaml
 import httpx
 from fastapi import FastAPI, Request, HTTPException, Header
-from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
+from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, Response
 
-logging.basicConfig(level=logging.INFO)
+try:
+    from PIL import Image, ImageOps
+    _PIL_AVAILABLE = True
+except ImportError:  # 优雅降级：未装 Pillow 时图片压缩自动跳过
+    _PIL_AVAILABLE = False
+
+class _JsonLogFormatter(logging.Formatter):
+    """结构化 JSON 日志，便于 AKS Log Analytics / Loki / ELK 解析"""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        # 把额外的 LogRecord attributes（extra={...}）也带上
+        for k, v in record.__dict__.items():
+            if k in ("args", "asctime", "created", "exc_info", "exc_text", "filename", "funcName",
+                     "levelname", "levelno", "lineno", "message", "module", "msecs", "msg",
+                     "name", "pathname", "process", "processName", "relativeCreated", "thread",
+                     "threadName", "stack_info", "taskName"):
+                continue
+            try:
+                json.dumps(v)
+                payload[k] = v
+            except (TypeError, ValueError):
+                payload[k] = repr(v)
+        return json.dumps(payload, ensure_ascii=False)
+
+
+def _setup_logging():
+    """根据 LOG_FORMAT 环境变量选择 text/json 格式；LOG_LEVEL 控制级别"""
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    fmt = os.getenv("LOG_FORMAT", "text").lower()
+    handler = logging.StreamHandler()
+    if fmt == "json":
+        handler.setFormatter(_JsonLogFormatter())
+    else:
+        handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+    # 用 force=True 接管 uvicorn 默认配置
+    logging.basicConfig(level=level, handlers=[handler], force=True)
+    # uvicorn / httpx 的 logger 也走同一 handler
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "httpx"):
+        lg = logging.getLogger(name)
+        lg.handlers = []
+        lg.propagate = True
+        lg.setLevel(level)
+
+
+_setup_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -39,22 +97,66 @@ DATABRICKS_MODELS = {
 
 DEFAULT_MODEL = "databricks-claude-sonnet-4-6"
 
-# Anthropic 官方 API 定价 (USD per 1M tokens)
+# 模型定价（USD per 1M tokens）
+# - Anthropic：Anthropic 官方 API 公开价
+# - OpenAI / Google：OpenAI / Google API 公开价
+# - GitHub Copilot 是订阅制无 per-token 计费；这里用对应底层模型的 API 价做"假想成本"对照
+# - 子串匹配（按 key 长度降序优先），所以 "gpt-4o-mini" 必须排在 "gpt-4o" 之前才能被 specific 匹配；
+#   实际靠 get_model_pricing() 的排序保障，dict 顺序仅作可读性
 MODEL_PRICING = {
+    # ---------- Anthropic Claude ----------
     "opus-4-7": {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
     "opus-4-6": {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
     "opus-4-5": {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
     "sonnet-4-6": {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
     "sonnet-4-5": {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
     "haiku-4-5": {"input": 1.00, "output": 5.00, "cache_write": 1.25, "cache_read": 0.10},
+
+    # ---------- OpenAI GPT-5 系列 ----------
+    # GPT-5.x 公开 API 价格 reference：input $1.25 / output $10 / cached input $0.125（写作时点公开值）
+    # GHCP 实际无 per-token 计费，此处仅作 API 层对照
+    "gpt-5.1-codex-mini": {"input": 0.15, "output": 0.60, "cache_write": 0.0, "cache_read": 0.075},
+    "gpt-5.1-codex-max":  {"input": 5.00, "output": 40.00, "cache_write": 0.0, "cache_read": 0.50},
+    "gpt-5.1-codex":      {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
+    "gpt-5-codex":        {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
+    "gpt-5-mini":         {"input": 0.25, "output": 2.00,  "cache_write": 0.0, "cache_read": 0.025},
+    "gpt-5-nano":         {"input": 0.05, "output": 0.40,  "cache_write": 0.0, "cache_read": 0.005},
+    "gpt-5.5":            {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
+    "gpt-5.4":            {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
+    "gpt-5.2":            {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
+    "gpt-5.1":            {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
+    "gpt-5":              {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
+
+    # ---------- OpenAI GPT-4 系列 ----------
+    "gpt-4.1-nano": {"input": 0.10, "output": 0.40, "cache_write": 0.0, "cache_read": 0.025},
+    "gpt-4.1-mini": {"input": 0.40, "output": 1.60, "cache_write": 0.0, "cache_read": 0.10},
+    "gpt-4.1":      {"input": 2.00, "output": 8.00, "cache_write": 0.0, "cache_read": 0.50},
+    "gpt-4o-mini":  {"input": 0.15, "output": 0.60, "cache_write": 0.0, "cache_read": 0.075},
+    "gpt-4o":       {"input": 2.50, "output": 10.00, "cache_write": 0.0, "cache_read": 1.25},
+    "gpt-4-turbo":  {"input": 10.00, "output": 30.00, "cache_write": 0.0, "cache_read": 0.0},
+    "gpt-4":        {"input": 30.00, "output": 60.00, "cache_write": 0.0, "cache_read": 0.0},
+
+    # ---------- OpenAI o-series（reasoning） ----------
+    "o3-mini": {"input": 1.10, "output": 4.40, "cache_write": 0.0, "cache_read": 0.55},
+    "o1-mini": {"input": 1.10, "output": 4.40, "cache_write": 0.0, "cache_read": 0.55},
+    "o3":      {"input": 2.00, "output": 8.00, "cache_write": 0.0, "cache_read": 0.50},
+    "o1":      {"input": 15.00, "output": 60.00, "cache_write": 0.0, "cache_read": 7.50},
+
+    # ---------- Google Gemini（GHCP 提供） ----------
+    "gemini-2.5-pro":   {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
+    "gemini-2.5-flash": {"input": 0.30, "output": 2.50,  "cache_write": 0.0, "cache_read": 0.075},
 }
+
+# 预排序：按 key 长度降序，确保 "gpt-4o-mini" 优先于 "gpt-4o"，"opus-4-7" 优先于 "opus" 等
+_PRICING_KEYS_BY_LENGTH = sorted(MODEL_PRICING.keys(), key=len, reverse=True)
 
 
 def get_model_pricing(model_name: str) -> Optional[dict]:
+    """子串匹配定价。按 key 长度降序优先匹配，避免 'gpt-4o-mini' 被 'gpt-4o' 截胡。"""
     model_lower = model_name.lower()
-    for key, pricing in MODEL_PRICING.items():
+    for key in _PRICING_KEYS_BY_LENGTH:
         if key in model_lower:
-            return pricing
+            return MODEL_PRICING[key]
     return None
 
 
@@ -159,6 +261,134 @@ def strip_cache_control_extras(body: dict) -> int:
     return stripped_count
 
 
+# ==================== Image Auto-Compression ====================
+# 大图自动压缩：超过 200KB 的 base64 图片缩到 ≤1280px JPEG q=82，让 30MB 的 Chrome
+# fullPage 截图能塞进 ADB / GHCP 上游。仅压缩 messages 内容里的图，对其他字段无副作用。
+# 同时支持两种载荷格式：
+#   - Anthropic: {"type":"image","source":{"type":"base64","media_type":...,"data":"<b64>"}}
+#   - OpenAI / Responses: 任意值为 "data:image/...;base64,..." 的字符串
+_IMG_COMPRESS_THRESHOLD = 200 * 1024  # 解码后 < 200KB 不压
+_IMG_MAX_DIM = 1280
+_IMG_JPEG_QUALITY = 82
+_DATA_URL_RE = re.compile(r"^data:image/([a-zA-Z0-9+.\-]+);base64,(.+)$", re.DOTALL)
+
+
+def _compress_image_bytes(raw: bytes) -> Optional[bytes]:
+    """解码 → 等比缩到 ≤1280px → JPEG q=82 重编码。压不小或失败返回 None（保留原图）。"""
+    if len(raw) < _IMG_COMPRESS_THRESHOLD:
+        return None
+    if not _PIL_AVAILABLE:
+        return None
+    try:
+        img = Image.open(BytesIO(raw))
+        try:
+            img = ImageOps.exif_transpose(img) or img
+        except Exception:
+            pass
+        img.thumbnail((_IMG_MAX_DIM, _IMG_MAX_DIM), Image.Resampling.LANCZOS)
+        if img.mode in ("RGBA", "LA"):
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[-1])
+            img = bg
+        elif img.mode == "P":
+            img = img.convert("RGBA")
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[-1])
+            img = bg
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+        out = BytesIO()
+        img.save(out, format="JPEG", quality=_IMG_JPEG_QUALITY, optimize=True)
+        compressed = out.getvalue()
+        if len(compressed) >= len(raw):
+            return None
+        return compressed
+    except Exception as e:
+        # 压坏不抛错，原图过路即可
+        try:
+            logger.warning(f"[image-compress] PIL failed: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+        return None
+
+
+def _compress_data_url(s: str) -> Optional[str]:
+    m = _DATA_URL_RE.match(s)
+    if not m:
+        return None
+    try:
+        raw = base64.b64decode(m.group(2), validate=False)
+    except Exception:
+        return None
+    compressed = _compress_image_bytes(raw)
+    if compressed is None:
+        return None
+    return "data:image/jpeg;base64," + base64.b64encode(compressed).decode("ascii")
+
+
+def compress_images_in_payload(payload) -> dict:
+    """递归遍历 payload，原地替换大图。返回 {count, before, after}。"""
+    stats = {"count": 0, "before": 0, "after": 0}
+    if not _PIL_AVAILABLE:
+        return stats
+
+    def visit(node, parent, key):
+        if isinstance(node, dict):
+            # Anthropic image block
+            if node.get("type") == "image" and isinstance(node.get("source"), dict):
+                src = node["source"]
+                data = src.get("data") if src.get("type") == "base64" else None
+                if isinstance(data, str) and len(data) >= _IMG_COMPRESS_THRESHOLD:
+                    try:
+                        raw = base64.b64decode(data, validate=False)
+                    except Exception:
+                        raw = None
+                    if raw is not None:
+                        compressed = _compress_image_bytes(raw)
+                        if compressed is not None:
+                            src["data"] = base64.b64encode(compressed).decode("ascii")
+                            src["media_type"] = "image/jpeg"
+                            stats["count"] += 1
+                            stats["before"] += len(raw)
+                            stats["after"] += len(compressed)
+                # image block 内不再下钻，避免重复
+                return
+            for k in list(node.keys()):
+                visit(node[k], node, k)
+            return
+        if isinstance(node, list):
+            for i in range(len(node)):
+                visit(node[i], node, i)
+            return
+        if isinstance(node, str):
+            # 粗筛：data URL 串至少要有 ~270KB 才可能解出 200KB 原图
+            if len(node) < _IMG_COMPRESS_THRESHOLD:
+                return
+            if not node.startswith("data:image/"):
+                return
+            new = _compress_data_url(node)
+            if new is None:
+                return
+            old_size = (len(node) - node.find(",") - 1) * 3 // 4
+            new_size = (len(new) - new.find(",") - 1) * 3 // 4
+            parent[key] = new
+            stats["count"] += 1
+            stats["before"] += max(old_size, 0)
+            stats["after"] += max(new_size, 0)
+
+    if isinstance(payload, (dict, list)):
+        root = {"_root": payload}
+        visit(payload, root, "_root")
+    return stats
+
+
+async def compress_images_async(payload) -> dict:
+    """在线程池执行压缩，避免阻塞 event loop。无图片时近乎零开销。"""
+    if not _PIL_AVAILABLE:
+        return {"count": 0, "before": 0, "after": 0}
+    return await asyncio.to_thread(compress_images_in_payload, payload)
+
+
 # ==================== Load Balancer ====================
 
 @dataclass
@@ -197,6 +427,65 @@ class AzureOpenAIEndpoint:
     weight: int = 1
 
     # 运行时统计字段（与 WorkspaceEndpoint 保持一致）
+    active_requests: int = field(default=0, repr=False)
+    total_requests: int = field(default=0, repr=False)
+    total_errors: int = field(default=0, repr=False)
+    last_error_time: Optional[float] = field(default=None, repr=False)
+    circuit_open: bool = field(default=False, repr=False)
+    total_input_tokens: int = field(default=0, repr=False)
+    total_output_tokens: int = field(default=0, repr=False)
+    total_cache_creation_tokens: int = field(default=0, repr=False)
+    total_cache_read_tokens: int = field(default=0, repr=False)
+    total_response_time: float = field(default=0.0, repr=False)
+    successful_requests: int = field(default=0, repr=False)
+    model_stats: dict = field(default_factory=dict, repr=False)
+
+
+# ==================== GitHub Copilot 常量 ====================
+# 模仿 VS Code Copilot Chat 扩展的请求头；GitHub 上游会校验这些头，请勿删除
+COPILOT_HEADERS = {
+    "Editor-Version": "vscode/1.95.3",
+    "Editor-Plugin-Version": "copilot-chat/0.22.4",
+    "Copilot-Integration-Id": "vscode-chat",
+    "User-Agent": "GitHubCopilotChat/0.22.4",
+    "Openai-Organization": "github-copilot",
+}
+# VS Code Copilot 官方公开的 OAuth Client ID（device flow 用）
+COPILOT_CLIENT_ID = "Iv1.b507a08c87ecfe98"
+COPILOT_DEVICE_CODE_URL = "https://github.com/login/device/code"
+COPILOT_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token"
+COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token"
+COPILOT_DEFAULT_BASE_URL = "https://api.githubcopilot.com"
+COPILOT_AUTH_DIR = Path.home() / ".config" / "databricks-claude-lb"
+COPILOT_LEGACY_AUTH_FILE = Path.home() / ".config" / "copilot-lb" / "auth.json"
+
+
+@dataclass
+class CopilotEndpoint:
+    name: str
+    github_token: str  # long-lived OAuth token（device flow 拿到的；运行时可被 reload_github_token 替换）
+    weight: int = 1
+    # 可选限定模型；空列表 = 接受所有模型，遇到不支持的 400 再降级 Azure
+    models: list = field(default_factory=list)
+
+    # long-lived token 来源记录（用于运行时按需重读，支持 K8s Secret rotation）
+    # 形如 {"type": "env", "key": "GITHUB_COPILOT_TOKEN_1"}
+    #     {"type": "file", "path": "/home/app/.config/.../copilot-auth-X.json"}
+    #     {"type": "literal"}（写死在 config 里，无法重读）
+    token_source: dict = field(default_factory=dict, repr=False)
+
+    # short-lived Copilot session token 内存缓存
+    session_token: Optional[str] = field(default=None, repr=False)
+    session_token_expires_at: int = field(default=0, repr=False)
+    session_base_url: str = field(default=COPILOT_DEFAULT_BASE_URL, repr=False)
+    last_token_refresh_at: int = field(default=0, repr=False)
+
+    # Token refresh metrics（供 /metrics 暴露）
+    token_refresh_total: int = field(default=0, repr=False)
+    token_refresh_failed_total: int = field(default=0, repr=False)
+    token_reload_total: int = field(default=0, repr=False)  # long-lived 热加载次数
+
+    # 运行时统计字段（与 AzureOpenAIEndpoint 保持一致）
     active_requests: int = field(default=0, repr=False)
     total_requests: int = field(default=0, repr=False)
     total_errors: int = field(default=0, repr=False)
@@ -879,11 +1168,11 @@ class ClaudeProxy:
                     continue
                 else:
                     try:
-                        error_body = e.response.json()
-                    except:
-                        error_body = {"error": {"message": e.response.text}}
-
-                    logger.error(f"Request failed with {e.response.status_code}: {json.dumps(error_body, ensure_ascii=False)}")
+                        body_text = e.response.text
+                    except Exception:
+                        body_text = ""
+                    error_body = _build_upstream_error_detail(e.response.status_code, body_text, "Databricks", endpoint.name)
+                    logger.error(f"Request failed with {e.response.status_code}: {json.dumps(error_body, ensure_ascii=False)[:500]}")
                     raise HTTPException(status_code=e.response.status_code, detail=error_body)
 
             except Exception as e:
@@ -1212,9 +1501,10 @@ class AzureOpenAIProxy:
                     continue
                 else:
                     try:
-                        error_body = e.response.json()
+                        body_text = e.response.text
                     except Exception:
-                        error_body = {"error": {"message": e.response.text}}
+                        body_text = ""
+                    error_body = _build_upstream_error_detail(e.response.status_code, body_text, "Azure OpenAI", endpoint.name)
                     raise HTTPException(status_code=e.response.status_code, detail=error_body)
             except Exception as e:
                 last_error = e
@@ -1268,9 +1558,10 @@ class AzureOpenAIProxy:
                     continue
                 else:
                     try:
-                        error_body = e.response.json()
+                        body_text = e.response.text
                     except Exception:
-                        error_body = {"error": {"message": e.response.text}}
+                        body_text = ""
+                    error_body = _build_upstream_error_detail(e.response.status_code, body_text, "Azure OpenAI", endpoint.name)
                     raise HTTPException(status_code=e.response.status_code, detail=error_body)
             except Exception as e:
                 last_error = e
@@ -1334,12 +1625,18 @@ class AzureOpenAIProxy:
                         error_body = await response.aread()
                         is_client_error = 400 <= response.status_code < 500 and response.status_code != 429
                         try:
-                            error_json = json.loads(error_body)
-                            error_msg = json.dumps(error_json)
+                            error_text = error_body.decode("utf-8") if isinstance(error_body, bytes) else str(error_body)
                         except Exception:
-                            error_msg = error_body.decode("utf-8") if isinstance(error_body, bytes) else str(error_body)
-
-                        logger.error(f"Azure stream failed ({response.status_code}): {error_msg}")
+                            error_text = ""
+                        upstream_detail = _build_upstream_error_detail(
+                            response.status_code, error_text, "Azure OpenAI", current_endpoint.name
+                        )
+                        log_snippet = error_text[:300].replace("\n", " ") if error_text else ""
+                        is_html = upstream_detail.get("error", {}).get("code") == "upstream_html_error"
+                        logger.error(
+                            f"Azure stream failed ({response.status_code}, "
+                            f"{'HTML error page' if is_html else 'JSON/text'}): {log_snippet}"
+                        )
                         await proxy_self.load_balancer.on_request_end(current_endpoint, success=False, is_client_error=is_client_error)
 
                         if response.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
@@ -1356,7 +1653,7 @@ class AzureOpenAIProxy:
                                 await proxy_self.load_balancer.on_request_start(current_endpoint)
                                 continue
 
-                        yield f"data: {json.dumps({'error': {'message': error_msg}})}\n\n".encode()
+                        yield f"data: {json.dumps(upstream_detail)}\n\ndata: [DONE]\n\n".encode()
                         return
 
                     # ---- 透传 + 心跳 + 后台 pump ----
@@ -1448,14 +1745,14 @@ class AzureOpenAIProxy:
                             await proxy_self.load_balancer.on_request_start(current_endpoint)
                             continue
 
-                    yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\n".encode()
+                    yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\ndata: [DONE]\n\n".encode()
                     return
 
                 except Exception as e:
                     error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
                     logger.error(f"Azure stream error: {error_detail}")
                     await proxy_self.load_balancer.on_request_end(current_endpoint, success=False)
-                    yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\n".encode()
+                    yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\ndata: [DONE]\n\n".encode()
                     return
 
                 finally:
@@ -1501,6 +1798,829 @@ class AzureOpenAIProxy:
         }
 
 
+# ==================== GitHub Copilot Proxy ====================
+
+class _UnsupportedModelError(Exception):
+    """Copilot 上游返回 model_not_found / unsupported_model 时抛出，触发 Azure fallback"""
+
+
+class _LongLivedTokenInvalidError(Exception):
+    """long-lived OAuth token 失效（GitHub 端 401），自愈链上层捕获"""
+
+
+def _build_upstream_error_detail(status: int, body_text: str, provider: str, endpoint_name: str) -> dict:
+    """把上游错误响应规范化成 JSON detail，避免 HTML / 非 JSON 内容透传给客户端。
+
+    - HTML 错误页（CDN "Connection Closed" 等）→ 替换为简洁说明
+    - 上游已经是 JSON → 直接用
+    - 文本/其他 → 截断后放 message
+    """
+    body_text = (body_text or "").strip()
+    snippet = body_text[:300]
+    body_lower = body_text.lstrip().lower()
+
+    # 1) HTML 错误页（CDN/网关），不要透传给客户端
+    if body_lower.startswith("<!doctype") or body_lower.startswith("<html") or "<body" in body_lower[:200]:
+        return {
+            "error": {
+                "message": (
+                    f"{provider} upstream returned a non-JSON HTML error page (HTTP {status}). "
+                    f"This usually indicates a transient outage on the upstream service or its CDN/gateway. "
+                    f"Endpoint: '{endpoint_name}'. Consider retrying."
+                ),
+                "type": "upstream_error",
+                "code": "upstream_html_error",
+                "upstream_status": status,
+                "upstream_endpoint": endpoint_name,
+            }
+        }
+
+    # 2) 上游 JSON：直接采用（如果格式合理）
+    if body_text:
+        try:
+            parsed = json.loads(body_text)
+            if isinstance(parsed, dict):
+                # 上游有 error 字段就直接用；同时附加上游元信息
+                if "error" in parsed and isinstance(parsed["error"], dict):
+                    parsed["error"].setdefault("upstream_status", status)
+                    parsed["error"].setdefault("upstream_endpoint", endpoint_name)
+                    return parsed
+                return {
+                    "error": {
+                        "message": json.dumps(parsed)[:500],
+                        "upstream_status": status,
+                        "upstream_endpoint": endpoint_name,
+                    }
+                }
+        except Exception:
+            pass
+
+    # 3) 纯文本 / 空 body
+    return {
+        "error": {
+            "message": (snippet or f"{provider} upstream returned HTTP {status} with no body"),
+            "type": "upstream_error",
+            "upstream_status": status,
+            "upstream_endpoint": endpoint_name,
+        }
+    }
+
+
+class CopilotProxy:
+    """代理 GitHub Copilot 的 /chat/completions 与 /responses 端点。
+
+    与 AzureOpenAIProxy 的差别：
+    - 鉴权：long-lived OAuth → short-lived session token（内存缓存 + 自动刷新）
+    - URL：动态从 token 交换响应中读取（默认 https://api.githubcopilot.com）
+    - 必须带一组模仿 VS Code Copilot Chat 扩展的请求头（COPILOT_HEADERS）
+    """
+
+    def __init__(self, load_balancer: LoadBalancer, api_key: str):
+        self.load_balancer = load_balancer  # 装载 CopilotEndpoint
+        self.api_key = api_key
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=None, write=60.0, pool=30.0),
+            limits=httpx.Limits(
+                max_connections=200,
+                max_keepalive_connections=50,
+                keepalive_expiry=30.0,
+            ),
+            http2=False,
+        )
+        self.global_stats = GlobalStats()
+        # Per-endpoint token-exchange lock，避免并发请求时重复刷新 session token
+        self._token_locks: dict = {}
+
+    def verify_api_key(self, key: str) -> bool:
+        return key == self.api_key
+
+    async def close(self):
+        await self.client.aclose()
+
+    # ---- Token 管理 ----
+
+    def _get_token_lock(self, endpoint: CopilotEndpoint) -> asyncio.Lock:
+        lock = self._token_locks.get(endpoint.name)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._token_locks[endpoint.name] = lock
+        return lock
+
+    async def _exchange_token(self, endpoint: CopilotEndpoint) -> str:
+        """单次 token 交换（不带自愈逻辑）。401 抛 _LongLivedTokenInvalidError；其他错误向上抛"""
+        headers = {
+            "Authorization": f"Bearer {endpoint.github_token}",
+            "Accept": "application/json",
+            "User-Agent": COPILOT_HEADERS["User-Agent"],
+            "Editor-Version": COPILOT_HEADERS["Editor-Version"],
+            "Editor-Plugin-Version": COPILOT_HEADERS["Editor-Plugin-Version"],
+        }
+        try:
+            resp = await self.client.get(COPILOT_TOKEN_URL, headers=headers, timeout=10.0)
+        except Exception as e:
+            endpoint.token_refresh_failed_total += 1
+            logger.error(f"[Copilot] token exchange network error for {endpoint.name}: {e}")
+            raise
+
+        if resp.status_code == 401:
+            endpoint.token_refresh_failed_total += 1
+            raise _LongLivedTokenInvalidError(f"401 from token exchange for '{endpoint.name}'")
+        if resp.status_code >= 400:
+            endpoint.token_refresh_failed_total += 1
+            resp.raise_for_status()
+
+        data = resp.json()
+        now = int(time.time())
+        endpoint.session_token = data["token"]
+        endpoint.session_token_expires_at = int(data["expires_at"])
+        base = (data.get("endpoints") or {}).get("api") or COPILOT_DEFAULT_BASE_URL
+        endpoint.session_base_url = base.rstrip("/")
+        endpoint.last_token_refresh_at = now
+        endpoint.token_refresh_total += 1
+        # 交换成功视为该 endpoint 健康，重置熔断
+        if endpoint.circuit_open:
+            logger.info(f"[Copilot] endpoint '{endpoint.name}' recovered, resetting circuit breaker")
+            endpoint.circuit_open = False
+            endpoint.total_errors = 0
+        expires_in = endpoint.session_token_expires_at - now
+        logger.info(f"[Copilot] session token cached for {endpoint.name}: base={endpoint.session_base_url}, expires in {expires_in}s")
+        return endpoint.session_token
+
+    async def get_session_token(self, endpoint: CopilotEndpoint, force: bool = False) -> str:
+        """获取 short-lived Copilot session token。带自愈链：
+
+        - 内存缓存 + 过期前 60 s 自动重新交换
+        - 401 → 触发 reload_github_token() 从源重读 long-lived token → 再交换一次
+        - 持续失败 → 该 endpoint 进熔断池，readiness probe 反映状态
+        """
+        async with self._get_token_lock(endpoint):
+            now = int(time.time())
+            if not force and endpoint.session_token and endpoint.session_token_expires_at - 60 > now:
+                return endpoint.session_token
+
+            try:
+                return await self._exchange_token(endpoint)
+            except _LongLivedTokenInvalidError as first_err:
+                # 自愈：尝试从源重读 long-lived token（K8s Secret rotation 场景）
+                if reload_github_token(endpoint):
+                    logger.warning(f"[Copilot] long-lived token 401 for '{endpoint.name}', reloaded from source and retrying")
+                    try:
+                        return await self._exchange_token(endpoint)
+                    except _LongLivedTokenInvalidError:
+                        pass  # 重读后还是 401 → 进熔断
+                # 重读失败或源里就是失效 token → 熔断
+                self._mark_endpoint_unhealthy(endpoint, "long-lived OAuth token invalid (re-login required)")
+                raise HTTPException(
+                    status_code=401,
+                    detail={"error": {"message":
+                        f"GitHub long-lived token for endpoint '{endpoint.name}' is invalid. "
+                        f"Update K8s secret with a fresh token (python main.py --copilot-login --endpoint {endpoint.name})."}},
+                ) from first_err
+
+    def _mark_endpoint_unhealthy(self, endpoint: CopilotEndpoint, reason: str):
+        endpoint.circuit_open = True
+        endpoint.last_error_time = time.time()
+        endpoint.total_errors += 1
+        logger.error(f"[Copilot] endpoint '{endpoint.name}' marked unhealthy: {reason}")
+
+    async def warmup(self):
+        """启动时为所有 endpoint 预热 session token（暴露无效 token 为日志而不是首请求 500）"""
+        for ep in self.load_balancer.endpoints:
+            try:
+                await self.get_session_token(ep)
+            except Exception as e:
+                logger.warning(f"[Copilot] warmup failed for {ep.name}: {e}. Endpoint will retry on first request.")
+
+    async def background_refresh_loop(self, interval: int = 300, threshold: int = 600):
+        """后台主动刷新 task：每 interval 秒扫一遍，session token 剩 ≤ threshold 秒就主动刷新。
+
+        默认 5 min 扫描，10 min 阈值（30min token 在 ~20min 时被主动刷一次）。
+        即使无外部请求也保持 token 新鲜，避免冷门服务在请求来时才发现 token 已死。
+        """
+        logger.info(f"[Copilot] background refresh started: interval={interval}s, threshold={threshold}s")
+        while True:
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
+            for ep in list(self.load_balancer.endpoints):
+                try:
+                    now = int(time.time())
+                    remaining = ep.session_token_expires_at - now
+                    if remaining <= threshold or not ep.session_token:
+                        logger.info(f"[Copilot] background refresh: '{ep.name}' remaining={remaining}s, refreshing")
+                        await self.get_session_token(ep, force=True)
+                except HTTPException as e:
+                    logger.warning(f"[Copilot] background refresh failed for {ep.name}: {e.detail}")
+                except Exception as e:
+                    logger.warning(f"[Copilot] background refresh failed for {ep.name}: {type(e).__name__}: {e}")
+        logger.info("[Copilot] background refresh stopped")
+
+    def is_any_endpoint_healthy(self) -> bool:
+        """有任一端点 token 有效且未熔断 → readiness 可通过"""
+        now = int(time.time())
+        for ep in self.load_balancer.endpoints:
+            if ep.circuit_open:
+                continue
+            if ep.session_token and ep.session_token_expires_at > now:
+                return True
+        return False
+
+    # ---- Endpoint 选择 ----
+
+    def _select_endpoint(self, model: str) -> Optional[CopilotEndpoint]:
+        """从可用端点中筛选支持指定模型的端点。空 models = 通配。"""
+        available = self.load_balancer.get_available_endpoints()
+        matched = [ep for ep in available if not ep.models or model in ep.models]
+        if not matched:
+            return None
+        if len(matched) == 1:
+            return matched[0]
+
+        strategy = self.load_balancer.strategy
+        if strategy == "least_requests":
+            min_active = min(ep.active_requests / ep.weight for ep in matched)
+            candidates = [ep for ep in matched if ep.active_requests / ep.weight == min_active]
+            if len(candidates) == 1:
+                return candidates[0]
+            min_total = min(ep.total_requests / ep.weight for ep in candidates)
+            finalists = [ep for ep in candidates if ep.total_requests / ep.weight == min_total]
+            return random.choice(finalists)
+        elif strategy == "round_robin":
+            total_weight = sum(ep.weight for ep in matched)
+            idx = self.load_balancer._rr_index % total_weight
+            self.load_balancer._rr_index += 1
+            cumulative = 0
+            for ep in matched:
+                cumulative += ep.weight
+                if idx < cumulative:
+                    return ep
+            return matched[-1]
+        else:
+            weights = [ep.weight for ep in matched]
+            return random.choices(matched, weights=weights, k=1)[0]
+
+    def can_handle(self, model: str) -> bool:
+        """是否有任何健康端点可服务该模型（路由层用来决定是否优先 Copilot）"""
+        return self._select_endpoint(model) is not None
+
+    # ---- 用量记录（与 AzureOpenAIProxy._record_usage 对称）----
+
+    def _record_usage(self, endpoint: CopilotEndpoint, model: str, input_tokens: int, output_tokens: int, elapsed: float,
+                      cache_creation_tokens: int = 0, cache_read_tokens: int = 0):
+        endpoint.total_input_tokens += input_tokens
+        endpoint.total_output_tokens += output_tokens
+        endpoint.total_cache_creation_tokens += cache_creation_tokens
+        endpoint.total_cache_read_tokens += cache_read_tokens
+        endpoint.total_response_time += elapsed
+        endpoint.successful_requests += 1
+        if model not in endpoint.model_stats:
+            endpoint.model_stats[model] = {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0, "requests": 0}
+        endpoint.model_stats[model]["input_tokens"] += input_tokens
+        endpoint.model_stats[model]["output_tokens"] += output_tokens
+        endpoint.model_stats[model]["cache_creation_tokens"] += cache_creation_tokens
+        endpoint.model_stats[model]["cache_read_tokens"] += cache_read_tokens
+        endpoint.model_stats[model]["requests"] += 1
+        self.global_stats.total_input_tokens += input_tokens
+        self.global_stats.total_output_tokens += output_tokens
+        self.global_stats.total_cache_creation_tokens += cache_creation_tokens
+        self.global_stats.total_cache_read_tokens += cache_read_tokens
+        self.global_stats.total_response_time += elapsed
+        self.global_stats.successful_requests += 1
+        self.global_stats.total_requests += 1
+        if usage_store:
+            usage_store.record(model, input_tokens, output_tokens,
+                               cache_creation_tokens, cache_read_tokens)
+
+    # ---- 请求构造 ----
+
+    @staticmethod
+    def _has_image(body: dict) -> bool:
+        msgs = body.get("messages")
+        if not isinstance(msgs, list):
+            return False
+        for m in msgs:
+            content = m.get("content") if isinstance(m, dict) else None
+            if isinstance(content, list):
+                for c in content:
+                    if isinstance(c, dict) and c.get("type") == "image_url":
+                        return True
+        return False
+
+    async def _build_headers(self, endpoint: CopilotEndpoint, has_image: bool) -> dict:
+        token = await self.get_session_token(endpoint)
+        headers = {
+            **COPILOT_HEADERS,
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Openai-Intent": "conversation-edits",
+            "X-Initiator": "user",
+        }
+        if has_image:
+            headers["Copilot-Vision-Request"] = "true"
+        return headers
+
+    @staticmethod
+    def _is_unsupported_model_error(status: int, body_text: str) -> bool:
+        """判断上游错误是否表明该模型不被 Copilot 支持，触发 Azure fallback"""
+        if status not in (400, 404):
+            return False
+        text = (body_text or "").lower()
+        keywords = ("model_not_found", "model not found", "unknown model",
+                    "model_not_supported", "not supported", "invalid model")
+        return any(k in text for k in keywords)
+
+    # ---- 代理入口 ----
+
+    async def proxy_chat_completions(self, body: dict, stream: bool = False):
+        """代理 GitHub Copilot Chat Completions API"""
+        return await self._proxy(body, stream, api_type="chat")
+
+    async def proxy_responses(self, body: dict, stream: bool = False):
+        """代理 GitHub Copilot Responses API（用于 GPT-5 系列）"""
+        return await self._proxy(body, stream, api_type="responses")
+
+    async def _proxy(self, body: dict, stream: bool, api_type: str):
+        model = body.get("model", "unknown")
+        max_retries = 3
+        last_error: Optional[Exception] = None
+        start_time = time.time()
+        has_image = self._has_image(body)
+
+        # 流式请求注入 stream_options 以获取 usage（Copilot 兼容 OpenAI Chat 流约定）
+        if stream and api_type == "chat" and "stream_options" not in body:
+            body["stream_options"] = {"include_usage": True}
+
+        for attempt in range(max_retries):
+            endpoint = self._select_endpoint(model)
+            if not endpoint:
+                raise HTTPException(status_code=404, detail={"error": {"message": f"No Copilot endpoint available for model '{model}'"}})
+
+            await self.load_balancer.on_request_start(endpoint)
+
+            try:
+                headers = await self._build_headers(endpoint, has_image)
+            except HTTPException:
+                await self.load_balancer.on_request_end(endpoint, success=False)
+                raise
+            except Exception as e:
+                logger.error(f"[Copilot {api_type}][{model}] header build failed on {endpoint.name}: {e}")
+                await self.load_balancer.on_request_end(endpoint, success=False)
+                last_error = e
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(min(2 ** attempt, 8))
+                    continue
+                raise HTTPException(status_code=503, detail={"error": {"message": f"Copilot token exchange failed: {e}"}})
+
+            url = f"{endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
+            logger.info(f"[Copilot {api_type}][{model}] -> {endpoint.name} (attempt {attempt + 1})")
+
+            try:
+                if stream:
+                    return await self._stream_response(endpoint, url, body, headers, model, api_type, start_time)
+                else:
+                    return await self._normal_request(endpoint, url, body, headers, model, api_type, start_time)
+            except _UnsupportedModelError:
+                # 模型不被 Copilot 支持，向上层抛，由路由 fallback 到 Azure
+                self.global_stats.total_errors += 1
+                await self.load_balancer.on_request_end(endpoint, success=False, is_client_error=True)
+                raise
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                self.global_stats.total_errors += 1
+                status = e.response.status_code
+                body_text = ""
+                try:
+                    body_text = e.response.text
+                except Exception:
+                    pass
+                if self._is_unsupported_model_error(status, body_text):
+                    await self.load_balancer.on_request_end(endpoint, success=False, is_client_error=True)
+                    raise _UnsupportedModelError(f"{status}: {body_text[:200]}")
+                # 401 自愈：上游 session token 失效 → 强制刷新后重试一次
+                if status == 401 and attempt < max_retries - 1:
+                    logger.warning(f"[Copilot] 401 from upstream on {endpoint.name}, forcing session refresh and retrying")
+                    await self.load_balancer.on_request_end(endpoint, success=False)
+                    try:
+                        await self.get_session_token(endpoint, force=True)
+                        continue
+                    except Exception as refresh_err:
+                        logger.error(f"[Copilot] forced refresh failed: {refresh_err}")
+                        # fall through 到正常错误返回
+                is_client_error = 400 <= status < 500 and status != 429
+                await self.load_balancer.on_request_end(endpoint, success=False, is_client_error=is_client_error)
+                if status in (429, 500, 502, 503, 504):
+                    logger.warning(f"[Copilot] {endpoint.name} returned {status}, retrying...")
+                    await asyncio.sleep(min(2 ** attempt, 8))
+                    continue
+                error_body = _build_upstream_error_detail(status, body_text, "Copilot", endpoint.name)
+                raise HTTPException(status_code=status, detail=error_body)
+            except Exception as e:
+                last_error = e
+                self.global_stats.total_errors += 1
+                logger.error(f"[Copilot] {endpoint.name} failed: {e}")
+                await self.load_balancer.on_request_end(endpoint, success=False)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(min(2 ** attempt, 8))
+                    continue
+
+        # 重试都失败：尽量用 helper 包装上游错误，避免 HTML / 异常字符串泄露
+        if isinstance(last_error, httpx.HTTPStatusError):
+            try:
+                body_text = last_error.response.text
+            except Exception:
+                body_text = ""
+            detail = _build_upstream_error_detail(
+                last_error.response.status_code, body_text, "Copilot", endpoint.name if 'endpoint' in dir() and endpoint else "?"
+            )
+            detail["error"]["message"] = "All Copilot retries exhausted. " + detail["error"].get("message", "")
+            raise HTTPException(status_code=503, detail=detail)
+        raise HTTPException(status_code=503, detail={"error": {"message": f"All Copilot retries failed: {type(last_error).__name__ if last_error else 'unknown'}: {str(last_error)[:300] if last_error else ''}"}})
+
+    async def _normal_request(self, endpoint: CopilotEndpoint, url: str, body: dict, headers: dict,
+                               model: str, api_type: str, start_time: float) -> JSONResponse:
+        response = await self.client.post(url, json=body, headers=headers)
+        if response.status_code >= 400:
+            body_text = response.text
+            if self._is_unsupported_model_error(response.status_code, body_text):
+                raise _UnsupportedModelError(f"{response.status_code}: {body_text[:200]}")
+            response.raise_for_status()
+        await self.load_balancer.on_request_end(endpoint, success=True)
+
+        elapsed = time.time() - start_time
+        resp_json = response.json()
+        usage = resp_json.get("usage", {}) or {}
+        if api_type == "responses":
+            input_tokens = usage.get("input_tokens", 0)
+            output_tokens = usage.get("output_tokens", 0)
+            cache_read_tokens = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
+        else:
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+            cache_read_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+        self._record_usage(endpoint, model, input_tokens, output_tokens, elapsed,
+                           cache_read_tokens=cache_read_tokens)
+        return JSONResponse(content=resp_json, status_code=response.status_code)
+
+    async def _stream_response(self, endpoint: CopilotEndpoint, url: str, body: dict, headers: dict,
+                                model: str, api_type: str, start_time: float) -> StreamingResponse:
+        """流式请求，复用 AzureOpenAIProxy._stream_response 同款 pump + heartbeat + sent_any_chunk 守卫架构"""
+        proxy_self = self
+        max_retries = 3
+
+        async def stream_generator():
+            current_endpoint = endpoint
+            current_url = url
+            current_headers = headers
+            input_tokens = 0
+            output_tokens = 0
+            cache_read_tokens = 0
+            sent_any_chunk = False
+            HEARTBEAT = b": keep-alive\n\n"
+
+            for attempt in range(max_retries):
+                response = None
+                pump_task = None
+
+                try:
+                    req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
+                    response = await proxy_self.client.send(req, stream=True)
+
+                    if response.status_code >= 400:
+                        error_body = await response.aread()
+                        try:
+                            error_text = error_body.decode("utf-8") if isinstance(error_body, bytes) else str(error_body)
+                        except Exception:
+                            error_text = ""
+                        # unsupported model：未发任何 chunk 时向上抛触发 Azure fallback
+                        if not sent_any_chunk and proxy_self._is_unsupported_model_error(response.status_code, error_text):
+                            await proxy_self.load_balancer.on_request_end(current_endpoint, success=False, is_client_error=True)
+                            raise _UnsupportedModelError(f"{response.status_code}: {error_text[:200]}")
+
+                        is_client_error = 400 <= response.status_code < 500 and response.status_code != 429
+                        # 规范化（HTML 不透传给客户端；JSON 直接用）
+                        upstream_detail = _build_upstream_error_detail(
+                            response.status_code, error_text, "Copilot", current_endpoint.name
+                        )
+                        # 日志只截断 + 标注是否 HTML
+                        log_snippet = error_text[:300].replace("\n", " ") if error_text else ""
+                        is_html = upstream_detail.get("error", {}).get("code") == "upstream_html_error"
+                        logger.error(
+                            f"[Copilot] stream failed ({response.status_code}, "
+                            f"{'HTML error page' if is_html else 'JSON/text'}): {log_snippet}"
+                        )
+                        await proxy_self.load_balancer.on_request_end(current_endpoint, success=False, is_client_error=is_client_error)
+
+                        # 401 自愈：force 刷新 session token 后用同 endpoint 重试一次
+                        if response.status_code == 401 and attempt < max_retries - 1 and not sent_any_chunk:
+                            logger.warning(f"[Copilot] 401 from stream on {current_endpoint.name}, forcing session refresh and retrying")
+                            try:
+                                await proxy_self.get_session_token(current_endpoint, force=True)
+                                current_headers = await proxy_self._build_headers(current_endpoint, proxy_self._has_image(body))
+                                await proxy_self.load_balancer.on_request_start(current_endpoint)
+                                continue
+                            except Exception as he:
+                                logger.error(f"[Copilot] forced refresh during stream retry failed: {he}")
+                                # fall through 到错误返回
+
+                        if response.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1 and not sent_any_chunk:
+                            logger.warning(f"[Copilot] {current_endpoint.name} returned {response.status_code}, retrying stream...")
+                            await asyncio.sleep(min(2 ** attempt, 8))
+                            new_endpoint = proxy_self._select_endpoint(model)
+                            if new_endpoint:
+                                current_endpoint = new_endpoint
+                                try:
+                                    current_headers = await proxy_self._build_headers(current_endpoint, proxy_self._has_image(body))
+                                except Exception as he:
+                                    logger.error(f"[Copilot] header build during retry failed: {he}")
+                                    yield f"data: {json.dumps({'error': {'message': str(he)}})}\n\ndata: [DONE]\n\n".encode()
+                                    return
+                                current_url = f"{current_endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
+                                await proxy_self.load_balancer.on_request_start(current_endpoint)
+                                continue
+
+                        yield f"data: {json.dumps(upstream_detail)}\n\ndata: [DONE]\n\n".encode()
+                        return
+
+                    # ---- 透传 + 心跳 + 后台 pump ----
+                    queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+
+                    async def _pump(resp):
+                        try:
+                            async for c in resp.aiter_bytes():
+                                await queue.put(("chunk", c))
+                            await queue.put(("eof", None))
+                        except asyncio.CancelledError:
+                            raise
+                        except BaseException as ex:  # noqa: BLE001
+                            await queue.put(("err", ex))
+
+                    pump_task = asyncio.create_task(_pump(response))
+
+                    buffer = ""
+                    stream_error: Optional[BaseException] = None
+
+                    while True:
+                        try:
+                            kind, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            yield HEARTBEAT
+                            continue
+
+                        if kind == "err":
+                            stream_error = payload
+                            break
+                        if kind == "eof":
+                            break
+
+                        chunk = payload
+                        yield chunk
+                        sent_any_chunk = True
+                        try:
+                            buffer += chunk.decode("utf-8", errors="ignore")
+                            while "\n\n" in buffer:
+                                event_str, buffer = buffer.split("\n\n", 1)
+                                for line in event_str.split("\n"):
+                                    if not line.startswith("data: ") or line.strip() == "data: [DONE]":
+                                        continue
+                                    try:
+                                        data = json.loads(line[6:])
+                                    except Exception:
+                                        continue
+                                    if api_type == "responses":
+                                        if data.get("type") == "response.completed":
+                                            usage = data.get("response", {}).get("usage", {}) or {}
+                                            input_tokens = usage.get("input_tokens", 0)
+                                            output_tokens = usage.get("output_tokens", 0)
+                                            cache_read_tokens = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
+                                    else:
+                                        usage = data.get("usage")
+                                        if usage:
+                                            input_tokens = usage.get("prompt_tokens", 0)
+                                            output_tokens = usage.get("completion_tokens", 0)
+                                            cache_read_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+                                if len(buffer) > 65536:
+                                    buffer = ""
+                        except Exception:
+                            pass
+
+                    if stream_error is not None:
+                        raise stream_error
+
+                    await proxy_self.load_balancer.on_request_end(current_endpoint, success=True)
+                    elapsed = time.time() - start_time
+                    proxy_self._record_usage(current_endpoint, model, input_tokens, output_tokens, elapsed,
+                                              cache_read_tokens=cache_read_tokens)
+                    return
+
+                except _UnsupportedModelError:
+                    # 让上层路由 fallback Azure（仅未发 chunk 才会到这里）
+                    raise
+                except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
+                        httpx.ConnectError, httpx.RemoteProtocolError,
+                        httpx.ReadError, httpx.WriteError) as e:
+                    error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
+                    logger.error(f"[Copilot] stream network error on {current_endpoint.name}: {error_detail}")
+                    await proxy_self.load_balancer.on_request_end(current_endpoint, success=False)
+
+                    if not sent_any_chunk and attempt < max_retries - 1:
+                        await asyncio.sleep(min(2 ** attempt, 8))
+                        new_endpoint = proxy_self._select_endpoint(model)
+                        if new_endpoint:
+                            current_endpoint = new_endpoint
+                            try:
+                                current_headers = await proxy_self._build_headers(current_endpoint, proxy_self._has_image(body))
+                            except Exception as he:
+                                logger.error(f"[Copilot] header build during retry failed: {he}")
+                                yield f"data: {json.dumps({'error': {'message': str(he)}})}\n\ndata: [DONE]\n\n".encode()
+                                return
+                            current_url = f"{current_endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
+                            await proxy_self.load_balancer.on_request_start(current_endpoint)
+                            continue
+
+                    yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\ndata: [DONE]\n\n".encode()
+                    return
+
+                except Exception as e:
+                    error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
+                    logger.error(f"[Copilot] stream error: {error_detail}")
+                    await proxy_self.load_balancer.on_request_end(current_endpoint, success=False)
+                    yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\ndata: [DONE]\n\n".encode()
+                    return
+
+                finally:
+                    if pump_task is not None and not pump_task.done():
+                        pump_task.cancel()
+                        try:
+                            await pump_task
+                        except BaseException:  # noqa: BLE001
+                            pass
+                    if response is not None:
+                        try:
+                            await response.aclose()
+                        except Exception:
+                            pass
+
+        return StreamingResponse(
+            stream_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+        )
+
+    def get_stats(self) -> dict:
+        gs = self.global_stats
+        uptime = time.time() - gs.start_time
+        endpoints_stats = []
+        for ep in self.load_balancer.endpoints:
+            endpoints_stats.append({
+                "name": ep.name,
+                "active_requests": ep.active_requests,
+                "total_requests": ep.total_requests,
+                "total_errors": ep.total_errors,
+                "successful_requests": ep.successful_requests,
+                "error_rate": round(ep.total_errors / ep.total_requests * 100, 2) if ep.total_requests > 0 else 0,
+                "circuit_open": ep.circuit_open,
+                "total_input_tokens": ep.total_input_tokens,
+                "total_output_tokens": ep.total_output_tokens,
+                "total_cache_creation_tokens": ep.total_cache_creation_tokens,
+                "total_cache_read_tokens": ep.total_cache_read_tokens,
+                "total_tokens": ep.total_input_tokens + ep.total_output_tokens,
+                "avg_response_time_ms": round(ep.total_response_time / ep.successful_requests * 1000, 1) if ep.successful_requests > 0 else 0,
+                "model_stats": ep.model_stats,
+                "models": ep.models,  # 用 'models' 区别于 Azure 的 'deployments'
+                "session_token_expires_at": ep.session_token_expires_at,
+            })
+        return {
+            "global": {
+                "uptime_seconds": round(uptime, 1),
+                "total_requests": gs.total_requests,
+                "total_errors": gs.total_errors,
+                "total_input_tokens": gs.total_input_tokens,
+                "total_output_tokens": gs.total_output_tokens,
+                "total_cache_creation_tokens": gs.total_cache_creation_tokens,
+                "total_cache_read_tokens": gs.total_cache_read_tokens,
+                "total_tokens": gs.total_input_tokens + gs.total_output_tokens,
+                "avg_response_time_ms": round(gs.total_response_time / gs.successful_requests * 1000, 1) if gs.successful_requests > 0 else 0,
+                "requests_per_minute": round(gs.total_requests / (uptime / 60), 2) if uptime > 0 else 0,
+            },
+            "endpoints": endpoints_stats,
+        }
+
+
+# ==================== Copilot Token File Helpers ====================
+
+def _copilot_local_auth_path(name: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    return COPILOT_AUTH_DIR / f"copilot-auth-{safe}.json"
+
+
+_COPILOT_ENV_REF = re.compile(r"^\s*\$\{([^}]+)\}\s*$")
+
+
+def _read_token_from_file(path: Path) -> Optional[str]:
+    try:
+        data = json.loads(path.read_text())
+        return data.get("github_token") or data.get("githubToken")
+    except Exception as e:
+        logger.warning(f"[Copilot] failed to read {path}: {e}")
+        return None
+
+
+def resolve_github_token(endpoint_cfg: dict) -> tuple:
+    """按优先级解析 GitHub long-lived OAuth token，并返回 (token, source_dict)。
+
+    source_dict 记录可重读的来源，供运行时 reload_github_token 配合 K8s Secret rotation 使用：
+      - {"type":"env","key":"GITHUB_COPILOT_TOKEN_1"}     # config 里写 ${ENV}
+      - {"type":"file","path":"..."}                       # 本项目或 copilot-lb 缓存文件
+      - {"type":"literal"}                                  # config 里写死的明文（无法运行时重读）
+
+    优先级：
+      1) config.yaml 的 github_token（${ENV} 或明文）
+      2) 本项目 device-flow 缓存 ~/.config/databricks-claude-lb/copilot-auth-<name>.json
+      3) 兼容 copilot-lb 已有缓存 ~/.config/copilot-lb/auth.json
+    """
+    name = endpoint_cfg.get("name", "default")
+    raw = endpoint_cfg.get("github_token")
+
+    # 1) config 显式
+    if raw and isinstance(raw, str) and raw.strip():
+        m = _COPILOT_ENV_REF.match(raw)
+        if m:
+            env_key = m.group(1)
+            token = os.environ.get(env_key, "").strip()
+            if token:
+                logger.info(f"[Copilot] resolved token for '{name}' from env ${{{env_key}}}")
+                return token, {"type": "env", "key": env_key}
+        else:
+            token = expand_env_vars(raw).strip()  # 支持嵌入式 ${X} 兼容
+            if token:
+                return token, {"type": "literal"}
+
+    # 2) 本项目缓存
+    local = _copilot_local_auth_path(name)
+    if local.exists():
+        tok = _read_token_from_file(local)
+        if tok:
+            logger.info(f"[Copilot] resolved token for '{name}' from {local}")
+            return tok, {"type": "file", "path": str(local)}
+
+    # 3) copilot-lb 兼容
+    if COPILOT_LEGACY_AUTH_FILE.exists():
+        tok = _read_token_from_file(COPILOT_LEGACY_AUTH_FILE)
+        if tok:
+            logger.info(f"[Copilot] resolved token for '{name}' from {COPILOT_LEGACY_AUTH_FILE}")
+            return tok, {"type": "file", "path": str(COPILOT_LEGACY_AUTH_FILE)}
+
+    raise RuntimeError(
+        f"No GitHub token resolved for Copilot endpoint '{name}'. "
+        f"Provide config.github_copilot.endpoints[].github_token, "
+        f"or run: python main.py --copilot-login --endpoint {name}"
+    )
+
+
+def reload_github_token(endpoint: "CopilotEndpoint") -> bool:
+    """从 endpoint.token_source 重新读取 long-lived token。
+
+    返回 True 表示读到了 *新* token（与当前不同）；False 表示无变化或源不可重读。
+    用途：
+      - K8s Secret rotation：mounted secret 文件被 kubelet 异步同步后，调用这个能拿到新值
+      - 运维更新 env 后调 /admin/copilot/reload 触发重读（虽然 env 在 Pod 启动后通常不变，但兼容 sidecar 注入器场景）
+    """
+    src = endpoint.token_source or {}
+    new_token: Optional[str] = None
+    if src.get("type") == "env":
+        new_token = os.environ.get(src.get("key", ""), "").strip() or None
+    elif src.get("type") == "file":
+        path = src.get("path")
+        if path:
+            new_token = _read_token_from_file(Path(path))
+    # type=literal 无源可重读
+    if not new_token:
+        return False
+    if new_token == endpoint.github_token:
+        return False
+    endpoint.github_token = new_token
+    endpoint.token_reload_total += 1
+    logger.info(f"[Copilot] long-lived token reloaded for '{endpoint.name}' from {src.get('type')}")
+    return True
+
+
+def save_copilot_auth(name: str, github_token: str) -> Path:
+    COPILOT_AUTH_DIR.mkdir(parents=True, exist_ok=True)
+    path = _copilot_local_auth_path(name)
+    payload = {"github_token": github_token, "saved_at": int(time.time())}
+    path.write_text(json.dumps(payload, indent=2))
+    try:
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 0600
+    except Exception:
+        pass
+    return path
+
+
 # ==================== Config ====================
 
 def expand_env_vars(value: str) -> str:
@@ -1511,7 +2631,7 @@ def expand_env_vars(value: str) -> str:
 
 
 def load_config(config_path: str = "config.yaml") -> tuple:
-    """返回 (ClaudeProxy, Optional[AzureOpenAIProxy])"""
+    """返回 (ClaudeProxy, Optional[AzureOpenAIProxy], Optional[CopilotProxy], storage_config)"""
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
@@ -1561,6 +2681,38 @@ def load_config(config_path: str = "config.yaml") -> tuple:
         )
         azure_proxy = AzureOpenAIProxy(azure_lb, api_key)
 
+    # GitHub Copilot 端点（可选）
+    copilot_proxy = None
+    copilot_config = config.get("github_copilot")
+    if copilot_config:
+        copilot_lb_config = copilot_config.get("load_balancer", lb_config)
+        copilot_endpoints = []
+        for ep_cfg in copilot_config.get("endpoints", []):
+            try:
+                gh_token, token_source = resolve_github_token(ep_cfg)
+            except RuntimeError as e:
+                logger.warning(f"[Copilot] skip endpoint '{ep_cfg.get('name')}': {e}")
+                continue
+            copilot_endpoints.append(CopilotEndpoint(
+                name=ep_cfg["name"],
+                github_token=gh_token,
+                token_source=token_source,
+                weight=ep_cfg.get("weight", 1),
+                models=ep_cfg.get("models", []) or [],
+            ))
+            logger.info(f"Loaded Copilot endpoint: {ep_cfg['name']} (models: {ep_cfg.get('models') or 'all'}, source: {token_source.get('type')})")
+
+        if copilot_endpoints:
+            copilot_lb = LoadBalancer(
+                endpoints=copilot_endpoints,
+                strategy=copilot_lb_config.get("strategy", "least_requests"),
+                circuit_breaker_threshold=copilot_lb_config.get("circuit_breaker_threshold", 5),
+                circuit_breaker_timeout=copilot_lb_config.get("circuit_breaker_timeout", 60),
+            )
+            copilot_proxy = CopilotProxy(copilot_lb, api_key)
+        else:
+            logger.warning("[Copilot] github_copilot configured but no usable endpoints; Copilot disabled")
+
     # 存储配置：usage_storage 优先，否则回退到 usage_data_dir
     storage_config = config.get("usage_storage")
     if storage_config:
@@ -1572,21 +2724,22 @@ def load_config(config_path: str = "config.yaml") -> tuple:
             storage_config = {"type": "json", "path": "./usage_data"}
     else:
         storage_config = {"type": "json", "path": expand_env_vars(config.get("usage_data_dir", "./usage_data"))}
-    return claude_proxy, azure_proxy, storage_config
+    return claude_proxy, azure_proxy, copilot_proxy, storage_config
 
 
 # ==================== FastAPI App ====================
 
 proxy: Optional[ClaudeProxy] = None
 azure_proxy: Optional[AzureOpenAIProxy] = None
+copilot_proxy: Optional[CopilotProxy] = None
 usage_store: Optional[UsageDataStore] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global proxy, azure_proxy, usage_store
+    global proxy, azure_proxy, copilot_proxy, usage_store
     config_path = os.getenv("CONFIG_PATH", "config.yaml")
-    proxy, azure_proxy, storage_config = load_config(config_path)
+    proxy, azure_proxy, copilot_proxy, storage_config = load_config(config_path)
 
     usage_store = create_usage_store(storage_config)
     await usage_store.start()
@@ -1616,19 +2769,39 @@ async def lifespan(app: FastAPI):
     logger.info(f"Usage storage: {storage_config.get('type', 'json')}")
     if azure_proxy:
         logger.info(f"Azure OpenAI proxy enabled with {len(azure_proxy.load_balancer.endpoints)} endpoints")
+    copilot_bg_task: Optional[asyncio.Task] = None
+    if copilot_proxy:
+        logger.info(f"GitHub Copilot proxy enabled with {len(copilot_proxy.load_balancer.endpoints)} endpoints")
+        # 后台预热 token，避免阻塞启动；token 无效会在日志中暴露
+        asyncio.create_task(copilot_proxy.warmup())
+        # 后台主动刷新 task：5min 扫一次，session 剩 10min 就刷新（30min token 在 ~20min 处刷新）
+        refresh_interval = int(os.getenv("COPILOT_REFRESH_INTERVAL", "300"))
+        refresh_threshold = int(os.getenv("COPILOT_REFRESH_THRESHOLD", "600"))
+        copilot_bg_task = asyncio.create_task(
+            copilot_proxy.background_refresh_loop(interval=refresh_interval, threshold=refresh_threshold)
+        )
     yield
+    if copilot_bg_task:
+        copilot_bg_task.cancel()
+        try:
+            await copilot_bg_task
+        except (asyncio.CancelledError, Exception):
+            pass
     if usage_store:
         await usage_store.stop()
     if proxy:
         await proxy.close()
     if azure_proxy:
         await azure_proxy.close()
+    if copilot_proxy:
+        await copilot_proxy.close()
 
 
 app = FastAPI(title="Databricks Claude Proxy (Native Anthropic)", lifespan=lifespan)
 
 
-MAX_REQUEST_SIZE = 4 * 1024 * 1024  # 4MB Databricks limit
+MAX_REQUEST_SIZE = 4 * 1024 * 1024  # Databricks 4MB 上游硬限制（压缩后仍超才 413）
+MAX_RAW_REQUEST_SIZE = 64 * 1024 * 1024  # LB 入口宽容上限：压缩前最大 64MB，避免 OOM
 
 
 @app.post("/v1/messages")
@@ -1639,26 +2812,50 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
     if not proxy.verify_api_key(actual_key):
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
 
-    # 获取原始请求体并检查大小
+    # 读取原始请求体，先做粗暴上限保护避免 OOM，然后尝试压图
     body_bytes = await request.body()
     body_size = len(body_bytes)
 
+    if body_size > MAX_RAW_REQUEST_SIZE:
+        size_mb = body_size / (1024 * 1024)
+        logger.warning(f"Request too large (raw): {size_mb:.2f}MB > {MAX_RAW_REQUEST_SIZE/1024/1024:.0f}MB")
+        raise HTTPException(
+            status_code=413,
+            detail={"error": {"type": "request_too_large",
+                "message": f"Request size ({size_mb:.2f}MB) exceeds LB raw limit ({MAX_RAW_REQUEST_SIZE/1024/1024:.0f}MB)."}},
+        )
+
+    try:
+        body = json.loads(body_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
+
+    # 大请求先尝试压缩图片（小请求跳过节省 CPU）
+    if body_size > _IMG_COMPRESS_THRESHOLD:
+        stats = await compress_images_async(body)
+        if stats["count"] > 0:
+            saved_kb = (stats["before"] - stats["after"]) / 1024
+            logger.info(
+                f"[image-compress] /v1/messages: {stats['count']} imgs "
+                f"{stats['before']/1024:.0f}KB -> {stats['after']/1024:.0f}KB (saved {saved_kb:.0f}KB)"
+            )
+            body_bytes = json.dumps(body).encode("utf-8")
+            body_size = len(body_bytes)
+
     if body_size > MAX_REQUEST_SIZE:
         size_mb = body_size / (1024 * 1024)
-        logger.warning(f"Request too large: {size_mb:.2f}MB (limit: 4MB)")
+        logger.warning(f"Request too large after compression: {size_mb:.2f}MB (Databricks limit: 4MB)")
         raise HTTPException(
             status_code=413,
             detail={
                 "error": {
                     "type": "request_too_large",
-                    "message": f"Request size ({size_mb:.2f}MB) exceeds Databricks 4MB limit. Please use /clear to start a new conversation or remove large content from context."
+                    "message": f"Request size ({size_mb:.2f}MB) exceeds Databricks 4MB limit even after image compression. Please use /clear or remove large content."
                 }
             }
         )
 
-    body = json.loads(body_bytes)
     stream = body.get("stream", False)
-
     logger.info(f"Request: model={body.get('model')}, stream={stream}, thinking={body.get('thinking')}, size={body_size/1024:.1f}KB")
 
     return await proxy.proxy_request(body, stream=stream)
@@ -1677,34 +2874,192 @@ def _extract_api_key(request: Request, x_api_key: Optional[str] = None) -> str:
     return x_api_key or (auth_header[7:] if auth_header.startswith("Bearer ") else "")
 
 
+def _verify_lb_api_key(actual_key: str) -> bool:
+    """OpenAI 风格端点的统一鉴权：与 Databricks 客户端共用同一把 api_key"""
+    if azure_proxy and azure_proxy.verify_api_key(actual_key):
+        return True
+    if copilot_proxy and copilot_proxy.verify_api_key(actual_key):
+        return True
+    if proxy and proxy.verify_api_key(actual_key):
+        return True
+    return False
+
+
+def _reject_anthropic_on_openai(model: str):
+    """claude-* 模型不应该走 OpenAI 风格端点；明确拒绝避免混淆"""
+    if "claude" in (model or "").lower():
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"message":
+                f"Anthropic model '{model}' must use /v1/messages (Databricks), not OpenAI-style endpoints"}},
+        )
+
+
+def _azure_supports_model(model: str) -> bool:
+    """Azure 是否能服务该模型（任意端点的 deployments 里有 + 该端点未熔断）"""
+    return (
+        azure_proxy is not None
+        and azure_proxy.load_balancer.select_endpoint_for_model(model) is not None
+    )
+
+
+async def _route_openai(body: dict, stream: bool, api_type: str):
+    """OpenAI 风格入口的通用路由：Copilot 优先 → Azure fallback；
+    避免 fallback 时被 Azure 抛误导性 404（Azure 没该 deployment 但显示 'No endpoint available'）"""
+    model = body.get("model", "")
+    _reject_anthropic_on_openai(model)
+
+    azure_supports = _azure_supports_model(model)
+    copilot_can = copilot_proxy is not None and copilot_proxy.can_handle(model)
+
+    if api_type == "responses":
+        copilot_call = copilot_proxy.proxy_responses if copilot_proxy else None
+        azure_call = azure_proxy.proxy_responses if azure_proxy else None
+    else:
+        copilot_call = copilot_proxy.proxy_chat_completions if copilot_proxy else None
+        azure_call = azure_proxy.proxy_chat_completions if azure_proxy else None
+
+    # 都不能处理 → 早返回，且消息明确说明每个 provider 状态
+    if not copilot_can and not azure_supports:
+        msg = _build_no_provider_message(model)
+        raise HTTPException(status_code=404, detail={"error": {"message": msg}})
+
+    copilot_failure: Optional[str] = None
+
+    # 1) 优先 Copilot
+    if copilot_can:
+        try:
+            return await copilot_call(body, stream=stream)
+        except _UnsupportedModelError as e:
+            copilot_failure = f"Copilot does not support model: {e}"
+            if azure_supports:
+                logger.info(f"[route] Copilot rejected '{model}' ({e}), falling back to Azure")
+            else:
+                logger.warning(f"[route] Copilot rejected '{model}' and no Azure deployment for fallback")
+        except HTTPException as e:
+            # Copilot 内部 503（全熔断 / token 失效）→ 看 Azure 能不能接
+            if e.status_code in (404, 503):
+                copilot_failure = f"Copilot transient error {e.status_code}: {e.detail.get('error',{}).get('message','')}"
+                if azure_supports:
+                    logger.info(f"[route] Copilot unavailable for '{model}' ({e.status_code}), trying Azure")
+                else:
+                    # Copilot 暂时不可用 + Azure 没这个模型 → 不能 fallback；返回明确 503
+                    logger.warning(f"[route] Copilot unavailable and no Azure fallback for '{model}'")
+                    raise HTTPException(
+                        status_code=503,
+                        detail={"error": {"message":
+                            f"Copilot temporarily unavailable for model '{model}' ({e.status_code}); "
+                            f"Azure has no deployment to fall back to. "
+                            f"Original Copilot error: {e.detail.get('error',{}).get('message','')}"}},
+                    ) from e
+            else:
+                # 4xx 客户端错误：直接返回原错误，不 fallback
+                raise
+
+    # 2) Azure fallback（只有 Azure 真支持时才走）
+    if azure_supports:
+        try:
+            return await azure_call(body, stream=stream)
+        except HTTPException as e:
+            # Azure 失败也不再 fallback（已经是末端了），但消息里附上 Copilot 失败原因便于排查
+            if copilot_failure:
+                detail = e.detail
+                if isinstance(detail, dict) and "error" in detail:
+                    detail["error"]["copilot_attempt"] = copilot_failure
+                raise HTTPException(status_code=e.status_code, detail=detail) from e
+            raise
+
+    # 不应该走到这（前面早返回了）；保险起见
+    raise HTTPException(status_code=404, detail={"error": {"message": _build_no_provider_message(model)}})
+
+
+def _build_no_provider_message(model: str) -> str:
+    parts = []
+    if copilot_proxy:
+        if copilot_proxy.can_handle(model):
+            parts.append("Copilot configured but failing")
+        else:
+            healthy_eps = [
+                ep.name for ep in copilot_proxy.load_balancer.endpoints
+                if not ep.circuit_open and (not ep.models or model in ep.models)
+            ]
+            if not healthy_eps:
+                parts.append("Copilot endpoints unhealthy/circuit-open or model not whitelisted")
+            else:
+                parts.append("Copilot endpoint health unknown")
+    else:
+        parts.append("Copilot not configured")
+    if azure_proxy:
+        parts.append(f"Azure has no deployment for '{model}'")
+    else:
+        parts.append("Azure not configured")
+    return f"No provider available for model '{model}': {'; '.join(parts)}"
+
+
+async def _route_openai_chat(body: dict, stream: bool):
+    return await _route_openai(body, stream, "chat")
+
+
+async def _route_openai_responses(body: dict, stream: bool):
+    return await _route_openai(body, stream, "responses")
+
+
 @app.post("/v1/responses")
 async def responses(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
-    if not azure_proxy:
-        raise HTTPException(status_code=404, detail={"error": {"message": "Azure OpenAI is not configured"}})
+    if not (azure_proxy or copilot_proxy):
+        raise HTTPException(status_code=404, detail={"error": {"message": "No OpenAI-style provider (Azure / Copilot) configured"}})
 
     actual_key = _extract_api_key(request, x_api_key)
-    if not azure_proxy.verify_api_key(actual_key):
+    if not _verify_lb_api_key(actual_key):
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
 
-    body = await request.json()
+    body_bytes = await request.body()
+    if len(body_bytes) > MAX_RAW_REQUEST_SIZE:
+        raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large",
+            "message": f"Request exceeds LB raw limit ({MAX_RAW_REQUEST_SIZE/1024/1024:.0f}MB)"}})
+    try:
+        body = json.loads(body_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
+    if len(body_bytes) > _IMG_COMPRESS_THRESHOLD:
+        stats = await compress_images_async(body)
+        if stats["count"] > 0:
+            logger.info(
+                f"[image-compress] /v1/responses: {stats['count']} imgs "
+                f"{stats['before']/1024:.0f}KB -> {stats['after']/1024:.0f}KB"
+            )
     stream = body.get("stream", False)
-    logger.info(f"[Azure Responses] model={body.get('model')}, stream={stream}")
-    return await azure_proxy.proxy_responses(body, stream=stream)
+    logger.info(f"[Responses] model={body.get('model')}, stream={stream}")
+    return await _route_openai_responses(body, stream=stream)
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
-    if not azure_proxy:
-        raise HTTPException(status_code=404, detail={"error": {"message": "Azure OpenAI is not configured"}})
+    if not (azure_proxy or copilot_proxy):
+        raise HTTPException(status_code=404, detail={"error": {"message": "No OpenAI-style provider (Azure / Copilot) configured"}})
 
     actual_key = _extract_api_key(request, x_api_key)
-    if not azure_proxy.verify_api_key(actual_key):
+    if not _verify_lb_api_key(actual_key):
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
 
-    body = await request.json()
+    body_bytes = await request.body()
+    if len(body_bytes) > MAX_RAW_REQUEST_SIZE:
+        raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large",
+            "message": f"Request exceeds LB raw limit ({MAX_RAW_REQUEST_SIZE/1024/1024:.0f}MB)"}})
+    try:
+        body = json.loads(body_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
+    if len(body_bytes) > _IMG_COMPRESS_THRESHOLD:
+        stats = await compress_images_async(body)
+        if stats["count"] > 0:
+            logger.info(
+                f"[image-compress] /v1/chat/completions: {stats['count']} imgs "
+                f"{stats['before']/1024:.0f}KB -> {stats['after']/1024:.0f}KB"
+            )
     stream = body.get("stream", False)
-    logger.info(f"[Azure Chat] model={body.get('model')}, stream={stream}")
-    return await azure_proxy.proxy_chat_completions(body, stream=stream)
+    logger.info(f"[Chat] model={body.get('model')}, stream={stream}")
+    return await _route_openai_chat(body, stream=stream)
 
 
 @app.post("/api/event_logging/batch")
@@ -1714,7 +3069,164 @@ async def event_logging():
 
 @app.get("/health")
 async def health():
+    """向后兼容的健康检查（等价于 /health/live）"""
     return {"status": "healthy"}
+
+
+@app.get("/health/live")
+async def health_live():
+    """Liveness probe：进程能响应即视为存活，不检查任何依赖。
+    K8s livenessProbe 用这个，避免上游故障导致 Pod 被 kill 重启。
+    """
+    return {"status": "alive"}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    """Readiness probe：检查依赖是否就绪。
+    任一关键依赖失败 → 503，K8s 把 Pod 移出 Service endpoints。
+    - Databricks：至少 1 个端点未熔断
+    - Copilot（如果配置）：至少 1 个端点 token 有效且未熔断
+    - Azure（如果配置）：至少 1 个端点未熔断
+    """
+    issues = []
+
+    if proxy:
+        if not proxy.load_balancer.get_available_endpoints():
+            issues.append("databricks: no available endpoints (all circuits open)")
+
+    if azure_proxy and azure_proxy.load_balancer.endpoints:
+        if not azure_proxy.load_balancer.get_available_endpoints():
+            issues.append("azure_openai: no available endpoints (all circuits open)")
+
+    if copilot_proxy and copilot_proxy.load_balancer.endpoints:
+        if not copilot_proxy.is_any_endpoint_healthy():
+            issues.append("github_copilot: no healthy endpoint (token invalid or all circuits open)")
+
+    if issues:
+        raise HTTPException(status_code=503, detail={"status": "not_ready", "issues": issues})
+    return {"status": "ready"}
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus 文本格式 metrics，供 AKS / Azure Monitor / Prometheus 抓取"""
+    lines = []
+
+    def emit(name: str, help_text: str, kind: str, samples: list):
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} {kind}")
+        lines.extend(samples)
+
+    # Copilot endpoint metrics
+    if copilot_proxy:
+        now = int(time.time())
+        token_expires_samples = []
+        token_remaining_samples = []
+        refresh_total_samples = []
+        refresh_failed_samples = []
+        reload_total_samples = []
+        circuit_open_samples = []
+        endpoint_requests_samples = []
+        endpoint_errors_samples = []
+        endpoint_active_samples = []
+        endpoint_input_tokens_samples = []
+        endpoint_output_tokens_samples = []
+        for ep in copilot_proxy.load_balancer.endpoints:
+            lbl = f'endpoint="{ep.name}"'
+            token_expires_samples.append(f'copilot_session_token_expires_at_seconds{{{lbl}}} {ep.session_token_expires_at}')
+            token_remaining_samples.append(f'copilot_session_token_remaining_seconds{{{lbl}}} {max(0, ep.session_token_expires_at - now)}')
+            refresh_total_samples.append(f'copilot_token_refresh_total{{{lbl}}} {ep.token_refresh_total}')
+            refresh_failed_samples.append(f'copilot_token_refresh_failed_total{{{lbl}}} {ep.token_refresh_failed_total}')
+            reload_total_samples.append(f'copilot_token_reload_total{{{lbl}}} {ep.token_reload_total}')
+            circuit_open_samples.append(f'copilot_endpoint_circuit_open{{{lbl}}} {1 if ep.circuit_open else 0}')
+            endpoint_requests_samples.append(f'copilot_endpoint_requests_total{{{lbl}}} {ep.total_requests}')
+            endpoint_errors_samples.append(f'copilot_endpoint_errors_total{{{lbl}}} {ep.total_errors}')
+            endpoint_active_samples.append(f'copilot_endpoint_active_requests{{{lbl}}} {ep.active_requests}')
+            endpoint_input_tokens_samples.append(f'copilot_endpoint_input_tokens_total{{{lbl}}} {ep.total_input_tokens}')
+            endpoint_output_tokens_samples.append(f'copilot_endpoint_output_tokens_total{{{lbl}}} {ep.total_output_tokens}')
+        emit("copilot_session_token_expires_at_seconds", "Unix epoch when current Copilot session token expires", "gauge", token_expires_samples)
+        emit("copilot_session_token_remaining_seconds", "Seconds until current session token expires", "gauge", token_remaining_samples)
+        emit("copilot_token_refresh_total", "Total successful token exchange calls", "counter", refresh_total_samples)
+        emit("copilot_token_refresh_failed_total", "Total failed token exchange calls", "counter", refresh_failed_samples)
+        emit("copilot_token_reload_total", "Total long-lived token re-reads from source (e.g. K8s secret rotation)", "counter", reload_total_samples)
+        emit("copilot_endpoint_circuit_open", "1 if circuit breaker open (endpoint unhealthy)", "gauge", circuit_open_samples)
+        emit("copilot_endpoint_requests_total", "Total requests handled per Copilot endpoint", "counter", endpoint_requests_samples)
+        emit("copilot_endpoint_errors_total", "Total errors per Copilot endpoint", "counter", endpoint_errors_samples)
+        emit("copilot_endpoint_active_requests", "Currently in-flight requests per Copilot endpoint", "gauge", endpoint_active_samples)
+        emit("copilot_endpoint_input_tokens_total", "Cumulative input tokens per Copilot endpoint", "counter", endpoint_input_tokens_samples)
+        emit("copilot_endpoint_output_tokens_total", "Cumulative output tokens per Copilot endpoint", "counter", endpoint_output_tokens_samples)
+
+    # Databricks
+    if proxy:
+        db_circuit, db_active, db_req, db_err, db_in, db_out = [], [], [], [], [], []
+        for ep in proxy.load_balancer.endpoints:
+            lbl = f'endpoint="{ep.name}"'
+            db_circuit.append(f'databricks_endpoint_circuit_open{{{lbl}}} {1 if ep.circuit_open else 0}')
+            db_active.append(f'databricks_endpoint_active_requests{{{lbl}}} {ep.active_requests}')
+            db_req.append(f'databricks_endpoint_requests_total{{{lbl}}} {ep.total_requests}')
+            db_err.append(f'databricks_endpoint_errors_total{{{lbl}}} {ep.total_errors}')
+            db_in.append(f'databricks_endpoint_input_tokens_total{{{lbl}}} {ep.total_input_tokens}')
+            db_out.append(f'databricks_endpoint_output_tokens_total{{{lbl}}} {ep.total_output_tokens}')
+        emit("databricks_endpoint_circuit_open", "1 if Databricks endpoint circuit open", "gauge", db_circuit)
+        emit("databricks_endpoint_active_requests", "In-flight requests", "gauge", db_active)
+        emit("databricks_endpoint_requests_total", "Total requests", "counter", db_req)
+        emit("databricks_endpoint_errors_total", "Total errors", "counter", db_err)
+        emit("databricks_endpoint_input_tokens_total", "Cumulative input tokens", "counter", db_in)
+        emit("databricks_endpoint_output_tokens_total", "Cumulative output tokens", "counter", db_out)
+
+    # Azure
+    if azure_proxy:
+        az_circuit, az_active, az_req, az_err = [], [], [], []
+        for ep in azure_proxy.load_balancer.endpoints:
+            lbl = f'endpoint="{ep.name}"'
+            az_circuit.append(f'azure_openai_endpoint_circuit_open{{{lbl}}} {1 if ep.circuit_open else 0}')
+            az_active.append(f'azure_openai_endpoint_active_requests{{{lbl}}} {ep.active_requests}')
+            az_req.append(f'azure_openai_endpoint_requests_total{{{lbl}}} {ep.total_requests}')
+            az_err.append(f'azure_openai_endpoint_errors_total{{{lbl}}} {ep.total_errors}')
+        emit("azure_openai_endpoint_circuit_open", "1 if Azure OpenAI endpoint circuit open", "gauge", az_circuit)
+        emit("azure_openai_endpoint_active_requests", "In-flight requests", "gauge", az_active)
+        emit("azure_openai_endpoint_requests_total", "Total requests", "counter", az_req)
+        emit("azure_openai_endpoint_errors_total", "Total errors", "counter", az_err)
+
+    body = "\n".join(lines) + "\n" if lines else "# no providers configured\n"
+    return Response(content=body, media_type="text/plain; version=0.0.4")
+
+
+@app.post("/admin/copilot/reload")
+async def admin_copilot_reload(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：强制从源（env / file）重读所有 Copilot endpoint 的 long-lived token，
+    然后用新 token 强制刷新 session token。
+
+    用途：K8s Secret rotation 后立刻生效，无需等待后台周期或重启 Pod。
+
+    鉴权同其他端点（auth.api_key），仅运维使用。
+    """
+    if not copilot_proxy:
+        raise HTTPException(status_code=404, detail={"error": {"message": "GitHub Copilot is not configured"}})
+    actual_key = _extract_api_key(request, x_api_key)
+    if not _verify_lb_api_key(actual_key):
+        raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
+
+    results = []
+    for ep in copilot_proxy.load_balancer.endpoints:
+        item = {"name": ep.name, "source": ep.token_source.get("type"), "reloaded": False, "session_refreshed": False}
+        try:
+            item["reloaded"] = reload_github_token(ep)
+        except Exception as e:
+            item["error"] = f"reload failed: {e}"
+            results.append(item)
+            continue
+        try:
+            await copilot_proxy.get_session_token(ep, force=True)
+            item["session_refreshed"] = True
+            item["session_expires_at"] = ep.session_token_expires_at
+        except HTTPException as e:
+            item["error"] = e.detail.get("error", {}).get("message", str(e))
+        except Exception as e:
+            item["error"] = f"{type(e).__name__}: {e}"
+        results.append(item)
+    return {"endpoints": results}
 
 
 @app.get("/stats")
@@ -1742,7 +3254,23 @@ async def stats():
     result["today_date"] = proxy.today_date
     result["global"]["estimated_total_cost_usd"] = round(total_cost, 4)
     if azure_proxy:
-        result["azure_openai"] = azure_proxy.get_stats()
+        azure_stats = azure_proxy.get_stats()
+        for ep in azure_stats.get("endpoints", []):
+            for model_name, mstats in (ep.get("model_stats") or {}).items():
+                cost = calculate_cost(model_name, mstats["input_tokens"], mstats["output_tokens"],
+                                      mstats.get("cache_creation_tokens", 0), mstats.get("cache_read_tokens", 0))
+                if cost is not None:
+                    mstats["estimated_cost_usd"] = cost
+        result["azure_openai"] = azure_stats
+    if copilot_proxy:
+        copilot_stats = copilot_proxy.get_stats()
+        for ep in copilot_stats.get("endpoints", []):
+            for model_name, mstats in (ep.get("model_stats") or {}).items():
+                cost = calculate_cost(model_name, mstats["input_tokens"], mstats["output_tokens"],
+                                      mstats.get("cache_creation_tokens", 0), mstats.get("cache_read_tokens", 0))
+                if cost is not None:
+                    mstats["estimated_cost_usd"] = cost
+        result["github_copilot"] = copilot_stats
     return result
 
 
@@ -2346,6 +3874,7 @@ td strong { color: var(--text-0); font-weight: 600; }
 <div class="tab-bar">
   <button class="tab-btn active" data-tab="anthropic">Anthropic Models</button>
   <button class="tab-btn" data-tab="azure">Azure OpenAI Models</button>
+  <button class="tab-btn" data-tab="copilot">GitHub Copilot</button>
   <button class="tab-btn" data-tab="history">Usage History</button>
   <span class="tab-indicator" id="tabIndicator"></span>
 </div>
@@ -2373,6 +3902,8 @@ td strong { color: var(--text-0); font-weight: 600; }
 </div>
 
 <div class="tab-panel" id="tab-azure"><div id="azureContent"><div class="info-box">Loading...</div></div></div>
+
+<div class="tab-panel" id="tab-copilot"><div id="copilotContent"><div class="info-box">Loading...</div></div></div>
 
 <div class="tab-panel" id="tab-history">
   <div class="history-toolbar">
@@ -2939,6 +4470,90 @@ async function refresh() {
       azContent.innerHTML = '<div class="info-box">Azure OpenAI is not configured. Add <code>azure_openai</code> section to your config.yaml to enable this tab.</div>';
       azContent.dataset.built = '';
     }
+
+    // GitHub Copilot section
+    const cpContent = document.getElementById('copilotContent');
+    if (d.github_copilot) {
+      if (!cpContent.dataset.built) {
+        cpContent.innerHTML =
+          '<div class="global-grid" id="copilotGlobalGrid"></div>' +
+          '<div class="grid-2">' +
+          '<div class="chart-card"><h3>Model Usage Share</h3><div class="canvas-wrap"><canvas id="copilotModelChart"></canvas></div></div>' +
+          '<div class="chart-card"><h3>Endpoint Latency (ms)</h3><div class="canvas-wrap"><canvas id="copilotLatencyChart"></canvas></div></div>' +
+          '</div>' +
+          '<h2 class="section-title">GitHub Copilot Endpoints</h2>' +
+          '<div class="table-wrap"><div class="table-scroll"><table>' +
+          '<thead><tr><th>Name</th><th>Status</th><th>Active</th><th>Total</th><th>Error Rate</th><th>Avg Latency</th><th>Total Tokens</th><th>Models</th><th>Token Expires</th></tr></thead>' +
+          '<tbody id="copilotEndpointBody"></tbody>' +
+          '</table></div></div>' +
+          '<h2 class="section-title">Model Stats <small style="opacity:.6">(GHCP 订阅制无 per-token 计费；Est. Cost 按底层模型公开 API 价格做对照)</small></h2>' +
+          '<div class="table-wrap"><div class="table-scroll"><table>' +
+          '<thead><tr><th>Model</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache Create</th><th>Cache Read</th><th>Total</th><th>Est. Cost</th></tr></thead>' +
+          '<tbody id="copilotModelBody"></tbody>' +
+          '</table></div></div>';
+        cpContent.dataset.built = '1';
+      }
+      const COPILOT_KPIS = KPI_DEFS.filter(k => k.key !== 'estimated_total_cost_usd');
+      renderKpiGrid('copilotGlobalGrid', COPILOT_KPIS, d.github_copilot.global, 'kpi-copilot');
+
+      const cpBody = document.getElementById('copilotEndpointBody');
+      const cpSeen = new Set();
+      const nowSec = Math.floor(Date.now() / 1000);
+      (d.github_copilot.endpoints || []).forEach(e => {
+        const rowId = 'copilot-row-' + e.name;
+        cpSeen.add(rowId);
+        let tr = document.getElementById(rowId);
+        const isAlert = e.circuit_open || (e.error_rate || 0) > 5;
+        const barColor = errBarColor(+e.error_rate || 0);
+        const barWidth = Math.min(100, (+e.error_rate || 0) * 10);
+        const exp = +e.session_token_expires_at || 0;
+        const expRel = exp > 0 ? (exp - nowSec) : 0;
+        const expText = exp > 0
+          ? (expRel > 0 ? Math.round(expRel / 60) + 'm' : 'expired')
+          : '-';
+        const modelsTags = (e.models && e.models.length)
+          ? e.models.map(x => '<span class="deployments-tag">' + x + '</span>').join('')
+          : '<span style="opacity:.5">all</span>';
+        const html =
+          '<td data-label="Name"><strong>' + e.name + '</strong></td>' +
+          '<td data-label="Status"><span class="badge ' + (e.circuit_open ? 'open' : 'ok') + '">' + (e.circuit_open ? 'OPEN' : 'OK') + '</span></td>' +
+          '<td data-label="Active" class="mono">' + e.active_requests + '</td>' +
+          '<td data-label="Total" class="mono">' + fmt(e.total_requests) + '</td>' +
+          '<td data-label="Error Rate"><span class="err-rate"><span class="bar"><span style="width:' + barWidth + '%;background:' + barColor + '"></span></span><span class="mono">' + fmtPct(e.error_rate) + '</span></span></td>' +
+          '<td data-label="Avg Latency" class="mono">' + fmtMs(e.avg_response_time_ms) + '</td>' +
+          '<td data-label="Total Tokens" class="mono">' + fmt(e.total_tokens) + '</td>' +
+          '<td data-label="Models">' + modelsTags + '</td>' +
+          '<td data-label="Token Expires" class="mono">' + expText + '</td>';
+        if (!tr) {
+          tr = document.createElement('tr');
+          tr.id = rowId;
+          tr.className = 'row';
+          tr.innerHTML = html;
+          cpBody.appendChild(tr);
+        } else { tr.innerHTML = html; }
+        tr.classList.toggle('alert', isAlert);
+      });
+      Array.from(cpBody.children).forEach(tr => { if (!cpSeen.has(tr.id)) tr.remove(); });
+
+      const cpModels = aggregateModels(d.github_copilot.endpoints);
+      renderModelTable('copilotModelBody', cpModels, true);
+      const cpModelChart = ensureDoughnut('copilotModelChart');
+      if (cpModelChart) {
+        const entries = Object.entries(cpModels);
+        cpModelChart.data.labels = entries.map(e => e[0]);
+        cpModelChart.data.datasets[0].data = entries.map(e => e[1].input_tokens + e[1].output_tokens);
+        cpModelChart.update('none');
+      }
+      const cpLatencyChart = ensureBar('copilotLatencyChart');
+      if (cpLatencyChart) {
+        cpLatencyChart.data.labels = (d.github_copilot.endpoints || []).map(e => e.name);
+        cpLatencyChart.data.datasets[0].data = (d.github_copilot.endpoints || []).map(e => +e.avg_response_time_ms || 0);
+        cpLatencyChart.update('none');
+      }
+    } else {
+      cpContent.innerHTML = '<div class="info-box">GitHub Copilot is not configured. Add <code>github_copilot</code> section to your config.yaml and run <code>python main.py --copilot-login --endpoint &lt;name&gt;</code> to enable this tab.</div>';
+      cpContent.dataset.built = '';
+    }
   } catch (err) {
     const b = document.getElementById('errorBanner');
     b.textContent = 'Failed to fetch stats: ' + err.message;
@@ -2974,7 +4589,115 @@ setInterval(refresh, REFRESH_MS);
 </html>"""
 
 
+async def _copilot_device_flow_login(endpoint_name: str) -> str:
+    """GitHub Device Flow：终端引导用户在浏览器授权，返回 long-lived OAuth token。
+
+    复刻 copilot-lb/src/token-manager.ts 的实现，使用 VS Code Copilot 公开 client_id。
+    """
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        # Step 1: device code
+        start = await client.post(
+            COPILOT_DEVICE_CODE_URL,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": COPILOT_HEADERS["User-Agent"],
+            },
+            json={"client_id": COPILOT_CLIENT_ID, "scope": "read:user"},
+        )
+        if start.status_code != 200:
+            raise RuntimeError(f"device code request failed: {start.status_code} {start.text}")
+        s = start.json()
+        device_code = s["device_code"]
+        user_code = s["user_code"]
+        verification_uri = s["verification_uri"]
+        expires_in = int(s.get("expires_in", 600))
+        interval = max(int(s.get("interval", 5)), 1)
+
+        print()
+        print(f"[auth] 1) Open: {verification_uri}")
+        print(f"[auth] 2) Enter code: {user_code}")
+        print(f"[auth] Waiting for authorization (expires in {expires_in}s)...")
+        print()
+
+        # Step 2: poll
+        deadline = time.time() + expires_in
+        while time.time() < deadline:
+            await asyncio.sleep(interval)
+            poll = await client.post(
+                COPILOT_ACCESS_TOKEN_URL,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "User-Agent": COPILOT_HEADERS["User-Agent"],
+                },
+                json={
+                    "client_id": COPILOT_CLIENT_ID,
+                    "device_code": device_code,
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                },
+            )
+            data = poll.json()
+            if data.get("access_token"):
+                token = data["access_token"]
+                path = save_copilot_auth(endpoint_name, token)
+                print(f"[auth] Token saved to {path} (mode 0600)")
+                return token
+            err = data.get("error")
+            if err == "authorization_pending":
+                continue
+            if err == "slow_down":
+                interval += 5
+                continue
+            if err:
+                raise RuntimeError(f"device flow failed: {data.get('error_description') or err}")
+
+        raise RuntimeError("device flow timed out before authorization")
+
+
+def _maybe_run_cli() -> bool:
+    """处理 --copilot-login / --copilot-logout / --copilot-test 子命令。
+    返回 True 表示已处理 CLI 命令并应当退出（不要继续启动 server）。
+    """
+    import argparse
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--copilot-login", action="store_true")
+    parser.add_argument("--copilot-logout", action="store_true")
+    parser.add_argument("--endpoint", default="default")
+    args, _unknown = parser.parse_known_args()
+
+    if args.copilot_login:
+        try:
+            asyncio.run(_copilot_device_flow_login(args.endpoint))
+            print(f"\n[auth] Login complete for endpoint '{args.endpoint}'.")
+            print(f"[auth] You can now reference it from config.yaml: ")
+            print(f"  github_copilot:\n    endpoints:\n      - name: {args.endpoint}")
+            print(f"        # github_token: 留空即从缓存读取\n")
+        except Exception as e:
+            print(f"[auth] Login failed: {e}")
+            sys.exit(1)
+        return True
+
+    if args.copilot_logout:
+        path = _copilot_local_auth_path(args.endpoint)
+        if path.exists():
+            try:
+                path.unlink()
+                print(f"[auth] Removed saved token: {path}")
+            except Exception as e:
+                print(f"[auth] Failed to remove {path}: {e}")
+                sys.exit(1)
+        else:
+            print(f"[auth] No saved token at {path}")
+        return True
+
+    return False
+
+
 if __name__ == "__main__":
+    if _maybe_run_cli():
+        sys.exit(0)
+
     import uvicorn
     uvicorn.run(
         "main:app",

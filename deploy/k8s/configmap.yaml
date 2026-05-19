@@ -1,0 +1,81 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-lb-config
+  labels:
+    app: claude-lb
+data:
+  # 这里的所有敏感字段都用 ${ENV_VAR} 占位，实际值在 Secret 里 envFrom 进容器后被 expand_env_vars() 解析
+  config.yaml: |
+    load_balancer:
+      strategy: least_requests
+      circuit_breaker_threshold: 5
+      circuit_breaker_timeout: 60
+
+    auth:
+      api_key: ${LB_API_KEY}
+
+    endpoints:
+      - name: centralus-adb-ws
+        api_base: https://adb-7405607755654523.3.azuredatabricks.net/serving-endpoints
+        token: ${DATABRICKS_TOKEN_CENTRALUS}
+        weight: 1
+      - name: eastus-adb-ws
+        api_base: https://adb-45552463551839.19.azuredatabricks.net/serving-endpoints
+        token: ${DATABRICKS_TOKEN_EASTUS}
+        weight: 1
+      - name: eastus2-adb-ws
+        api_base: https://adb-7405604891950998.18.azuredatabricks.net/serving-endpoints
+        token: ${DATABRICKS_TOKEN_EASTUS2}
+        weight: 1
+      - name: northcentralus-adb-ws
+        api_base: https://adb-7405611364884122.2.azuredatabricks.net/serving-endpoints
+        token: ${DATABRICKS_TOKEN_NORTHCENTRALUS}
+        weight: 1
+      - name: southcentralus-adb-ws
+        api_base: https://adb-7405607913937156.16.azuredatabricks.net/serving-endpoints
+        token: ${DATABRICKS_TOKEN_SOUTHCENTRALUS}
+        weight: 1
+      - name: westus-adb-ws
+        api_base: https://adb-7405617838344304.4.azuredatabricks.net/serving-endpoints
+        token: ${DATABRICKS_TOKEN_WESTUS}
+        weight: 1
+
+    azure_openai:
+      endpoints:
+        - name: eastus2-azure-ai
+          endpoint: https://eastus2-azureai-service.cognitiveservices.azure.com
+          api_key: ${AZURE_KEY_EASTUS2}
+          deployments: [gpt-5.4]
+          weight: 1
+        - name: swedencentral-azure-ai
+          endpoint: https://swedencentral-azureai-service.services.ai.azure.com
+          api_key: ${AZURE_KEY_SWEDENCENTRAL}
+          deployments: [gpt-5.4]
+          weight: 1
+        - name: polandcentral-azureai-service
+          endpoint: https://polandcentral-azureai-service.services.ai.azure.com
+          api_key: ${AZURE_KEY_POLANDCENTRAL}
+          deployments: [gpt-5.4]
+          weight: 1
+        - name: southcentralus-azureai-service
+          endpoint: https://southcentralus-azureai-service.services.ai.azure.com
+          api_key: ${AZURE_KEY_SOUTHCENTRALUS}
+          deployments: [gpt-5.4]
+          weight: 1
+
+    # GitHub Copilot：long-lived token 走两种来源中的任一种
+    #   1) 推荐：env var GITHUB_COPILOT_TOKEN_1（来自 Secret claude-lb-secrets）
+    #      env 方式 K8s 重启 Pod 后才生效；适合"换一次 token 就 rollout"的运维流程
+    #   2) 推荐：从 mounted secret file 读
+    #      file 方式配合 kubelet 的 secret 自动同步（约 1min），运维 kubectl apply 新 secret
+    #      Pod 内 reload_github_token() 自动 pick up，零重启
+    # 这里默认使用 file（方式 2）。如果你希望 env 优先，把下行改为:
+    #   github_token: ${GITHUB_COPILOT_TOKEN_1}
+    github_copilot:
+      endpoints:
+        - name: gh-account-1
+          weight: 1
+          models: []
+
+    usage_data_dir: /app/usage_data

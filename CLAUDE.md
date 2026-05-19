@@ -7,8 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Databricks Claude Load Balancer - 一个智能负载均衡代理，支持：
 - **Databricks Claude**: 将 Claude API 请求分发到多个 Databricks workspace 端点（`/anthropic/v1/messages`）
 - **Azure OpenAI**: 将 OpenAI API 请求分发到多个 Azure OpenAI 区域端点（可选，支持 Responses API 和 Chat Completions API）
+- **GitHub Copilot**: 将非 Anthropic 模型（gpt-*、gemini-* 等）通过 Copilot 上游 `https://api.githubcopilot.com` 转发，支持多 GitHub 账号、Device Flow 登录、token 自动刷新
+- **统一路由**: `/v1/chat/completions` 与 `/v1/responses` 按模型自动分流：`claude-*` 永远走 Databricks；其他模型 **优先 Copilot，失败/不支持时 fallback Azure**
 - **用量持久化**: 按天存储 token 用量，支持 JSON 文件或 MySQL 8.x 后端
-- **成本追踪**: 内置模型定价，自动计算使用成本
+- **成本追踪**: 内置模型定价，自动计算使用成本（GHCP 是订阅制，但用 OpenAI 标准价格表算 "假想成本" 用于 API 层成本对照）
 
 ## 常用命令
 
@@ -22,6 +24,11 @@ pip install aiomysql
 python main.py
 # 或带热重载
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+# GitHub Copilot 登录（device flow，token 写入 ~/.config/databricks-claude-lb/copilot-auth-<name>.json，权限 0600）
+python main.py --copilot-login --endpoint gh-account-1
+# 移除某个 endpoint 的本地缓存
+python main.py --copilot-logout --endpoint gh-account-1
 
 # Docker 构建和运行
 docker build -t claude-lb .
@@ -45,11 +52,20 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 - `strip_cache_control_extras()`: 清理 `cache_control` 中 Databricks 不支持的额外字段（如 `scope`），保留 `type: ephemeral`
 - `proxy_request()` 中依次执行：模型名映射 → 移除不支持的顶层字段 → 清理 tools 字段 → 清理 content types → strip cache_control → thinking 参数转换
 
+### 图片自动压缩（避开 ADB 4MB / GHCP 上游 limit）
+- `compress_images_in_payload()` / `compress_images_async()`：递归遍历 payload，对超过 200KB 的 base64 图片解码 → 等比缩到 ≤1280px → JPEG q=82 重编码。压不小自动保留原图，无图请求几乎零开销
+- 同时支持 **Anthropic 格式**（`{"type":"image","source":{"type":"base64","media_type":...,"data":...}}`）和 **OpenAI 格式**（任意 `data:image/...;base64,...` data URL）；OpenAI 路径走 `data:image/...` 字符串扫描，Anthropic 路径走 image block 显式识别后改 `source.data` + `media_type=image/jpeg`
+- 在三个入口（`/v1/messages`、`/v1/chat/completions`、`/v1/responses`）原始 body 大小超过 200KB 时触发，使用 `asyncio.to_thread` 跑 PIL，避免阻塞 event loop
+- `MAX_REQUEST_SIZE = 4MB`（压缩后仍超 → 413，提示 `/clear`），`MAX_RAW_REQUEST_SIZE = 64MB`（入口粗暴上限保护 OOM）
+- **不能解决 Claude Code 客户端 32MB 限制**：CC 在按 enter 之前就拦截，需要客户端绕过（小截图、Codex CLI 等）。LB 侧的压缩是给"32MB 以下、4MB 以上"的请求兜底
+- Pillow 是必需依赖（已加入 `requirements.txt`）；未安装时压缩自动跳过（仅日志告警）
+
 ### 负载均衡
-- `WorkspaceEndpoint` / `AzureOpenAIEndpoint`: 端点数据类
+- `WorkspaceEndpoint` / `AzureOpenAIEndpoint` / `CopilotEndpoint`: 端点数据类
 - `GlobalStats`: 全局统计数据类
 - `LoadBalancer`: 支持 `least_requests` / `round_robin` / `random` 三种策略
 - 熔断器机制: 错误达阈值自动禁用端点，超时后自动恢复；429 也触发熔断，4xx 客户端错误不触发
+- `LoadBalancer.select_endpoint_for_model()` 仅给 Azure 用（按 `ep.deployments` 过滤）；Copilot 在 `CopilotProxy._select_endpoint()` 内自己实现选择，原因是 Copilot 的 `models` 字段语义为白名单且空列表 = 通配（"上游模型列表会变，不强制静态配置"），不能直接复用 Azure 那套
 
 ### Databricks 代理 (ClaudeProxy)
 - `proxy_request()`: 代理请求入口，最多 3 次重试
@@ -64,6 +80,41 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 - `proxy_chat_completions()`: Chat Completions API 代理，URL: `{endpoint}/openai/deployments/{model}/chat/completions`
 - Auth Header: `api-key: {endpoint.api_key}`
 - 端点选择通过 `select_endpoint_for_model()` 按模型过滤
+
+### GitHub Copilot 代理 (CopilotProxy)
+- `proxy_chat_completions()`: URL `{session_base_url}/chat/completions`，OpenAI 风格
+- `proxy_responses()`: URL `{session_base_url}/responses`，OpenAI Responses 风格（GPT-5 系列）
+- 必带 headers (`COPILOT_HEADERS` 常量): `Editor-Version: vscode/1.95.3`、`Editor-Plugin-Version: copilot-chat/0.22.4`、`Copilot-Integration-Id: vscode-chat`、`User-Agent: GitHubCopilotChat/0.22.4`、`Openai-Organization: github-copilot`、`Openai-Intent: conversation-edits`、`X-Initiator: user`。模仿 VS Code Copilot Chat 扩展，**这些值写死且必须保留**，否则上游会 401/403
+- 视觉请求自动加 `Copilot-Vision-Request: true`（检测 messages.content 中是否含 `image_url`）
+- Auth Header: `Authorization: Bearer {short_lived_session_token}`
+
+#### Token 双层模型（生产级自愈，AKS 友好）
+
+- **Long-lived OAuth token**（GitHub 端基本不过期，除非用户撤销）：
+  - 来源优先级 = config.yaml `github_token` > 本项目 device-flow 缓存 `~/.config/databricks-claude-lb/copilot-auth-<name>.json` > 兼容 copilot-lb 旧缓存 `~/.config/copilot-lb/auth.json`
+  - **运行时按需重读**：`resolve_github_token()` 返回 `(token, source_dict)`，`source_dict` 记录可重读的来源（`env` / `file` / `literal`）。`reload_github_token(endpoint)` 从源重读，配合 K8s Secret rotation：mounted secret 文件被 kubelet 异步同步（约 1 min 周期），**Pod 内自动 pick up，零重启**
+- **Short-lived Copilot session token**（约 30 min 过期）：
+  - 从 long-lived token 调 `https://api.github.com/copilot_internal/v2/token` 交换
+  - **内存缓存** + 过期前 60 s 自动刷新；并发请求由 per-endpoint `asyncio.Lock` 串行化
+  - **后台主动刷新 task**（`background_refresh_loop`）：每 `COPILOT_REFRESH_INTERVAL`（默认 300s）秒扫一遍，剩 ≤`COPILOT_REFRESH_THRESHOLD`（默认 600s）就主动刷新；即使长时间无请求也保持新鲜
+  - **请求级 401 自愈**：上游 `/chat/completions`、`/responses` 返回 401 → `force=True` 重刷 session token → 同 endpoint 重试一次（`_proxy` 和 `_stream_response` 内都做了）
+  - **token-exchange 401 自愈**：`get_session_token()` 收到 401 → `_LongLivedTokenInvalidError` → 调 `reload_github_token()` 从源重读 long-lived token → 再交换一次；仍失败则该 endpoint 进熔断池（`circuit_open=True` + readiness probe 反映）
+- Device Flow CLI: `python main.py --copilot-login --endpoint <name>` 使用 VS Code 公开 client_id `Iv1.b507a08c87ecfe98` 走标准 GitHub Device Flow，token 写入 0600 权限文件
+- 启动时 `asyncio.create_task(copilot_proxy.warmup())` + 启动 `background_refresh_loop`
+- `POST /admin/copilot/reload`（运维端点）：立即从源重读所有 endpoint 的 long-lived token + 强制刷新 session token，配合 K8s Secret rotation 实现"零延迟"生效（不等 kubelet 同步周期）
+- `CopilotEndpoint.models` 语义：**空列表 = 通配**（接受所有模型）；填值则只服务列表内模型。和 Azure 的 `deployments` 语义不同（Azure 必须列出可用部署），所以 Copilot 自己实现 `_select_endpoint(model)` 不复用 `LoadBalancer.select_endpoint_for_model()`
+- `_UnsupportedModelError`: 上游返回 `model_not_found` / `unsupported_model` / `unknown model` 等关键字时抛出，路由层捕获后 fallback 到 Azure（仅在未发任何 chunk 时有效，由 `sent_any_chunk` 守卫）
+- 路由分流入口: `_route_openai_chat()` / `_route_openai_responses()`：先检查 `claude-*` 名拒绝（必须走 `/v1/messages`）；再 try Copilot；如抛 `_UnsupportedModelError` 或 HTTPException 404/503 就 fallback Azure
+
+#### 可观测性 / 探针
+
+- **`/health/live`**：仅检查进程能响应（K8s livenessProbe，避免上游故障导致 Pod 被 kill）
+- **`/health/ready`**：检查依赖就绪 — 至少 1 个 ADB endpoint 可用 + 至少 1 个 Copilot endpoint token 有效（K8s readinessProbe）
+- **`/metrics`**：Prometheus 文本格式，暴露 `copilot_session_token_remaining_seconds`、`copilot_token_refresh_total`、`copilot_token_refresh_failed_total`、`copilot_token_reload_total`、`copilot_endpoint_circuit_open`、`databricks_endpoint_*`、`azure_openai_endpoint_*` 等
+- **JSON 日志**：`LOG_FORMAT=json` 切换；字段 `ts`/`level`/`logger`/`message`，AKS Log Analytics 可直接 KQL 解析；接管 `uvicorn`/`uvicorn.error`/`uvicorn.access`/`httpx` logger 统一格式
+- **环境变量控制**：`LOG_FORMAT`（text|json）、`LOG_LEVEL`（INFO 等）、`COPILOT_REFRESH_INTERVAL`（秒）、`COPILOT_REFRESH_THRESHOLD`（秒）
+
+详细 AKS 部署步骤、Token rotation 流程、监控告警建议见 `docs/AKS.md`。常见客户端 / 上游异常排查见 `docs/TROUBLESHOOTING.md`（含 macOS 系统代理拦截 localhost、CC 32MB 限制、ADB 4MB / GHCP 模型 API 约束等）。
 
 ### 流式代理健壮性（`_stream_request` / `_stream_response`）
 - **httpx 客户端**: `timeout=Timeout(connect=10.0, read=None, write=60.0, pool=30.0)`；`limits=Limits(max_connections=200, max_keepalive_connections=50, keepalive_expiry=30.0)`；`http2=False`。`read=None` 必要 —— 流式请求不能整体 read 超时，由逐 chunk 节奏决定
@@ -88,8 +139,9 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 - 历史数据清理: 配置 `retention_days` 自动清理 + `DELETE /stats/history?keep_days=N` 手动清理 + Dashboard UI
 
 ### 配置管理
-- `load_config()`: 加载 YAML 配置，返回 `(ClaudeProxy, Optional[AzureOpenAIProxy], storage_config)`
+- `load_config()`: 加载 YAML 配置，返回 `(ClaudeProxy, Optional[AzureOpenAIProxy], Optional[CopilotProxy], storage_config)`
 - `expand_env_vars()`: 支持 `${VAR_NAME}` 环境变量语法
+- `resolve_github_token()`: Copilot 端点的 token 三级回退解析（config > 本项目 cache > copilot-lb cache）
 - 存储配置优先级: `usage_storage` > `usage_data_dir` > 默认 `./usage_data`
 
 ### Dashboard 前端（单文件内嵌）
@@ -104,15 +156,18 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 
 | 端点 | 方法 | 认证 | 说明 |
 |------|------|------|------|
-| `/v1/messages` | POST | 需要 | Databricks Claude 消息 API |
+| `/v1/messages` | POST | 需要 | Databricks Claude 消息 API（仅 `claude-*` 模型） |
 | `/v1/messages/count_tokens` | POST | 不需要 | Token 估算 |
-| `/v1/responses` | POST | 需要 | Azure OpenAI Responses API（需配置 azure_openai） |
-| `/v1/chat/completions` | POST | 需要 | Azure OpenAI Chat Completions API（需配置 azure_openai） |
-| `/health` | GET | 不需要 | 健康检查 |
-| `/stats` | GET | 不需要 | 端点统计（含成本估算、Azure OpenAI） |
+| `/v1/responses` | POST | 需要 | OpenAI Responses API（按模型分流：Copilot 优先 → Azure fallback；`claude-*` 拒绝） |
+| `/v1/chat/completions` | POST | 需要 | OpenAI Chat Completions API（按模型分流：Copilot 优先 → Azure fallback；`claude-*` 拒绝） |
+| `/health`、`/health/live` | GET | 不需要 | Liveness probe（仅检查进程） |
+| `/health/ready` | GET | 不需要 | Readiness probe（检查依赖就绪；故障返回 503 + issues 数组） |
+| `/metrics` | GET | 不需要 | Prometheus 文本格式 metrics（K8s / Azure Monitor 抓取） |
+| `/admin/copilot/reload` | POST | 需要 | 运维端点：从源重读所有 Copilot endpoint 的 long-lived token + 强制刷新 session（K8s Secret rotation 后立刻生效） |
+| `/stats` | GET | 不需要 | 端点统计（含成本估算、Azure OpenAI、GitHub Copilot） |
 | `/stats/history` | GET | 不需要 | 历史用量数据（`?days=7`，含每日成本） |
 | `/stats/history` | DELETE | 不需要 | 清理历史数据（`?keep_days=30`） |
-| `/stats/dashboard` | GET | 不需要 | 可视化监控面板（三标签页：实时统计 / Azure / 历史，支持深色/浅色主题切换） |
+| `/stats/dashboard` | GET | 不需要 | 可视化监控面板（四标签页：Anthropic / Azure / GitHub Copilot / 历史，支持深色/浅色主题切换） |
 | `/reset` | POST | 不需要 | 重置内存统计（持久化数据保留） |
 
 ## 配置文件
@@ -159,6 +214,17 @@ azure_openai:
         - gpt-4o
         - gpt-5
       weight: 1
+
+# GitHub Copilot 配置（可选）
+github_copilot:
+  load_balancer:                    # 可选，不填则继承全局 load_balancer
+    strategy: least_requests
+  endpoints:
+    - name: gh-account-1
+      # github_token 留空则按优先级从 device-flow 缓存或 copilot-lb 缓存读取
+      # github_token: ${GITHUB_COPILOT_TOKEN_1}
+      weight: 1
+      models: []                    # 空 = 通配；填了就只服务列表内模型
 ```
 
 ## 环境变量
@@ -167,4 +233,5 @@ azure_openai:
 - `ANTHROPIC_BASE_URL`: Claude Code 需设为 `http://localhost:8000`
 - `ANTHROPIC_API_KEY`: Claude Code 需设为与 `config.yaml` 中 `api_key` 一致的值
 - `AZURE_KEY_*`: Azure OpenAI API 密钥（按区域配置）
+- `GITHUB_COPILOT_TOKEN_*`: GitHub OAuth long-lived token（可选；不设也能从 device-flow 缓存读）
 - `MYSQL_PASSWORD`: MySQL 密码（如使用 MySQL 存储后端）

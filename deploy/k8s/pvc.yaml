@@ -1,0 +1,16 @@
+# Usage 数据持久化（重启不丢当天进度，跨 Pod 重建仍可恢复）
+# - 默认用 ReadWriteOnce，配合 Deployment.strategy=Recreate（避免 RWO 卡住 RollingUpdate）
+# - AKS 可用 storageClassName: managed-csi（默认 Premium SSD）；按需调整
+# - 如果你用 MySQL 后端（usage_storage.type=mysql），可以删掉这个 PVC，并在 deployment.yaml 取消相关 volume mount
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: claude-lb-usage-data
+  labels:
+    app: claude-lb
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName: managed-csi  # 解除注释指定 AKS storage class

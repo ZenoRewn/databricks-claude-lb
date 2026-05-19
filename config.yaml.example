@@ -70,3 +70,31 @@ endpoints:
 #         - gpt-4o
 #         - gpt-5
 #       weight: 2
+
+# GitHub Copilot 端点配置（可选）
+# 与 Azure OpenAI 共享 /v1/chat/completions 与 /v1/responses 路由：
+#   - claude-* 模型 → Databricks（永远不会走 Copilot/Azure）
+#   - 其他模型 → Copilot 优先，模型不支持/全部熔断 → fallback 到 Azure OpenAI
+#
+# Token 三种来源（优先级递减）：
+#   1) 下方 github_token 字段（支持 ${ENV_VAR}）
+#   2) 本项目 device-flow 缓存 ~/.config/databricks-claude-lb/copilot-auth-<name>.json
+#      生成方式: python main.py --copilot-login --endpoint <name>
+#   3) 兼容 copilot-lb 旧缓存 ~/.config/copilot-lb/auth.json
+#
+# Short-lived Copilot session token 自动从 long-lived token 交换并内存缓存，过期前 60s 自动刷新。
+#
+# github_copilot:
+#   load_balancer:                    # 可选，不填则继承全局 load_balancer
+#     strategy: least_requests
+#     circuit_breaker_threshold: 5
+#     circuit_breaker_timeout: 60
+#   endpoints:
+#     - name: gh-account-1
+#       # github_token: ${GITHUB_COPILOT_TOKEN_1}  # 留空则自动从 device-flow 缓存读取
+#       weight: 1
+#       models: []                    # 空 = 接受所有模型；填了就只服务列表内模型
+#     # - name: gh-account-2
+#     #   github_token: ${GITHUB_COPILOT_TOKEN_2}
+#     #   weight: 1
+#     #   models: [gpt-5, gpt-5.1, claude-opus-4.7]

@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claude-lb
+  labels:
+    app: claude-lb
+  annotations:
+    description: "Databricks Claude / Azure OpenAI / GitHub Copilot 统一负载均衡代理"
+spec:
+  replicas: 1
+  # ReadWriteOnce PVC 与 RollingUpdate 不兼容（旧 Pod 持有 PVC，新 Pod 无法挂）
+  # → Recreate strategy 短暂 downtime（~10s）但安全
+  # 若改用 MySQL 后端 + 去掉 PVC，可改回 RollingUpdate
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: claude-lb
+  template:
+    metadata:
+      labels:
+        app: claude-lb
+      annotations:
+        # Prometheus / Azure Monitor managed Prometheus 可自动抓取
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: <REGISTRY>/databricks-claude-lb:latest  # 替换为你的 ACR / Docker Hub 镜像
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: CONFIG_PATH
+              value: /etc/claude-lb/config.yaml
+            - name: LOG_FORMAT
+              value: json
+            - name: LOG_LEVEL
+              value: INFO
+            # 后台 token 主动刷新参数（默认即可）
+            - name: COPILOT_REFRESH_INTERVAL
+              value: "300"
+            - name: COPILOT_REFRESH_THRESHOLD
+              value: "600"
+          envFrom:
+            # 注入所有 ${ENV_VAR} 占位的实际值（DATABRICKS_TOKEN_*, AZURE_KEY_*, LB_API_KEY 等）
+            - secretRef:
+                name: claude-lb-secrets
+          volumeMounts:
+            - name: config
+              mountPath: /etc/claude-lb
+              readOnly: true
+            - name: copilot-cache
+              mountPath: /home/app/.config/databricks-claude-lb
+              readOnly: true
+            - name: usage-data
+              mountPath: /app/usage_data
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 1Gi
+          # Liveness：仅检查进程能响应，不挂依赖
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness：依赖未就绪 → 摘出 Service 不接流量；恢复后自动加回
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+          # Startup：给 Copilot warmup（拿 session token）足够时间，避免被 liveness 杀
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false   # tini 需要 /tmp，可以收紧后再开 RO root
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: config
+          configMap:
+            name: claude-lb-config
+            items:
+              - key: config.yaml
+                path: config.yaml
+        - name: copilot-cache
+          secret:
+            secretName: claude-lb-copilot-cache
+            defaultMode: 0400
+        - name: usage-data
+          persistentVolumeClaim:
+            claimName: claude-lb-usage-data

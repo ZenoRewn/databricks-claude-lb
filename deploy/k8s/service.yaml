@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: claude-lb
+  labels:
+    app: claude-lb
+spec:
+  type: ClusterIP
+  selector:
+    app: claude-lb
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP
