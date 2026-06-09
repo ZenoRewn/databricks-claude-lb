@@ -211,6 +211,73 @@ def get_databricks_model(model: str) -> str:
     return mapped
 
 
+def _system_content_to_blocks(content) -> list:
+    """Convert Claude-style system content into Anthropic system text blocks."""
+    blocks = []
+
+    def _append_text(text, cache_control=None):
+        if not isinstance(text, str) or not text:
+            return
+        block = {"type": "text", "text": text}
+        if isinstance(cache_control, dict):
+            block["cache_control"] = cache_control
+        blocks.append(block)
+
+    if isinstance(content, str):
+        _append_text(content)
+    elif isinstance(content, list):
+        for item in content:
+            if isinstance(item, str):
+                _append_text(item)
+            elif isinstance(item, dict):
+                if item.get("type") == "text" and isinstance(item.get("text"), str):
+                    blocks.append(item)
+                elif isinstance(item.get("text"), str):
+                    _append_text(item["text"], item.get("cache_control"))
+                else:
+                    _append_text(json.dumps(item, ensure_ascii=False), item.get("cache_control"))
+    elif isinstance(content, dict):
+        if isinstance(content.get("text"), str):
+            _append_text(content["text"], content.get("cache_control"))
+        else:
+            _append_text(json.dumps(content, ensure_ascii=False), content.get("cache_control"))
+    elif content is not None:
+        _append_text(str(content))
+
+    return blocks
+
+
+def promote_system_messages(body: dict) -> int:
+    """Move messages with role=system to top-level system.
+
+    Newer Claude Code versions may send Anthropic requests with system prompts
+    in messages[]. Databricks' Anthropic endpoint rejects role "system", but it
+    accepts the standard top-level system field.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return 0
+
+    promoted_blocks = []
+    kept_messages = []
+    promoted_count = 0
+
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "system":
+            promoted_blocks.extend(_system_content_to_blocks(msg.get("content")))
+            promoted_count += 1
+        else:
+            kept_messages.append(msg)
+
+    if promoted_count == 0:
+        return 0
+
+    existing_blocks = _system_content_to_blocks(body.get("system")) if "system" in body else []
+    body["system"] = existing_blocks + promoted_blocks
+    body["messages"] = kept_messages
+    return promoted_count
+
+
 def strip_cache_control_extras(body: dict) -> int:
     """Strip extra fields from cache_control, keeping only 'type'.
     Databricks 仅接受 cache_control: {"type": "ephemeral"}，
@@ -1036,6 +1103,12 @@ class ClaudeProxy:
             if field in body:
                 logger.info(f"Removing unsupported field: {field}")
                 del body[field]
+
+        # 新版 Claude Code 可能把 system prompt 作为 messages[].role=system 发送；
+        # Databricks Anthropic endpoint 只接受顶层 system，不接受 system role message。
+        promoted_system_messages = promote_system_messages(body)
+        if promoted_system_messages > 0:
+            logger.info(f"Promoted {promoted_system_messages} system messages to top-level system")
 
         # 清理 tools 中 Databricks 不支持的嵌套字段
         # Claude Code 2.1.69+ 新增了 defer_loading, input_examples 等字段
