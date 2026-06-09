@@ -82,6 +82,34 @@ _setup_logging()
 logger = logging.getLogger(__name__)
 
 
+STREAM_HEARTBEAT_INTERVAL = float(os.getenv("STREAM_HEARTBEAT_INTERVAL", "15"))
+
+
+async def _await_with_heartbeat(awaitable, heartbeat: bytes, interval: float = STREAM_HEARTBEAT_INTERVAL):
+    """Yield SSE heartbeats while waiting for a slow awaitable to finish.
+
+    This covers the gap before upstream response headers arrive. Without this,
+    an outer proxy such as Cloudflare can time out while the LB is still waiting
+    for the upstream model gateway to start the stream.
+    """
+    task = asyncio.create_task(awaitable)
+    try:
+        while True:
+            try:
+                result = await asyncio.wait_for(asyncio.shield(task), timeout=interval)
+                yield ("result", result)
+                return
+            except asyncio.TimeoutError:
+                yield ("heartbeat", heartbeat)
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except BaseException:  # noqa: BLE001
+                pass
+
+
 # ==================== 模型名称映射 ====================
 
 DATABRICKS_MODELS = {
@@ -1301,7 +1329,13 @@ class ClaudeProxy:
 
                 try:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
-                    response = await proxy_self.client.send(req, stream=True)
+                    async for kind, payload in _await_with_heartbeat(
+                        proxy_self.client.send(req, stream=True), HEARTBEAT
+                    ):
+                        if kind == "heartbeat":
+                            yield payload
+                        else:
+                            response = payload
 
                     if response.status_code >= 400:
                         error_body = await response.aread()
@@ -1359,7 +1393,7 @@ class ClaudeProxy:
 
                     while True:
                         try:
-                            kind, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                            kind, payload = await asyncio.wait_for(queue.get(), timeout=STREAM_HEARTBEAT_INTERVAL)
                         except asyncio.TimeoutError:
                             # 长 thinking 静默期间发 SSE 注释作为心跳, 防止中间链路空闲超时
                             yield HEARTBEAT
@@ -1692,7 +1726,13 @@ class AzureOpenAIProxy:
 
                 try:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
-                    response = await proxy_self.client.send(req, stream=True)
+                    async for kind, payload in _await_with_heartbeat(
+                        proxy_self.client.send(req, stream=True), HEARTBEAT
+                    ):
+                        if kind == "heartbeat":
+                            yield payload
+                        else:
+                            response = payload
 
                     if response.status_code >= 400:
                         error_body = await response.aread()
@@ -1749,7 +1789,7 @@ class AzureOpenAIProxy:
 
                     while True:
                         try:
-                            kind, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                            kind, payload = await asyncio.wait_for(queue.get(), timeout=STREAM_HEARTBEAT_INTERVAL)
                         except asyncio.TimeoutError:
                             yield HEARTBEAT
                             continue
@@ -2357,7 +2397,13 @@ class CopilotProxy:
 
                 try:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
-                    response = await proxy_self.client.send(req, stream=True)
+                    async for kind, payload in _await_with_heartbeat(
+                        proxy_self.client.send(req, stream=True), HEARTBEAT
+                    ):
+                        if kind == "heartbeat":
+                            yield payload
+                        else:
+                            response = payload
 
                     if response.status_code >= 400:
                         error_body = await response.aread()
@@ -2435,7 +2481,7 @@ class CopilotProxy:
 
                     while True:
                         try:
-                            kind, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                            kind, payload = await asyncio.wait_for(queue.get(), timeout=STREAM_HEARTBEAT_INTERVAL)
                         except asyncio.TimeoutError:
                             yield HEARTBEAT
                             continue

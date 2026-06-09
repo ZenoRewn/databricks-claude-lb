@@ -49,5 +49,23 @@ class DatabricksPayloadCompatTests(unittest.TestCase):
         self.assertEqual(body, {"messages": [{"role": "user", "content": "hello"}]})
 
 
+class StreamingHeartbeatTests(unittest.IsolatedAsyncioTestCase):
+    async def test_yields_heartbeat_while_waiting_for_response_headers(self):
+        async def delayed_result():
+            import asyncio
+
+            await asyncio.sleep(0.03)
+            return "response"
+
+        events = []
+        async for kind, payload in main._await_with_heartbeat(
+            delayed_result(), b": keep-alive\n\n", interval=0.01
+        ):
+            events.append((kind, payload))
+
+        self.assertIn(("heartbeat", b": keep-alive\n\n"), events)
+        self.assertEqual(events[-1], ("result", "response"))
+
+
 if __name__ == "__main__":
     unittest.main()

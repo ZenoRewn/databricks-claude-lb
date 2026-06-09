@@ -22,7 +22,7 @@
 - **上游错误规范化** - 自动把上游 HTML 错误页（CDN "Connection Closed" 之类）转成结构化 JSON，避免泄露给客户端
 - **负载均衡** - `least_requests`（默认）/ `round_robin` / `random`
 - **熔断器** - 自动检测故障端点并临时禁用，超时后自动恢复
-- **流式响应** - SSE 流式 + 15s keep-alive 心跳 + `RemoteProtocolError` 等中断恢复 + 已发送 chunk 后正确 `message_stop` 终止
+- **流式响应** - SSE 流式 + 等待上游响应头 / 响应期间 15s keep-alive 心跳 + `RemoteProtocolError` 等中断恢复 + 已发送 chunk 后正确 `message_stop` 终止
 - **Extended Thinking** - 支持 Claude Opus/Sonnet 的 adaptive 思考模式（含旧模型自动降级 `enabled` + budget_tokens）
 - **Prompt Caching** - 自动清理 `cache_control` 额外字段（如 `scope`），兼容 Databricks
 - **用量持久化** - 按天存储 token 用量，JSON 文件 或 MySQL 8.x 后端，重启自动恢复
@@ -453,6 +453,7 @@ env_key = "OPENAI_API_KEY"
 | `CONFIG_PATH` | 配置文件路径 | `config.yaml` |
 | `LOG_FORMAT` | 日志格式（`json` / `text`） | `text` |
 | `LOG_LEVEL` | 日志级别 | `INFO` |
+| `STREAM_HEARTBEAT_INTERVAL` | streaming 等待上游响应头及 chunk 空闲期间的 SSE 心跳间隔（秒） | `15` |
 | `COPILOT_REFRESH_INTERVAL` | GHCP session token 后台刷新扫描间隔（秒） | `300` |
 | `COPILOT_REFRESH_THRESHOLD` | session token 剩余 ≤ 此秒数时主动刷新 | `600` |
 | `ANTHROPIC_BASE_URL` | Claude Code 指向代理地址 | - |
@@ -517,7 +518,7 @@ A: 安装 `pip install aiomysql`，然后在 config.yaml 中配置 `usage_storag
 A: 已在 v 最新版修复。代理现在会：
 1. 捕获 httpx 的 `RemoteProtocolError`/`ReadError`/`WriteError` 等上游中断异常并触发重试（未发送 `message_start` 前切换端点）
 2. 已向客户端 yield 过 `message_start` 后若上游失败，补发合法的 `message_stop` + `error` 事件，让 Anthropic SDK 正常结束流而不是看到 socket 被断
-3. 流式响应期间每 15s 发送 `: keep-alive\n\n` SSE 注释心跳，防止中间链路（NAT/反代）因空闲关闭连接
+3. 等待上游响应头及流式响应空闲期间每 15s 发送 `: keep-alive\n\n` SSE 注释心跳，防止 Cloudflare / ingress / NAT / 反代因空闲关闭连接
 4. httpx `read` 超时改为 `None`（流式请求由 chunk 节拍保证），配合 uvicorn `timeout_keep_alive=600`，可承受 >5 分钟的长 thinking 响应
 5. `response.aclose()` 在 `finally` 分支执行，避免连接池被半开连接占满
 

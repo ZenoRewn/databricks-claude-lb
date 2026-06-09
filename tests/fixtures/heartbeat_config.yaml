@@ -1,0 +1,15 @@
+load_balancer:
+  strategy: least_requests
+  circuit_breaker_threshold: 5
+  circuit_breaker_timeout: 60
+
+auth:
+  api_key: heartbeat-test-key
+
+endpoints:
+  - name: fake-slow-upstream
+    api_base: http://fake-upstream:9000
+    token: fake-token
+    weight: 1
+
+usage_data_dir: /tmp/usage_data
