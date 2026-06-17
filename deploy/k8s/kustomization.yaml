@@ -7,6 +7,7 @@ resources:
   - pvc.yaml
   - service.yaml
   - deployment.yaml
+  - ingress.yaml   # 改 host / TLS 后才能用；不需要外网就把这行注释掉
   # 多副本时再追加 PDB（单副本 + RWO PVC 场景 PDB 会卡住 drain）
 
 # 把镜像统一在这里改，比逐个 yaml 改更干净

@@ -358,6 +358,28 @@ env_key = "OPENAI_API_KEY"
 
 环境变量 `OPENAI_API_KEY` 设为与 LB `config.yaml` 中 `auth.api_key` 一致即可。
 
+### GitHub Copilot 配额与计数说明
+
+经常被问到："Dashboard 上 Copilot 的累计 token 数 / 假想成本，是不是就是我 GitHub 那边还剩多少配额？" —— **不是**。两个东西完全独立：
+
+| 维度 | LB Dashboard 显示的 | GitHub 真实配额 |
+|---|---|---|
+| 计费模式 | 按 OpenAI 公开价折算的"假想成本"（USD） | 订阅制 + premium request 配额 |
+| 重置周期 | 启动后累计；重启 LB 不归零（数据已落 JSON / MySQL） | 按 **GitHub billing cycle 月度**（订阅起始日，不是自然月 1 号）重置 |
+| 用途 | API 层流量分布、不同账号负载对比、按月看趋势 | 看自己 Copilot 订阅这个月还能用多少 premium request |
+
+**关键结论**：LB Dashboard 上的数字是给运维 / 成本分析用的"参考量"，**不能用来推算 GitHub 那边还剩多少配额**。
+
+#### 真实剩余配额查询
+
+- **个人 / Pro / Pro+**：登录 https://github.com/settings/copilot 看 "Premium request usage"
+- **Business / Enterprise admin**：调 GitHub API `/users/{user}/copilot/billing` 或在组织 Billing 页查
+- 各档位 monthly limit 见 [GitHub Copilot pricing](https://github.com/features/copilot/plans)
+
+#### 触发限速的现象
+
+GHCP 上游会返回 429 + `retry-after` 头。LB 的熔断器会临时摘掉该 endpoint，**下个 billing cycle** 自动恢复。如果你配了多账号 LoadBalancer（见上方"多账号示例"），其他账号的额度仍然可用 —— 这也是配多账号的主要价值。
+
 ## 请求兼容性处理
 
 代理会自动处理 Claude Code 请求与 Databricks 之间的兼容性差异：

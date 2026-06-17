@@ -61,21 +61,74 @@ LB 侧已经在 `compress_images_in_payload()` 做了图片自动压缩（>200KB
 
 ---
 
-## 3. Databricks 返回 413 Request Too Large
+## 3. 413 Payload Too Large — 两种来源要分清
 
-### 症状
+线上 LB 链路是 **Cloudflare → ingress-nginx → claude-lb Pod**，413 可能在两层之一被拒。**先看错误体格式**再决定怎么修：
+
+| 来源 | 响应体 / 头特征 | 修法 |
+|---|---|---|
+| **ingress-nginx**（最常见） | `Content-Type: text/html`，body 是 `<center>413 Request Entity Too Large</center><center>nginx</center>`；带 `cf-ray` 头 | 改 ingress annotation `proxy-body-size: 64m`（见 3.1） |
+| **LB 自身** | `Content-Type: application/json`，body 是 `{"error": {"type": "request_too_large", "message": "Request size (X.XXmb) exceeds Databricks 4MB limit even after image compression..."}}` | 减少图片 / `/clear` 新会话 / 启用 prompt cache（见 3.2） |
+
+判断口诀：**HTML = ingress 拦的，JSON = LB 拦的**。LB 的图片压缩链路只有在请求穿过 ingress 后才有机会跑，所以 ingress 上限设太低（默认 1MB）会让所有大图请求拿到 HTML 错误页 —— LB 完全不知情。
+
+### 3.1 ingress-nginx 默认 1MB 拦截
+
+#### 症状
+
+客户端报：
+```
+unexpected status 413 Payload Too Large: <html>
+<head><title>413 Request Entity Too Large</title></head>
+<body><center><h1>413 Request Entity Too Large</h1></center>
+<hr><center>nginx</center></body></html>
+url: https://lb.example.com/v1/responses, cf-ray: a0d0c0b69fad1a58-SIN
+```
+
+#### 真因
+
+ingress-nginx 默认 `client_max_body_size = 1m`。带图、带长上下文的请求只要原始 body > 1MB 就被入口直接拒，**LB 的图片自动压缩根本没运行**。
+
+#### 解决
+
+仓库 `deploy/k8s/ingress.yaml` 已经预置正确 annotation；如果你是已有 ingress：
+```yaml
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "64m"      # 与 LB MAX_RAW_REQUEST_SIZE 对齐
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"      # SSE 流式必备
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+```
+
+```bash
+kubectl apply -k deploy/k8s/
+kubectl describe ingress -n claude-lb claude-lb | grep proxy-body-size   # 确认 64m
+```
+
+如果 annotation 加了还报 413，看集群级 ConfigMap：
+```bash
+kubectl -n ingress-nginx get cm ingress-nginx-controller -o yaml | grep -E "body-size|proxy-buffering"
+```
+
+详见 `docs/AKS.md` 的 "Ingress 配置（重要）" 段。
+
+### 3.2 LB 压缩后仍超 Databricks 4MB
+
+#### 症状
 
 ```json
 {"error": {"type": "request_too_large", "message": "Request size (X.XXmb) exceeds Databricks 4MB limit even after image compression..."}}
 ```
 
-### 真因
+#### 真因
 
-LB 自带图片自动压缩；如果压缩后仍 > 4MB，说明：
+LB 自带图片自动压缩（>200KB base64 → ≤1280px JPEG@82）；如果压缩后仍 > 4MB，说明：
 - 一次塞了多张大图
 - 累积上下文（工具调用历史、长 prompt）已经很大
 
-### 解决
+#### 解决
 
 - 客户端 `/clear` 开新会话
 - 减少同时附带的图片数

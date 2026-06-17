@@ -142,7 +142,49 @@ kubectl logs -n claude-lb -l app=claude-lb -f
 
 - **集群内消费者**（Codex CLI 跑在另一个 Pod 里）：直接 `http://claude-lb.claude-lb.svc.cluster.local:8000`
 - **VPN / 私有 LB**：`kubectl patch svc claude-lb -n claude-lb -p '{"spec":{"type":"LoadBalancer"}}'`，配合 Azure Internal LB annotation
-- **公网 + TLS**：上 Ingress（推荐 nginx-ingress 或 application gateway），配 cert-manager
+- **公网 + TLS**：上 Ingress（推荐 ingress-nginx 或 application gateway），配 cert-manager
+
+#### Ingress 配置（重要）
+
+仓库提供 `deploy/k8s/ingress.yaml` 模板，**4 个 annotation 都不能省**：
+
+| Annotation | 推荐值 | 不设的后果 |
+|---|---|---|
+| `nginx.ingress.kubernetes.io/proxy-body-size` | `64m` | ingress 默认 1MB，带图请求在到达 LB 之前就被 413 拒，LB 的图片自动压缩没机会跑 |
+| `nginx.ingress.kubernetes.io/proxy-buffering` | `off` | 默认 on 会把 SSE 流缓存到关闭再下发，客户端"一次性收到"或读超时断流 |
+| `nginx.ingress.kubernetes.io/proxy-read-timeout` | `600` | 默认 60s，长 thinking + 慢上游会被 ingress 主动断 |
+| `nginx.ingress.kubernetes.io/proxy-send-timeout` | `600` | 同上 |
+
+`64m` 直接对齐 `main.py:MAX_RAW_REQUEST_SIZE=64MB`，让 Pillow 把超大图缩到 ≤4MB 再上行。如果业务上确实没大图，可以下调到 `8m` 减少滥用面。
+
+**部署 + 验证**：
+```bash
+# 1. 改 host（lb.example.com → 你的域名），如果用 cert-manager 把 cluster-issuer 改成现网名
+vim deploy/k8s/ingress.yaml
+
+# 2. apply
+kubectl apply -k deploy/k8s/
+
+# 3. 确认 annotation 进了 ingress 对象
+kubectl describe ingress -n claude-lb claude-lb | grep -E "proxy-body-size|proxy-buffering|proxy-(read|send)-timeout"
+
+# 4. 确认 nginx-controller 已 reload（看到 backend reloaded 字样）
+kubectl logs -n ingress-nginx -l app.kubernetes.io/name=ingress-nginx --tail=50 | grep "backend reloaded"
+
+# 5. 端到端测大请求不再 413
+curl -X POST https://<your-host>/v1/chat/completions \
+  -H "Authorization: Bearer $LB_API_KEY" -H "Content-Type: application/json" \
+  --data-binary @big_image_payload.json -i | head -3
+# 期望：HTTP/2 200（之前是 413 + nginx HTML 错误页）
+```
+
+**集群级别 ConfigMap 兜底**：如果 ingress 上加了 annotation 还是 413，说明 ingress-nginx Controller 的全局 ConfigMap 设了更严的上限：
+```bash
+kubectl -n ingress-nginx get cm ingress-nginx-controller -o yaml | grep -E "body-size|proxy-buffering"
+# 如有 proxy-body-size 字段且 < 64m，让集群管理员调高
+```
+
+**Cloudflare 在前面时**：Free/Pro plan body 上限 100MB、Business 200MB、Enterprise 自定义。64MB 在所有档位都安全。如果客户端报 `cf-ray` + nginx 错误页，几乎可以确定是 ingress 拦的（Cloudflare 自己拦会返回 Cloudflare 品牌的错误页）。
 
 ---
 

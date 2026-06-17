@@ -1,0 +1,43 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: claude-lb
+  labels:
+    app: claude-lb
+  annotations:
+    # ── 1. body 上限 ────────────────────────────────────────────────
+    # ingress-nginx 默认 client_max_body_size=1m，会在 LB 的图片压缩链路之前拒掉。
+    # 与 main.py:MAX_RAW_REQUEST_SIZE=64MB 对齐：让大图请求落到 LB，由 Pillow 压到 ≤4MB 再发上游。
+    nginx.ingress.kubernetes.io/proxy-body-size: "64m"
+
+    # ── 2. 流式响应（SSE）必备 ──────────────────────────────────────
+    # 默认 proxy_buffering on 会把整个响应攒到关闭才下发 → 客户端"一次性收到"或读超时断流。
+    # LB 已经在每 15s 发一次 ": keep-alive" 注释，前提是 ingress 不缓冲。
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+
+    # ── 3. 超时 ─────────────────────────────────────────────────────
+    # 长 thinking + 慢上游的最长合理时间，跟 uvicorn timeout_keep_alive=600 保持一致。
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "30"
+
+    # ── 4. TLS（按现网调整 issuer 名）─────────────────────────────
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - lb.example.com   # ← 改成你的域名（如 lb.zeno.ink）
+      secretName: claude-lb-tls
+  rules:
+    - host: lb.example.com   # ← 同上
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: claude-lb
+                port:
+                  number: 8000
