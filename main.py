@@ -13,6 +13,7 @@ import time
 import random
 import logging
 import stat
+import uuid
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
@@ -83,6 +84,35 @@ logger = logging.getLogger(__name__)
 
 
 STREAM_HEARTBEAT_INTERVAL = float(os.getenv("STREAM_HEARTBEAT_INTERVAL", "15"))
+
+
+def _csv_env_set(name: str, default: str) -> set:
+    raw = os.getenv(name, default)
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+OPENAI_COMPAT_DEFAULT_MODEL_IDS = (
+    "gpt-4.1",
+    "gpt-4.1-2025-04-14",
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-5",
+    "gpt-5.1",
+    "gpt-5.5",
+    "gpt-5-codex",
+    "gpt-5.1-codex",
+    "o3",
+    "o3-mini",
+    "o4-mini",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+)
+
+OPENAI_CHAT_TO_RESPONSES_MODELS = _csv_env_set(
+    "OPENAI_CHAT_TO_RESPONSES_MODELS",
+    "gpt-5.5,gpt-5-codex",
+)
+OPENAI_CHAT_TO_RESPONSES_MODELS_LOWER = {model.lower() for model in OPENAI_CHAT_TO_RESPONSES_MODELS}
 
 
 async def _await_with_heartbeat(awaitable, heartbeat: bytes, interval: float = STREAM_HEARTBEAT_INTERVAL):
@@ -3022,6 +3052,351 @@ def _azure_supports_model(model: str) -> bool:
     )
 
 
+def _collect_openai_model_ids(azure=None, copilot=None) -> list:
+    """Build an OpenAI-compatible model catalog from configured providers.
+
+    Copilot endpoints can use models=[] as a wildcard, so expose a conservative
+    static catalog in that case; explicit Azure deployments and Copilot model
+    allow-lists are always included.
+    """
+    azure = azure_proxy if azure is None else azure
+    copilot = copilot_proxy if copilot is None else copilot
+    model_ids = set()
+
+    if azure:
+        for ep in getattr(getattr(azure, "load_balancer", None), "endpoints", []):
+            for model in getattr(ep, "deployments", []) or []:
+                if model:
+                    model_ids.add(str(model))
+
+    if copilot:
+        has_wildcard = False
+        for ep in getattr(getattr(copilot, "load_balancer", None), "endpoints", []):
+            models = getattr(ep, "models", []) or []
+            if models:
+                for model in models:
+                    if model:
+                        model_ids.add(str(model))
+            else:
+                has_wildcard = True
+        if has_wildcard:
+            model_ids.update(OPENAI_COMPAT_DEFAULT_MODEL_IDS)
+
+    return sorted(model_ids)
+
+
+def _openai_model_entry(model_id: str) -> dict:
+    return {
+        "id": model_id,
+        "object": "model",
+        "created": 0,
+        "owned_by": "databricks-claude-lb",
+    }
+
+
+def _build_openai_models_payload() -> dict:
+    return {
+        "object": "list",
+        "data": [_openai_model_entry(model_id) for model_id in _collect_openai_model_ids()],
+    }
+
+
+def _drop_nonpositive_token_limits(body: dict) -> list:
+    removed = []
+    for field in ("max_tokens", "max_completion_tokens"):
+        if field not in body:
+            continue
+        value = body.get(field)
+        if isinstance(value, bool):
+            numeric = int(value)
+        else:
+            try:
+                numeric = int(value)
+            except (TypeError, ValueError):
+                continue
+        if numeric <= 0:
+            body.pop(field, None)
+            removed.append(field)
+    return removed
+
+
+def _positive_int(value) -> Optional[int]:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if numeric > 0 else None
+
+
+def _chat_content_for_responses(content):
+    if content is None:
+        return ""
+    if isinstance(content, (str, list)):
+        return content
+    try:
+        return json.dumps(content, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(content)
+
+
+def _chat_content_as_text(content) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    try:
+        return json.dumps(content, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(content)
+
+
+def _messages_to_responses_input(messages) -> list:
+    converted = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user")
+        content = message.get("content", "")
+
+        if role == "tool":
+            tool_call_id = str(message.get("tool_call_id") or "")
+            prefix = "Tool result"
+            if tool_call_id:
+                prefix = f"{prefix} for {tool_call_id}"
+            converted.append({"role": "user", "content": f"{prefix}: {_chat_content_as_text(content)}"})
+            continue
+
+        if role == "assistant" and message.get("tool_calls"):
+            names = []
+            for tool_call in message.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                fn = tool_call.get("function") or {}
+                name = fn.get("name") if isinstance(fn, dict) else None
+                if name:
+                    names.append(str(name))
+            if names:
+                converted.append({"role": "assistant", "content": "Requested tool call: " + ", ".join(names)})
+                continue
+
+        if role not in ("system", "user", "assistant"):
+            role = "user"
+        converted.append({"role": role, "content": _chat_content_for_responses(content)})
+
+    if not converted:
+        converted.append({"role": "user", "content": "Please complete the task as requested."})
+    return converted
+
+
+def _has_tool_result(messages) -> bool:
+    return any(isinstance(message, dict) and message.get("role") == "tool" for message in messages or [])
+
+
+def _tools_to_responses_tools(tools) -> Optional[list]:
+    converted = []
+    for tool in tools or []:
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            continue
+        fn = tool.get("function") or {}
+        if not isinstance(fn, dict):
+            continue
+        item = {
+            "type": "function",
+            "name": str(fn.get("name") or ""),
+            "description": str(fn.get("description") or ""),
+            "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+        }
+        if "strict" in fn:
+            item["strict"] = fn["strict"]
+        converted.append(item)
+    return converted or None
+
+
+def _build_responses_payload_from_chat(chat_body: dict) -> dict:
+    messages = chat_body.get("messages") or []
+    payload = {
+        "model": chat_body.get("model", "unknown"),
+        "input": _messages_to_responses_input(messages),
+        "stream": False,
+    }
+
+    token_limit = _positive_int(chat_body.get("max_tokens"))
+    if token_limit is None:
+        token_limit = _positive_int(chat_body.get("max_completion_tokens"))
+    if token_limit is not None:
+        payload["max_output_tokens"] = token_limit
+
+    for field in ("temperature", "top_p"):
+        if field in chat_body and chat_body[field] is not None:
+            payload[field] = chat_body[field]
+
+    tools = _tools_to_responses_tools(chat_body.get("tools"))
+    if tools and not _has_tool_result(messages):
+        payload["tools"] = tools
+        if "tool_choice" in chat_body:
+            payload["tool_choice"] = chat_body["tool_choice"]
+
+    return payload
+
+
+def _responses_text(response_json: dict) -> str:
+    output_text = response_json.get("output_text")
+    if output_text:
+        return str(output_text)
+
+    parts = []
+    for item in response_json.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content") or []:
+            if isinstance(content, dict) and content.get("text") is not None:
+                parts.append(str(content.get("text")))
+    return "".join(parts)
+
+
+def _responses_tool_calls(response_json: dict) -> Optional[list]:
+    calls = []
+    for item in response_json.get("output") or []:
+        if not isinstance(item, dict) or item.get("type") != "function_call":
+            continue
+        call_id = str(item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:12]}")
+        calls.append({
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": str(item.get("name") or ""),
+                "arguments": str(item.get("arguments") or "{}"),
+            },
+        })
+    return calls or None
+
+
+def _safe_int(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _responses_usage_to_chat_usage(usage: Optional[dict]) -> Optional[dict]:
+    if not usage:
+        return None
+    prompt_tokens = _safe_int(usage.get("input_tokens"))
+    completion_tokens = _safe_int(usage.get("output_tokens"))
+    total_tokens = _safe_int(usage.get("total_tokens")) or prompt_tokens + completion_tokens
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def _responses_json_to_chat_completion(response_json: dict, model: str) -> dict:
+    tool_calls = _responses_tool_calls(response_json)
+    if tool_calls:
+        message = {"role": "assistant", "content": None, "tool_calls": tool_calls}
+        finish_reason = "tool_calls"
+    else:
+        message = {"role": "assistant", "content": _responses_text(response_json)}
+        finish_reason = "stop"
+
+    payload = {
+        "id": f"chatcmpl-lb-{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": message,
+            "finish_reason": finish_reason,
+        }],
+    }
+    usage = _responses_usage_to_chat_usage(response_json.get("usage"))
+    if usage:
+        payload["usage"] = usage
+    return payload
+
+
+def _should_adapt_chat_to_responses(model: str) -> bool:
+    return (model or "").strip().lower() in OPENAI_CHAT_TO_RESPONSES_MODELS_LOWER
+
+
+async def _chat_completion_sse_from_payload(chat_payload: dict):
+    chat_id = chat_payload.get("id") or f"chatcmpl-lb-{uuid.uuid4().hex}"
+    created = chat_payload.get("created") or int(time.time())
+    model = chat_payload.get("model") or "unknown"
+    choice = (chat_payload.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+
+    if message.get("tool_calls"):
+        delta = {"tool_calls": message["tool_calls"]}
+        chunk = {
+            "id": chat_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+        }
+        yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode()
+        finish_reason = "tool_calls"
+    else:
+        text = message.get("content") or ""
+        chunk_size = 220
+        if not text:
+            chunks = [""]
+        else:
+            chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+        for part in chunks:
+            chunk = {
+                "id": chat_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{"index": 0, "delta": {"content": part}, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode()
+        finish_reason = "stop"
+
+    final_chunk = {
+        "id": chat_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+    }
+    yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n".encode()
+    yield b"data: [DONE]\n\n"
+
+
+async def _route_chat_via_responses(body: dict, stream: bool):
+    responses_body = _build_responses_payload_from_chat(body)
+    model = responses_body.get("model", body.get("model", "unknown"))
+    logger.info(f"[Chat->Responses] model={model}, stream={stream} (buffered)")
+    response = await _route_openai_responses(responses_body, stream=False)
+    if not isinstance(response, JSONResponse):
+        raise HTTPException(status_code=502, detail={"error": {"message": "Responses adapter expected a JSON response"}})
+
+    try:
+        response_json = json.loads(response.body.decode("utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={"error": {"message": f"Responses adapter failed to parse upstream JSON: {e}"}}) from e
+
+    chat_payload = _responses_json_to_chat_completion(response_json, str(model))
+    if stream:
+        return StreamingResponse(
+            _chat_completion_sse_from_payload(chat_payload),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    return JSONResponse(content=chat_payload, status_code=response.status_code)
+
+
 async def _route_openai(body: dict, stream: bool, api_type: str):
     """OpenAI 风格入口的通用路由：Copilot 优先 → Azure fallback；
     避免 fallback 时被 Azure 抛误导性 404（Azure 没该 deployment 但显示 'No endpoint available'）"""
@@ -3116,11 +3491,39 @@ def _build_no_provider_message(model: str) -> str:
 
 
 async def _route_openai_chat(body: dict, stream: bool):
+    if _should_adapt_chat_to_responses(body.get("model", "")):
+        return await _route_chat_via_responses(body, stream)
     return await _route_openai(body, stream, "chat")
 
 
 async def _route_openai_responses(body: dict, stream: bool):
     return await _route_openai(body, stream, "responses")
+
+
+def _verify_optional_models_auth(request: Request, x_api_key: Optional[str] = None):
+    actual_key = _extract_api_key(request, x_api_key)
+    if actual_key and not _verify_lb_api_key(actual_key):
+        raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
+
+
+@app.get("/models")
+@app.get("/v1/models")
+async def openai_models(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    if not (azure_proxy or copilot_proxy):
+        raise HTTPException(status_code=404, detail={"error": {"message": "No OpenAI-style provider (Azure / Copilot) configured"}})
+    _verify_optional_models_auth(request, x_api_key)
+    return JSONResponse(content=_build_openai_models_payload())
+
+
+@app.get("/models/{model_id}")
+@app.get("/v1/models/{model_id}")
+async def openai_model(model_id: str, request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    if not (azure_proxy or copilot_proxy):
+        raise HTTPException(status_code=404, detail={"error": {"message": "No OpenAI-style provider (Azure / Copilot) configured"}})
+    _verify_optional_models_auth(request, x_api_key)
+    if model_id not in _collect_openai_model_ids():
+        raise HTTPException(status_code=404, detail={"error": {"message": f"Model '{model_id}' is not listed by this proxy"}})
+    return JSONResponse(content=_openai_model_entry(model_id))
 
 
 @app.post("/v1/responses")
@@ -3176,6 +3579,9 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
                 f"[image-compress] /v1/chat/completions: {stats['count']} imgs "
                 f"{stats['before']/1024:.0f}KB -> {stats['after']/1024:.0f}KB"
             )
+    removed_token_fields = _drop_nonpositive_token_limits(body)
+    if removed_token_fields:
+        logger.info(f"[Chat] removed non-positive token fields: {', '.join(removed_token_fields)}")
     stream = body.get("stream", False)
     logger.info(f"[Chat] model={body.get('model')}, stream={stream}")
     return await _route_openai_chat(body, stream=stream)

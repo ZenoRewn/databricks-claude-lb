@@ -151,7 +151,7 @@ GHCP 部分新模型（gpt-5.5、gpt-5-codex 等）**只允许走 `/responses` A
 
 ### 解决
 
-客户端配置 `wire_api = "responses"`（Codex 默认就是）。如果客户端只支持 chat completions，换一个 GHCP 接受的模型（gpt-4o、gpt-4.1 等）。
+优先把客户端配置成 `wire_api = "responses"`（Codex 默认就是）。如果客户端只支持 Chat Completions，LB 默认会把 `gpt-5.5,gpt-5-codex` 的 `/v1/chat/completions` 请求 buffered 转到 `/v1/responses`，再包装回 Chat Completions 响应；这种适配会牺牲首字延迟。可用 `OPENAI_CHAT_TO_RESPONSES_MODELS` 覆盖模型列表，或改用 GHCP 原生接受 Chat Completions 的模型（gpt-4o、gpt-4.1 等）。
 
 ---
 
