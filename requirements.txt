@@ -5,4 +5,4 @@ pyyaml>=6.0
 # 图片自动压缩（>200KB 的 base64 image 缩到 ≤1280px JPEG，避开 ADB 4MB / GHCP 上游 limit）
 Pillow>=10.0.0
 # MySQL 存储后端（可选，仅 usage_storage.type=mysql 时需要）
-# aiomysql>=0.2.0
+aiomysql>=0.2.0

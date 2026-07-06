@@ -115,6 +115,12 @@ OPENAI_CHAT_TO_RESPONSES_MODELS = _csv_env_set(
 OPENAI_CHAT_TO_RESPONSES_MODELS_LOWER = {model.lower() for model in OPENAI_CHAT_TO_RESPONSES_MODELS}
 
 
+def _is_anthropic_model(model_name: str) -> bool:
+    """Return True if the model belongs to the Anthropic/Databricks tab (not Copilot/OpenAI)."""
+    m = model_name.lower()
+    return not (m.startswith(("gpt-", "o1", "o3", "o4", "gemini")) or m in OPENAI_CHAT_TO_RESPONSES_MODELS_LOWER)
+
+
 async def _await_with_heartbeat(awaitable, heartbeat: bytes, interval: float = STREAM_HEARTBEAT_INTERVAL):
     """Yield SSE heartbeats while waiting for a slow awaitable to finish.
 
@@ -935,6 +941,14 @@ def create_usage_store(storage_config: dict) -> UsageDataStore:
     store_type = storage_config.get("type", "json")
     retention = storage_config.get("retention_days", 0)
     if store_type == "mysql":
+        try:
+            import aiomysql  # noqa: F401
+        except ImportError:
+            logger.critical(
+                "usage_storage.type=mysql but aiomysql is not installed. "
+                "Run: pip install aiomysql>=0.2.0 — refusing to start to avoid silent data loss."
+            )
+            sys.exit(1)
         return MysqlUsageStore(storage_config, retention)
     return JsonUsageStore(storage_config.get("path", "./usage_data"), retention)
 
@@ -3765,9 +3779,12 @@ async def stats():
             if cost is not None:
                 mstats["estimated_cost_usd"] = cost
     # KPI Est. Cost 和 Anthropic Models 表格统一以当天（per-model）累计为准
+    # 仅保留 Anthropic/Databricks 模型；Copilot/OpenAI 模型由各自 tab 展示
     today_models = {}
     total_cost = 0.0
     for model_name, mstats in (proxy.today_model_stats or {}).items():
+        if not _is_anthropic_model(model_name):
+            continue
         entry = dict(mstats)
         cost = calculate_cost(model_name, mstats["input_tokens"], mstats["output_tokens"],
                               mstats.get("cache_creation_tokens", 0), mstats.get("cache_read_tokens", 0))
