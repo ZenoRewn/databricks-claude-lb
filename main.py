@@ -99,6 +99,9 @@ OPENAI_COMPAT_DEFAULT_MODEL_IDS = (
     "gpt-5",
     "gpt-5.1",
     "gpt-5.5",
+    "gpt-5.6-sol",
+    "gpt-5.6-luna",
+    "gpt-5.6-terra",
     "gpt-5-codex",
     "gpt-5.1-codex",
     "o3",
@@ -110,7 +113,7 @@ OPENAI_COMPAT_DEFAULT_MODEL_IDS = (
 
 OPENAI_CHAT_TO_RESPONSES_MODELS = _csv_env_set(
     "OPENAI_CHAT_TO_RESPONSES_MODELS",
-    "gpt-5.5,gpt-5-codex",
+    "gpt-5.5,gpt-5-codex,gpt-5.6-sol,gpt-5.6-luna,gpt-5.6-terra",
 )
 OPENAI_CHAT_TO_RESPONSES_MODELS_LOWER = {model.lower() for model in OPENAI_CHAT_TO_RESPONSES_MODELS}
 
@@ -185,6 +188,9 @@ MODEL_PRICING = {
     "gpt-5-codex":        {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
     "gpt-5-mini":         {"input": 0.25, "output": 2.00,  "cache_write": 0.0, "cache_read": 0.025},
     "gpt-5-nano":         {"input": 0.05, "output": 0.40,  "cache_write": 0.0, "cache_read": 0.005},
+    "gpt-5.6-sol":        {"input": 5.00, "output": 30.00, "cache_write": 6.25,  "cache_read": 0.50},
+    "gpt-5.6-terra":      {"input": 2.50, "output": 15.00, "cache_write": 3.125, "cache_read": 0.25},
+    "gpt-5.6-luna":       {"input": 1.00, "output": 6.00,  "cache_write": 1.25,  "cache_read": 0.10},
     "gpt-5.5":            {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
     "gpt-5.4":            {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
     "gpt-5.2":            {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},

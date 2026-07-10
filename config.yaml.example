@@ -76,7 +76,7 @@ endpoints:
 #   - claude-* 模型 → Databricks（永远不会走 Copilot/Azure）
 #   - 其他模型 → Copilot 优先，模型不支持/全部熔断 → fallback 到 Azure OpenAI
 #   - /v1/models 会列出 Azure deployments、显式 Copilot models；models: [] 通配时使用内置常用模型目录
-#   - gpt-5.5/gpt-5-codex 等 Responses-only 模型如从 /v1/chat/completions 进入，会 buffered 转到 /v1/responses
+#   - gpt-5.5/gpt-5.6-*/gpt-5-codex 等 Responses-only 模型如从 /v1/chat/completions 进入，会 buffered 转到 /v1/responses
 #
 # Token 三种来源（优先级递减）：
 #   1) 下方 github_token 字段（支持 ${ENV_VAR}）

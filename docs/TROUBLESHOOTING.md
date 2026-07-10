@@ -147,11 +147,11 @@ LB 自带图片自动压缩（>200KB base64 → ≤1280px JPEG@82）；如果压
 
 ### 真因
 
-GHCP 部分新模型（gpt-5.5、gpt-5-codex 等）**只允许走 `/responses` API**，不允许走 `/chat/completions`。这是 GHCP 上游的强约束，LB 无法绕过。
+GHCP 部分新模型（gpt-5.5、gpt-5.6-sol、gpt-5.6-luna、gpt-5.6-terra、gpt-5-codex 等）**只允许走 `/responses` API**，不允许走 `/chat/completions`。这是 GHCP 上游的强约束，LB 无法绕过。
 
 ### 解决
 
-优先把客户端配置成 `wire_api = "responses"`（Codex 默认就是）。如果客户端只支持 Chat Completions，LB 默认会把 `gpt-5.5,gpt-5-codex` 的 `/v1/chat/completions` 请求 buffered 转到 `/v1/responses`，再包装回 Chat Completions 响应；这种适配会牺牲首字延迟。可用 `OPENAI_CHAT_TO_RESPONSES_MODELS` 覆盖模型列表，或改用 GHCP 原生接受 Chat Completions 的模型（gpt-4o、gpt-4.1 等）。
+优先把客户端配置成 `wire_api = "responses"`（Codex 默认就是）。如果客户端只支持 Chat Completions，LB 默认会把 `gpt-5.5,gpt-5-codex,gpt-5.6-sol,gpt-5.6-luna,gpt-5.6-terra` 的 `/v1/chat/completions` 请求 buffered 转到 `/v1/responses`，再包装回 Chat Completions 响应；这种适配会牺牲首字延迟。可用 `OPENAI_CHAT_TO_RESPONSES_MODELS` 覆盖模型列表，或改用 GHCP 原生接受 Chat Completions 的模型（gpt-4o、gpt-4.1 等）。
 
 ---
 

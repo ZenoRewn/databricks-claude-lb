@@ -106,8 +106,22 @@ class OpenAICompatTests(unittest.TestCase):
         self.assertIn("gpt-4.1", ids)
         self.assertIn("gpt-4o", ids)
         self.assertIn("gpt-5.5", ids)
+        self.assertIn("gpt-5.6-sol", ids)
+        self.assertIn("gpt-5.6-luna", ids)
+        self.assertIn("gpt-5.6-terra", ids)
         self.assertIn("gpt-5-codex", ids)
         self.assertIn("gemini-2.5-pro", ids)
+
+    def test_routes_gpt_5_6_chat_models_through_responses_adapter(self):
+        self.assertTrue(main._should_adapt_chat_to_responses("gpt-5.6-sol"))
+        self.assertTrue(main._should_adapt_chat_to_responses("GPT-5.6-LUNA"))
+        self.assertTrue(main._should_adapt_chat_to_responses(" gpt-5.6-terra "))
+
+    def test_uses_specific_gpt_5_6_pricing(self):
+        self.assertEqual(main.get_model_pricing("gpt-5.6-sol")["input"], 5.00)
+        self.assertEqual(main.get_model_pricing("gpt-5.6-terra")["output"], 15.00)
+        self.assertEqual(main.get_model_pricing("gpt-5.6-terra")["cache_write"], 3.125)
+        self.assertEqual(main.get_model_pricing("gpt-5.6-luna")["cache_read"], 0.10)
 
     def test_drops_only_nonpositive_chat_token_limits(self):
         body = {
