@@ -3403,11 +3403,12 @@ async def _chat_completion_sse_from_payload(chat_payload: dict):
     yield b"data: [DONE]\n\n"
 
 
-async def _route_chat_via_responses(body: dict, stream: bool):
+async def _route_chat_via_responses(body: dict, stream: bool, request_id: Optional[str] = None):
     responses_body = _build_responses_payload_from_chat(body)
     model = responses_body.get("model", body.get("model", "unknown"))
-    logger.info(f"[Chat->Responses] model={model}, stream={stream} (buffered)")
-    response = await _route_openai_responses(responses_body, stream=False)
+    rid = request_id or "-"
+    logger.info(f"[Chat->Responses][{rid}] model={model}, stream={stream} (buffered)")
+    response = await _route_openai_responses(responses_body, stream=False, request_id=request_id)
     if not isinstance(response, JSONResponse):
         raise HTTPException(status_code=502, detail={"error": {"message": "Responses adapter expected a JSON response"}})
 
@@ -3430,7 +3431,73 @@ async def _route_chat_via_responses(body: dict, stream: bool):
     return JSONResponse(content=chat_payload, status_code=response.status_code)
 
 
-async def _route_openai(body: dict, stream: bool, api_type: str):
+def _copilot_endpoint_diagnostics(model: str) -> list:
+    if not copilot_proxy:
+        return []
+    now = int(time.time())
+    diagnostics = []
+    load_balancer = getattr(copilot_proxy, "load_balancer", None)
+    for ep in getattr(load_balancer, "endpoints", []):
+        remaining = ep.session_token_expires_at - now if ep.session_token else 0
+        diagnostics.append({
+            "name": ep.name,
+            "circuit_open": ep.circuit_open,
+            "model_allowed": (not ep.models or model in ep.models),
+            "models_mode": "wildcard" if not ep.models else "allowlist",
+            "has_session_token": bool(ep.session_token),
+            "session_token_remaining_seconds": max(0, remaining),
+            "total_errors": ep.total_errors,
+        })
+    return diagnostics
+
+
+def _summarize_copilot_status(model: str) -> str:
+    diagnostics = _copilot_endpoint_diagnostics(model)
+    if not copilot_proxy:
+        return "Copilot not configured"
+    if not diagnostics:
+        return "Copilot configured with no endpoints"
+    allowed = [d for d in diagnostics if d["model_allowed"]]
+    selectable = [d for d in allowed if not d["circuit_open"]]
+    if not allowed:
+        return f"Copilot has no endpoint allowing model '{model}'"
+    if not selectable:
+        names = ", ".join(d["name"] for d in allowed)
+        return f"Copilot endpoints allowing model '{model}' are unavailable/circuit-open: {names}"
+    names = ", ".join(d["name"] for d in selectable)
+    return f"Copilot has selectable endpoint(s) for model '{model}': {names}"
+
+
+def _request_auth_header_names(request: Request) -> list:
+    names = []
+    for name in ("authorization", "api-key", "x-api-key"):
+        if request.headers.get(name):
+            names.append(name)
+    return names
+
+
+def _log_openai_request(request_id: str, route: str, request: Request, body: dict, body_size: int, stream: bool):
+    auth_headers = _request_auth_header_names(request)
+    user_agent = (request.headers.get("user-agent") or "")[:160]
+    content_type = request.headers.get("content-type") or ""
+    logger.info(
+        f"[OpenAICompat][{request_id}] {route} model={body.get('model')} stream={stream} "
+        f"body_size={body_size} auth_headers={auth_headers} content_type={content_type} "
+        f"user_agent={user_agent}",
+        extra={
+            "request_id": request_id,
+            "route": route,
+            "model": body.get("model"),
+            "stream": stream,
+            "body_size_bytes": body_size,
+            "auth_headers_present": auth_headers,
+            "content_type": content_type,
+            "user_agent": user_agent,
+        },
+    )
+
+
+async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Optional[str] = None):
     """OpenAI 风格入口的通用路由：Copilot 优先 → Azure fallback；
     避免 fallback 时被 Azure 抛误导性 404（Azure 没该 deployment 但显示 'No endpoint available'）"""
     model = body.get("model", "")
@@ -3438,6 +3505,25 @@ async def _route_openai(body: dict, stream: bool, api_type: str):
 
     azure_supports = _azure_supports_model(model)
     copilot_can = copilot_proxy is not None and copilot_proxy.can_handle(model)
+    rid = request_id or "-"
+    copilot_status = _summarize_copilot_status(model)
+
+    logger.info(
+        f"[route][{rid}] api_type={api_type} model={model} stream={stream} "
+        f"copilot_configured={copilot_proxy is not None} copilot_can={copilot_can} "
+        f"azure_configured={azure_proxy is not None} azure_supports={azure_supports}; {copilot_status}",
+        extra={
+            "request_id": request_id,
+            "api_type": api_type,
+            "model": model,
+            "stream": stream,
+            "copilot_configured": copilot_proxy is not None,
+            "copilot_can": copilot_can,
+            "copilot_endpoint_diagnostics": _copilot_endpoint_diagnostics(model),
+            "azure_configured": azure_proxy is not None,
+            "azure_supports": azure_supports,
+        },
+    )
 
     if api_type == "responses":
         copilot_call = copilot_proxy.proxy_responses if copilot_proxy else None
@@ -3460,24 +3546,35 @@ async def _route_openai(body: dict, stream: bool, api_type: str):
         except _UnsupportedModelError as e:
             copilot_failure = f"Copilot does not support model: {e}"
             if azure_supports:
-                logger.info(f"[route] Copilot rejected '{model}' ({e}), falling back to Azure")
+                logger.info(f"[route][{rid}] Copilot rejected '{model}' ({e}), falling back to Azure")
             else:
-                logger.warning(f"[route] Copilot rejected '{model}' and no Azure deployment for fallback")
+                logger.warning(f"[route][{rid}] Copilot rejected '{model}' and no Azure deployment for fallback: {e}")
+                raise HTTPException(
+                    status_code=404,
+                    detail={"error": {
+                        "message": f"Copilot upstream rejected model '{model}', and Azure is not configured for fallback. Original Copilot error: {e}",
+                        "code": "unsupported_model",
+                        "provider": "copilot",
+                        "model": model,
+                        "copilot_status": copilot_status,
+                    }},
+                ) from e
         except HTTPException as e:
             # Copilot 内部 503（全熔断 / token 失效）→ 看 Azure 能不能接
             if e.status_code in (404, 503):
                 copilot_failure = f"Copilot transient error {e.status_code}: {e.detail.get('error',{}).get('message','')}"
                 if azure_supports:
-                    logger.info(f"[route] Copilot unavailable for '{model}' ({e.status_code}), trying Azure")
+                    logger.info(f"[route][{rid}] Copilot unavailable for '{model}' ({e.status_code}), trying Azure")
                 else:
                     # Copilot 暂时不可用 + Azure 没这个模型 → 不能 fallback；返回明确 503
-                    logger.warning(f"[route] Copilot unavailable and no Azure fallback for '{model}'")
+                    logger.warning(f"[route][{rid}] Copilot unavailable and no Azure fallback for '{model}': {e.detail}")
                     raise HTTPException(
                         status_code=503,
                         detail={"error": {"message":
                             f"Copilot temporarily unavailable for model '{model}' ({e.status_code}); "
                             f"Azure has no deployment to fall back to. "
-                            f"Original Copilot error: {e.detail.get('error',{}).get('message','')}"}},
+                            f"Original Copilot error: {e.detail.get('error',{}).get('message','')}",
+                            "copilot_status": copilot_status}},
                     ) from e
             else:
                 # 4xx 客户端错误：直接返回原错误，不 fallback
@@ -3503,17 +3600,7 @@ async def _route_openai(body: dict, stream: bool, api_type: str):
 def _build_no_provider_message(model: str) -> str:
     parts = []
     if copilot_proxy:
-        if copilot_proxy.can_handle(model):
-            parts.append("Copilot configured but failing")
-        else:
-            healthy_eps = [
-                ep.name for ep in copilot_proxy.load_balancer.endpoints
-                if not ep.circuit_open and (not ep.models or model in ep.models)
-            ]
-            if not healthy_eps:
-                parts.append("Copilot endpoints unhealthy/circuit-open or model not whitelisted")
-            else:
-                parts.append("Copilot endpoint health unknown")
+        parts.append(_summarize_copilot_status(model))
     else:
         parts.append("Copilot not configured")
     if azure_proxy:
@@ -3523,14 +3610,14 @@ def _build_no_provider_message(model: str) -> str:
     return f"No provider available for model '{model}': {'; '.join(parts)}"
 
 
-async def _route_openai_chat(body: dict, stream: bool):
+async def _route_openai_chat(body: dict, stream: bool, request_id: Optional[str] = None):
     if _should_adapt_chat_to_responses(body.get("model", "")):
-        return await _route_chat_via_responses(body, stream)
-    return await _route_openai(body, stream, "chat")
+        return await _route_chat_via_responses(body, stream, request_id=request_id)
+    return await _route_openai(body, stream, "chat", request_id=request_id)
 
 
-async def _route_openai_responses(body: dict, stream: bool):
-    return await _route_openai(body, stream, "responses")
+async def _route_openai_responses(body: dict, stream: bool, request_id: Optional[str] = None):
+    return await _route_openai(body, stream, "responses", request_id=request_id)
 
 
 def _verify_optional_models_auth(request: Request, x_api_key: Optional[str] = None):
@@ -3561,11 +3648,15 @@ async def openai_model(model_id: str, request: Request, x_api_key: Optional[str]
 
 @app.post("/v1/responses")
 async def responses(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    request_id = f"req_{uuid.uuid4().hex[:8]}"
     if not (azure_proxy or copilot_proxy):
         raise HTTPException(status_code=404, detail={"error": {"message": "No OpenAI-style provider (Azure / Copilot) configured"}})
 
     actual_key = _extract_api_key(request, x_api_key)
     if not _verify_lb_api_key(actual_key):
+        logger.warning(
+            f"[OpenAICompat][{request_id}] auth failed route=/v1/responses auth_headers={_request_auth_header_names(request)}"
+        )
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
 
     body_bytes = await request.body()
@@ -3576,6 +3667,8 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
         body = json.loads(body_bytes)
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
+    stream = body.get("stream", False)
+    _log_openai_request(request_id, "/v1/responses", request, body, len(body_bytes), stream)
     if len(body_bytes) > _IMG_COMPRESS_THRESHOLD:
         stats = await compress_images_async(body)
         if stats["count"] > 0:
@@ -3583,18 +3676,21 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
                 f"[image-compress] /v1/responses: {stats['count']} imgs "
                 f"{stats['before']/1024:.0f}KB -> {stats['after']/1024:.0f}KB"
             )
-    stream = body.get("stream", False)
     logger.info(f"[Responses] model={body.get('model')}, stream={stream}")
-    return await _route_openai_responses(body, stream=stream)
+    return await _route_openai_responses(body, stream=stream, request_id=request_id)
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    request_id = f"req_{uuid.uuid4().hex[:8]}"
     if not (azure_proxy or copilot_proxy):
         raise HTTPException(status_code=404, detail={"error": {"message": "No OpenAI-style provider (Azure / Copilot) configured"}})
 
     actual_key = _extract_api_key(request, x_api_key)
     if not _verify_lb_api_key(actual_key):
+        logger.warning(
+            f"[OpenAICompat][{request_id}] auth failed route=/v1/chat/completions auth_headers={_request_auth_header_names(request)}"
+        )
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
 
     body_bytes = await request.body()
@@ -3605,6 +3701,8 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
         body = json.loads(body_bytes)
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
+    stream = body.get("stream", False)
+    _log_openai_request(request_id, "/v1/chat/completions", request, body, len(body_bytes), stream)
     if len(body_bytes) > _IMG_COMPRESS_THRESHOLD:
         stats = await compress_images_async(body)
         if stats["count"] > 0:
@@ -3615,9 +3713,8 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
     removed_token_fields = _drop_nonpositive_token_limits(body)
     if removed_token_fields:
         logger.info(f"[Chat] removed non-positive token fields: {', '.join(removed_token_fields)}")
-    stream = body.get("stream", False)
     logger.info(f"[Chat] model={body.get('model')}, stream={stream}")
-    return await _route_openai_chat(body, stream=stream)
+    return await _route_openai_chat(body, stream=stream, request_id=request_id)
 
 
 @app.post("/api/event_logging/batch")

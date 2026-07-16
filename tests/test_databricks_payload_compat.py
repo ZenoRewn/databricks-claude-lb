@@ -243,6 +243,56 @@ class OpenAICompatTests(unittest.TestCase):
         self.assertEqual(message["tool_calls"][0]["function"]["name"], "lookup")
         self.assertEqual(chat["choices"][0]["finish_reason"], "tool_calls")
 
+    def test_copilot_status_summary_includes_endpoint_state(self):
+        class FakeLoadBalancer:
+            def __init__(self, endpoints):
+                self.endpoints = endpoints
+
+        class FakeCopilot:
+            def __init__(self, endpoints):
+                self.load_balancer = FakeLoadBalancer(endpoints)
+
+        old_copilot = main.copilot_proxy
+        try:
+            main.copilot_proxy = FakeCopilot([
+                main.CopilotEndpoint(
+                    name="gh-all",
+                    github_token="token",
+                    token_source={"type": "literal"},
+                    models=[],
+                )
+            ])
+            message = main._build_no_provider_message("gpt-5.5")
+        finally:
+            main.copilot_proxy = old_copilot
+
+        self.assertIn("Copilot has selectable endpoint(s) for model 'gpt-5.5': gh-all", message)
+        self.assertNotIn("configured but failing", message)
+
+
+class OpenAICompatAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_preserves_copilot_unsupported_model_error_without_azure(self):
+        class RejectingCopilot:
+            def can_handle(self, model):
+                return True
+
+            async def proxy_responses(self, body, stream=False):
+                raise main._UnsupportedModelError("404: unsupported")
+
+        old_copilot, old_azure = main.copilot_proxy, main.azure_proxy
+        try:
+            main.copilot_proxy = RejectingCopilot()
+            main.azure_proxy = None
+            with self.assertRaises(main.HTTPException) as ctx:
+                await main._route_openai({"model": "gpt-5.5"}, stream=False, api_type="responses")
+        finally:
+            main.copilot_proxy, main.azure_proxy = old_copilot, old_azure
+
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertEqual(ctx.exception.detail["error"]["code"], "unsupported_model")
+        self.assertIn("Copilot upstream rejected model 'gpt-5.5'", ctx.exception.detail["error"]["message"])
+        self.assertIn("copilot_status", ctx.exception.detail["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -153,6 +153,8 @@ GHCP 部分新模型（gpt-5.5、gpt-5.6-sol、gpt-5.6-luna、gpt-5.6-terra、gp
 
 优先把客户端配置成 `wire_api = "responses"`（Codex 默认就是）。如果客户端只支持 Chat Completions，LB 默认会把 `gpt-5.5,gpt-5-codex,gpt-5.6-sol,gpt-5.6-luna,gpt-5.6-terra` 的 `/v1/chat/completions` 请求 buffered 转到 `/v1/responses`，再包装回 Chat Completions 响应；这种适配会牺牲首字延迟。可用 `OPENAI_CHAT_TO_RESPONSES_MODELS` 覆盖模型列表，或改用 GHCP 原生接受 Chat Completions 的模型（gpt-4o、gpt-4.1 等）。
 
+如果游戏选择 `gpt-5.5` 后报 `No provider available for model 'gpt-5.5': Copilot configured but failing; Azure not configured`，通常不是客户端 key 错，而是 Copilot 上游拒绝了该模型且没有 Azure fallback。新版 LB 会返回更明确的 `unsupported_model`，并在日志中记录 request id、客户端 header 形态、provider 选择、Copilot endpoint 是否熔断、模型是否命中白名单、session token 是否存在等信息。不要先做 silent fallback；先看同一 request id 的 `[OpenAICompat]`、`[route]`、`[Copilot responses]` 日志，确认上游到底拒绝了哪个模型。
+
 ---
 
 ## 5. Pod ready 但客户端报 "no healthy endpoint for model X"
