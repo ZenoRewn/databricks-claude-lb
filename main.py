@@ -116,6 +116,7 @@ OPENAI_CHAT_TO_RESPONSES_MODELS = _csv_env_set(
     "gpt-5.5,gpt-5-codex,gpt-5.6-sol,gpt-5.6-luna,gpt-5.6-terra",
 )
 OPENAI_CHAT_TO_RESPONSES_MODELS_LOWER = {model.lower() for model in OPENAI_CHAT_TO_RESPONSES_MODELS}
+RESPONSES_ADAPTER_UNSUPPORTED_SAMPLING_FIELDS = ("temperature", "top_p")
 
 
 def _is_anthropic_model(model_name: str) -> bool:
@@ -2289,8 +2290,32 @@ class CopilotProxy:
         if status not in (400, 404):
             return False
         text = (body_text or "").lower()
-        keywords = ("model_not_found", "model not found", "unknown model",
-                    "model_not_supported", "not supported", "invalid model")
+        if "unsupported parameter" in text:
+            return False
+
+        try:
+            payload = json.loads(body_text)
+        except Exception:
+            payload = None
+
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                code = str(error.get("code") or "").lower()
+                if code in {"model_not_found", "model_not_supported", "unsupported_model"}:
+                    return True
+                if code in {"invalid_request_body", "invalid_request_error"} and "unsupported parameter" in text:
+                    return False
+
+        keywords = (
+            "model_not_found",
+            "model not found",
+            "unknown model",
+            "model_not_supported",
+            "unsupported_model",
+            "unsupported model",
+            "invalid model",
+        )
         return any(k in text for k in keywords)
 
     # ---- 代理入口 ----
@@ -3247,6 +3272,23 @@ def _tools_to_responses_tools(tools) -> Optional[list]:
     return converted or None
 
 
+def _responses_adapter_removed_sampling_fields(chat_body: dict) -> list:
+    model = str(chat_body.get("model") or "").strip().lower()
+    if model not in OPENAI_CHAT_TO_RESPONSES_MODELS_LOWER:
+        return []
+    return [
+        field for field in RESPONSES_ADAPTER_UNSUPPORTED_SAMPLING_FIELDS
+        if field in chat_body and chat_body[field] is not None
+    ]
+
+
+def _strip_unsupported_responses_sampling_fields(body: dict) -> list:
+    removed = _responses_adapter_removed_sampling_fields(body)
+    for field in removed:
+        body.pop(field, None)
+    return removed
+
+
 def _build_responses_payload_from_chat(chat_body: dict) -> dict:
     messages = chat_body.get("messages") or []
     payload = {
@@ -3261,7 +3303,10 @@ def _build_responses_payload_from_chat(chat_body: dict) -> dict:
     if token_limit is not None:
         payload["max_output_tokens"] = token_limit
 
+    removed_sampling_fields = set(_responses_adapter_removed_sampling_fields(chat_body))
     for field in ("temperature", "top_p"):
+        if field in removed_sampling_fields:
+            continue
         if field in chat_body and chat_body[field] is not None:
             payload[field] = chat_body[field]
 
@@ -3407,6 +3452,17 @@ async def _route_chat_via_responses(body: dict, stream: bool, request_id: Option
     responses_body = _build_responses_payload_from_chat(body)
     model = responses_body.get("model", body.get("model", "unknown"))
     rid = request_id or "-"
+    removed_sampling_fields = _responses_adapter_removed_sampling_fields(body)
+    if removed_sampling_fields:
+        logger.info(
+            f"[Chat->Responses][{rid}] removed unsupported Responses params for model={model}: "
+            f"{', '.join(removed_sampling_fields)}",
+            extra={
+                "request_id": request_id,
+                "model": model,
+                "removed_params": removed_sampling_fields,
+            },
+        )
     logger.info(f"[Chat->Responses][{rid}] model={model}, stream={stream} (buffered)")
     response = await _route_openai_responses(responses_body, stream=False, request_id=request_id)
     if not isinstance(response, JSONResponse):
@@ -3617,6 +3673,18 @@ async def _route_openai_chat(body: dict, stream: bool, request_id: Optional[str]
 
 
 async def _route_openai_responses(body: dict, stream: bool, request_id: Optional[str] = None):
+    removed_sampling_fields = _strip_unsupported_responses_sampling_fields(body)
+    if removed_sampling_fields:
+        rid = request_id or "-"
+        logger.info(
+            f"[Responses][{rid}] removed unsupported Responses params for model={body.get('model')}: "
+            f"{', '.join(removed_sampling_fields)}",
+            extra={
+                "request_id": request_id,
+                "model": body.get("model"),
+                "removed_params": removed_sampling_fields,
+            },
+        )
     return await _route_openai(body, stream, "responses", request_id=request_id)
 
 

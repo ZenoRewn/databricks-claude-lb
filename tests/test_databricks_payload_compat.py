@@ -176,6 +176,7 @@ class OpenAICompatTests(unittest.TestCase):
             "max_tokens": 0,
             "max_completion_tokens": 512,
             "temperature": 0.3,
+            "top_p": 0.9,
             "tools": [
                 {
                     "type": "function",
@@ -200,10 +201,50 @@ class OpenAICompatTests(unittest.TestCase):
             ],
         )
         self.assertEqual(payload["max_output_tokens"], 512)
-        self.assertEqual(payload["temperature"], 0.3)
+        self.assertNotIn("temperature", payload)
+        self.assertNotIn("top_p", payload)
         self.assertEqual(payload["tools"][0]["type"], "function")
         self.assertEqual(payload["tools"][0]["name"], "lookup")
         self.assertEqual(payload["tool_choice"], "auto")
+
+    def test_reports_removed_chat_to_responses_sampling_fields(self):
+        body = {
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "hello"}],
+            "temperature": 0.3,
+            "top_p": 0.9,
+        }
+
+        removed = main._responses_adapter_removed_sampling_fields(body)
+
+        self.assertEqual(removed, ["temperature", "top_p"])
+
+    def test_strips_unsupported_sampling_fields_from_direct_responses_body(self):
+        body = {
+            "model": "gpt-5.5",
+            "input": "hello",
+            "temperature": 0.3,
+            "top_p": 0.9,
+            "max_output_tokens": 100,
+        }
+
+        removed = main._strip_unsupported_responses_sampling_fields(body)
+
+        self.assertEqual(removed, ["temperature", "top_p"])
+        self.assertNotIn("temperature", body)
+        self.assertNotIn("top_p", body)
+        self.assertEqual(body["max_output_tokens"], 100)
+
+    def test_does_not_classify_unsupported_parameter_as_unsupported_model(self):
+        body = '{"error":{"message":"Unsupported parameter: \\"temperature\\" is not supported with this model.","code":"invalid_request_body"}}'
+
+        self.assertFalse(main.CopilotProxy._is_unsupported_model_error(400, body))
+
+    def test_classifies_true_copilot_model_errors_as_unsupported_model(self):
+        self.assertTrue(main.CopilotProxy._is_unsupported_model_error(404, '{"error":{"code":"model_not_found"}}'))
+        self.assertTrue(main.CopilotProxy._is_unsupported_model_error(400, '{"error":{"message":"unknown model"}}'))
+        self.assertTrue(main.CopilotProxy._is_unsupported_model_error(400, '{"error":{"code":"unsupported_model"}}'))
+        self.assertTrue(main.CopilotProxy._is_unsupported_model_error(400, '{"error":{"message":"unknown model","code":"invalid_request_body"}}'))
 
     def test_wraps_responses_text_as_chat_completion(self):
         response = {
