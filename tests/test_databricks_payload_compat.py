@@ -68,6 +68,34 @@ class StreamingHeartbeatTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OpenAICompatTests(unittest.TestCase):
+    class FakeRequest:
+        def __init__(self, headers):
+            self.headers = headers
+
+    def test_extracts_api_key_from_common_client_headers(self):
+        self.assertEqual(
+            main._extract_api_key(self.FakeRequest({"api-key": " game-key "})),
+            "game-key",
+        )
+        self.assertEqual(
+            main._extract_api_key(self.FakeRequest({"authorization": "bearer game-key"})),
+            "game-key",
+        )
+        self.assertEqual(
+            main._extract_api_key(
+                self.FakeRequest({"api-key": "game-key", "authorization": "Bearer local"})
+            ),
+            "game-key",
+        )
+        self.assertEqual(
+            main._extract_api_key(self.FakeRequest({"authorization": "game-key"})),
+            "game-key",
+        )
+        self.assertEqual(
+            main._extract_api_key(self.FakeRequest({}), x_api_key=" game-key "),
+            "game-key",
+        )
+
     def test_collects_model_catalog_from_azure_copilot_and_wildcard_defaults(self):
         class FakeLoadBalancer:
             def __init__(self, endpoints):

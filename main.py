@@ -3039,8 +3039,21 @@ async def count_tokens(request: Request):
 
 
 def _extract_api_key(request: Request, x_api_key: Optional[str] = None) -> str:
-    auth_header = request.headers.get("authorization", "")
-    return x_api_key or (auth_header[7:] if auth_header.startswith("Bearer ") else "")
+    for candidate in (
+        x_api_key,
+        request.headers.get("x-api-key"),
+        request.headers.get("api-key"),
+    ):
+        if candidate and str(candidate).strip():
+            return str(candidate).strip()
+
+    auth_header = (request.headers.get("authorization") or "").strip()
+    if not auth_header:
+        return ""
+    parts = auth_header.split(None, 1)
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1].strip()
+    return auth_header
 
 
 def _verify_lb_api_key(actual_key: str) -> bool:
