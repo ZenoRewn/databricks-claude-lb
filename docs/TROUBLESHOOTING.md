@@ -135,6 +135,21 @@ LB 自带图片自动压缩（>200KB base64 → ≤1280px JPEG@82）；如果压
 - 用 prompt cache（`cache_control`）减少重复内容
 - 检查 `[image-compress]` 日志确认是否真的压了
 
+#### 软上限保护（防 OOM，v2 新增）
+
+字节数上限（`MAX_RAW_REQUEST_SIZE`）管不住真正的内存杀手：**图片解码后的位图**。一张 4000×3000 图 base64 才 ~2MB，PIL 解码成位图却要 ~48MB；多张高分辨率图同时解码就能打爆 Pod（历史 OOM 真凶）。故在 PIL 解码**之前**加了三层准入保护（全部只读 header peek `img.size`，不触发全量解码，内存开销极小）：
+
+| 保护 | 环境变量 | 默认 | 说明 |
+|------|----------|------|------|
+| 图片张数上限 | `IMG_MAX_COUNT` | `15` | 单请求图片超此数 → 413 |
+| 总像素预算 | `IMG_MAX_TOTAL_PIXELS` | `100000000` | 所有图 w×h 累加超此值 → 413（≈8 张 4K）|
+| 压缩并发削峰 | `IMG_COMPRESS_CONCURRENCY` | `2` | 同时解码的图片数，`Semaphore` 限流 |
+| 总开关 | `IMG_ADMISSION_ENABLED` | `1` | 设 `0` 关闭准入检查（仅保留压缩）|
+
+触发时客户端拿到 JSON 413（非 ingress 的 HTML），错误体 `type: request_too_large`，`message` 说明是张数还是像素超限。日志前缀 `[image-admission]`。
+
+**调参建议**：Pod 内存充裕（≥2Gi）可放宽 `IMG_MAX_TOTAL_PIXELS` 到 `200000000`；内存紧张（<1Gi）调低到 `50000000` 并把 `IMG_COMPRESS_CONCURRENCY` 设 `1`。改环境变量后重启 Pod 生效,无需改代码。
+
 ---
 
 ## 4. GHCP 返回 "model X is not accessible via the /chat/completions endpoint"

@@ -410,6 +410,104 @@ _IMG_MAX_DIM = 1280
 _IMG_JPEG_QUALITY = 82
 _DATA_URL_RE = re.compile(r"^data:image/([a-zA-Z0-9+.\-]+);base64,(.+)$", re.DOTALL)
 
+# ---- 图片准入软上限：在 PIL 解码（内存放大真凶）之前拦截异常请求 ----
+# 背景：base64 体积 ≠ 解码后内存。一张 4000x3000 图 base64 才 ~2MB，PIL 解码成
+# 位图却要 ~48MB。多张高分辨率图同时解码 = OOM。RAW/REQUEST 字节上限管不住
+# "张数 x 单图像素" 这个维度，故在此加三层软保护，全部在解码前生效。
+_IMG_MAX_COUNT = int(os.environ.get("IMG_MAX_COUNT", "15"))          # 单请求图片张数上限
+_IMG_MAX_TOTAL_PIXELS = int(os.environ.get("IMG_MAX_TOTAL_PIXELS", str(100_000_000)))  # 总像素预算 ~= 8 张 4K
+_IMG_COMPRESS_CONCURRENCY = int(os.environ.get("IMG_COMPRESS_CONCURRENCY", "2"))       # 同时解码张数（削峰）
+_IMG_ADMISSION_ENABLED = os.environ.get("IMG_ADMISSION_ENABLED", "1") not in ("0", "false", "False")
+
+# 单图解码前的像素护栏：防 decompression-bomb（PIL 默认 ~178M px 会告警但仍解）
+if _PIL_AVAILABLE:
+    try:
+        Image.MAX_IMAGE_PIXELS = _IMG_MAX_TOTAL_PIXELS
+    except Exception:
+        pass
+
+_img_compress_sem = None  # 延迟到事件循环内创建
+
+
+class ImageAdmissionError(Exception):
+    """图片准入超限，携带面向客户端的报错信息。"""
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+
+
+def _peek_image_size(raw: bytes):
+    """只读图片 header 拿 (w, h)，不调用 .load()，几乎零内存。失败返回 None。"""
+    if not _PIL_AVAILABLE:
+        return None
+    try:
+        with Image.open(BytesIO(raw)) as im:
+            return im.size  # (w, h)，此时尚未解码像素
+    except Exception:
+        return None
+
+
+def check_image_admission(payload) -> None:
+    """解码前遍历 payload 统计图片张数与总像素，超限抛 ImageAdmissionError。
+    仅 peek header，不触发全量解码，本身内存开销极小。"""
+    if not _IMG_ADMISSION_ENABLED or not _PIL_AVAILABLE:
+        return
+    count = 0
+    total_px = 0
+
+    def account(raw: bytes):
+        nonlocal count, total_px
+        count += 1
+        if count > _IMG_MAX_COUNT:
+            raise ImageAdmissionError(
+                f"Too many images in request: >{_IMG_MAX_COUNT} (limit for LB memory safety). "
+                f"Please split the request or remove images."
+            )
+        size = _peek_image_size(raw)
+        if size:
+            total_px += size[0] * size[1]
+            if total_px > _IMG_MAX_TOTAL_PIXELS:
+                raise ImageAdmissionError(
+                    f"Total image pixels exceed budget (~{_IMG_MAX_TOTAL_PIXELS/1e6:.0f}M px). "
+                    f"Images are too large/too many for LB to process safely. "
+                    f"Please downscale or remove images."
+                )
+
+    def visit(node):
+        if isinstance(node, dict):
+            if node.get("type") == "image" and isinstance(node.get("source"), dict):
+                src = node["source"]
+                data = src.get("data") if src.get("type") == "base64" else None
+                if isinstance(data, str) and data:
+                    try:
+                        account(base64.b64decode(data, validate=False))
+                    except ImageAdmissionError:
+                        raise
+                    except Exception:
+                        pass
+                return
+            for v in node.values():
+                visit(v)
+            return
+        if isinstance(node, list):
+            for v in node:
+                visit(v)
+            return
+        if isinstance(node, str):
+            if not node.startswith("data:image/"):
+                return
+            m = _DATA_URL_RE.match(node)
+            if not m:
+                return
+            try:
+                account(base64.b64decode(m.group(2), validate=False))
+            except ImageAdmissionError:
+                raise
+            except Exception:
+                pass
+
+    visit(payload)
+
 
 def _compress_image_bytes(raw: bytes) -> Optional[bytes]:
     """解码 → 等比缩到 ≤1280px → JPEG q=82 重编码。压不小或失败返回 None（保留原图）。"""
@@ -521,10 +619,15 @@ def compress_images_in_payload(payload) -> dict:
 
 
 async def compress_images_async(payload) -> dict:
-    """在线程池执行压缩，避免阻塞 event loop。无图片时近乎零开销。"""
+    """在线程池执行压缩，避免阻塞 event loop。无图片时近乎零开销。
+    用 Semaphore 限制并发解码张数，避免多张高分图同时进位图打爆内存。"""
     if not _PIL_AVAILABLE:
         return {"count": 0, "before": 0, "after": 0}
-    return await asyncio.to_thread(compress_images_in_payload, payload)
+    global _img_compress_sem
+    if _img_compress_sem is None:
+        _img_compress_sem = asyncio.Semaphore(max(1, _IMG_COMPRESS_CONCURRENCY))
+    async with _img_compress_sem:
+        return await asyncio.to_thread(compress_images_in_payload, payload)
 
 
 # ==================== Load Balancer ====================
@@ -3026,6 +3129,11 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
 
     # 大请求先尝试压缩图片（小请求跳过节省 CPU）
     if body_size > _IMG_COMPRESS_THRESHOLD:
+        try:
+            check_image_admission(body)
+        except ImageAdmissionError as e:
+            logger.warning(f"[image-admission] /v1/messages rejected: {e.message}")
+            raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
         stats = await compress_images_async(body)
         if stats["count"] > 0:
             saved_kb = (stats["before"] - stats["after"]) / 1024
@@ -3738,6 +3846,11 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
     stream = body.get("stream", False)
     _log_openai_request(request_id, "/v1/responses", request, body, len(body_bytes), stream)
     if len(body_bytes) > _IMG_COMPRESS_THRESHOLD:
+        try:
+            check_image_admission(body)
+        except ImageAdmissionError as e:
+            logger.warning(f"[image-admission] /v1/responses rejected: {e.message}")
+            raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
         stats = await compress_images_async(body)
         if stats["count"] > 0:
             logger.info(
@@ -3772,6 +3885,11 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
     stream = body.get("stream", False)
     _log_openai_request(request_id, "/v1/chat/completions", request, body, len(body_bytes), stream)
     if len(body_bytes) > _IMG_COMPRESS_THRESHOLD:
+        try:
+            check_image_admission(body)
+        except ImageAdmissionError as e:
+            logger.warning(f"[image-admission] /v1/chat/completions rejected: {e.message}")
+            raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
         stats = await compress_images_async(body)
         if stats["count"] > 0:
             logger.info(

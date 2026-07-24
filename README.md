@@ -18,7 +18,7 @@
   - Azure OpenAI（`/v1/chat/completions`、`/v1/responses`）— 多区域 + 按 deployment 路由
 - **自动路由** - `claude-*` 永远走 Databricks；其他模型 **GHCP 优先 → Azure fallback**
 - **GHCP token 自愈** - long-lived OAuth + 30 min session token 双层模型；后台定时刷新 + 401 自愈 + 配合 K8s Secret rotation 零重启生效
-- **图片自动压缩** - >200KB base64 image → ≤1280px JPEG q=82，让 Chrome fullPage 截图（30MB 级）也能塞进 ADB 4MB 上限
+- **图片自动压缩** - >200KB base64 image → ≤1280px JPEG q=82，让 Chrome fullPage 截图（30MB 级）也能塞进 ADB 4MB 上限；并有解码前软上限保护（张数/总像素/并发，防 OOM，见 docs/TROUBLESHOOTING.md）
 - **上游错误规范化** - 自动把上游 HTML 错误页（CDN "Connection Closed" 之类）转成结构化 JSON，避免泄露给客户端
 - **负载均衡** - `least_requests`（默认）/ `round_robin` / `random`
 - **熔断器** - 自动检测故障端点并临时禁用，超时后自动恢复
