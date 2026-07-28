@@ -414,7 +414,7 @@ _DATA_URL_RE = re.compile(r"^data:image/([a-zA-Z0-9+.\-]+);base64,(.+)$", re.DOT
 # 背景：base64 体积 ≠ 解码后内存。一张 4000x3000 图 base64 才 ~2MB，PIL 解码成
 # 位图却要 ~48MB。多张高分辨率图同时解码 = OOM。RAW/REQUEST 字节上限管不住
 # "张数 x 单图像素" 这个维度，故在此加三层软保护，全部在解码前生效。
-_IMG_MAX_COUNT = int(os.environ.get("IMG_MAX_COUNT", "15"))          # 单请求图片张数上限
+_IMG_MAX_COUNT = int(os.environ.get("IMG_MAX_COUNT", "50"))          # 单请求图片张数上限
 _IMG_MAX_TOTAL_PIXELS = int(os.environ.get("IMG_MAX_TOTAL_PIXELS", str(100_000_000)))  # 总像素预算 ~= 8 张 4K
 _IMG_COMPRESS_CONCURRENCY = int(os.environ.get("IMG_COMPRESS_CONCURRENCY", "2"))       # 同时解码张数（削峰）
 _IMG_ADMISSION_ENABLED = os.environ.get("IMG_ADMISSION_ENABLED", "1") not in ("0", "false", "False")
