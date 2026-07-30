@@ -956,6 +956,8 @@ class MysqlUsageStore(UsageDataStore):
 
     async def _backend_start(self):
         import aiomysql
+        import ssl as _ssl
+        ssl_ctx = _ssl.create_default_context()
         self._pool = await aiomysql.create_pool(
             host=self._mysql_config.get("host", "localhost"),
             port=self._mysql_config.get("port", 3306),
@@ -966,6 +968,7 @@ class MysqlUsageStore(UsageDataStore):
             maxsize=self._mysql_config.get("pool_size", 5),
             autocommit=True,
             charset="utf8mb4",
+            ssl=ssl_ctx,
         )
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
