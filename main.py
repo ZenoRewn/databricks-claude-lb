@@ -509,6 +509,66 @@ def check_image_admission(payload) -> None:
     visit(payload)
 
 
+def trim_excess_images(payload, max_count: int = _IMG_MAX_COUNT) -> int:
+    """Walk payload and remove oldest images beyond max_count, keeping the most recent ones.
+    Returns number of images removed. Images are replaced with a text placeholder."""
+    # Collect all image node locations: (parent_list, index) in traversal order
+    image_locations: list = []
+
+    def collect(node, parent=None, idx=None):
+        if isinstance(node, dict):
+            # Anthropic image block
+            if node.get("type") == "image" and isinstance(node.get("source"), dict):
+                if parent is not None and idx is not None:
+                    image_locations.append((parent, idx))
+                return
+            # OpenAI image_url block
+            if node.get("type") == "image_url":
+                if parent is not None and idx is not None:
+                    image_locations.append((parent, idx))
+                return
+            # OpenAI input_image block (Responses API)
+            if node.get("type") == "input_image":
+                if parent is not None and idx is not None:
+                    image_locations.append((parent, idx))
+                return
+            for v in node.values():
+                collect(v)
+            return
+        if isinstance(node, list):
+            for i, v in enumerate(node):
+                collect(v, parent=node, idx=i)
+            return
+        if isinstance(node, str) and node.startswith("data:image/"):
+            if parent is not None and idx is not None:
+                image_locations.append((parent, idx))
+
+    collect(payload)
+
+    if len(image_locations) <= max_count:
+        return 0
+
+    # Remove oldest (earliest in traversal), keep the last max_count
+    to_remove = image_locations[:-max_count]
+    # Process in reverse index order to avoid shifting
+    # Group by parent list to handle index shifts correctly
+    from collections import defaultdict
+    removals_by_parent: dict = defaultdict(list)
+    for parent, idx in to_remove:
+        removals_by_parent[id(parent)].append((parent, idx))
+
+    removed = 0
+    for _, items in removals_by_parent.items():
+        # Sort by index descending so removal doesn't shift earlier indices
+        items.sort(key=lambda x: x[1], reverse=True)
+        for parent, idx in items:
+            # Replace with text placeholder instead of removing (preserves structure)
+            parent[idx] = {"type": "text", "text": "[image omitted for context length]"}
+            removed += 1
+
+    return removed
+
+
 def _compress_image_bytes(raw: bytes) -> Optional[bytes]:
     """解码 → 等比缩到 ≤1280px → JPEG q=82 重编码。压不小或失败返回 None（保留原图）。"""
     if len(raw) < _IMG_COMPRESS_THRESHOLD:
@@ -3135,8 +3195,12 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
         try:
             check_image_admission(body)
         except ImageAdmissionError as e:
-            logger.warning(f"[image-admission] /v1/messages rejected: {e.message}")
-            raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
+            trimmed = trim_excess_images(body)
+            if trimmed:
+                logger.warning(f"[image-trim] /v1/messages: auto-trimmed {trimmed} oldest images (was: {e.message})")
+            else:
+                logger.warning(f"[image-admission] /v1/messages rejected: {e.message}")
+                raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
         stats = await compress_images_async(body)
         if stats["count"] > 0:
             saved_kb = (stats["before"] - stats["after"]) / 1024
@@ -3852,8 +3916,12 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
         try:
             check_image_admission(body)
         except ImageAdmissionError as e:
-            logger.warning(f"[image-admission] /v1/responses rejected: {e.message}")
-            raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
+            trimmed = trim_excess_images(body)
+            if trimmed:
+                logger.warning(f"[image-trim] /v1/responses: auto-trimmed {trimmed} oldest images (was: {e.message})")
+            else:
+                logger.warning(f"[image-admission] /v1/responses rejected: {e.message}")
+                raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
         stats = await compress_images_async(body)
         if stats["count"] > 0:
             logger.info(
@@ -3891,8 +3959,12 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
         try:
             check_image_admission(body)
         except ImageAdmissionError as e:
-            logger.warning(f"[image-admission] /v1/chat/completions rejected: {e.message}")
-            raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
+            trimmed = trim_excess_images(body)
+            if trimmed:
+                logger.warning(f"[image-trim] /v1/chat/completions: auto-trimmed {trimmed} oldest images (was: {e.message})")
+            else:
+                logger.warning(f"[image-admission] /v1/chat/completions rejected: {e.message}")
+                raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
         stats = await compress_images_async(body)
         if stats["count"] > 0:
             logger.info(
