@@ -562,8 +562,22 @@ def trim_excess_images(payload, max_count: int = _IMG_MAX_COUNT) -> int:
         # Sort by index descending so removal doesn't shift earlier indices
         items.sort(key=lambda x: x[1], reverse=True)
         for parent, idx in items:
-            # Replace with text placeholder instead of removing (preserves structure)
-            parent[idx] = {"type": "text", "text": "[image omitted for context length]"}
+            # Detect the correct text type based on the original node format
+            original = parent[idx]
+            if isinstance(original, dict):
+                orig_type = original.get("type", "")
+                if orig_type == "input_image":
+                    # OpenAI Responses API format
+                    parent[idx] = {"type": "input_text", "text": "[image omitted for context length]"}
+                elif orig_type == "image_url":
+                    # OpenAI Chat Completions format
+                    parent[idx] = {"type": "text", "text": "[image omitted for context length]"}
+                else:
+                    # Anthropic format (type=image) or fallback
+                    parent[idx] = {"type": "text", "text": "[image omitted for context length]"}
+            else:
+                # data URL string - replace with text type (Chat Completions)
+                parent[idx] = {"type": "text", "text": "[image omitted for context length]"}
             removed += 1
 
     return removed
