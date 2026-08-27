@@ -103,21 +103,23 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 - 启动时 `asyncio.create_task(copilot_proxy.warmup())` + 启动 `background_refresh_loop`
 - `POST /admin/copilot/reload`（运维端点）：立即从源重读所有 endpoint 的 long-lived token + 强制刷新 session token，配合 K8s Secret rotation 实现"零延迟"生效（不等 kubelet 同步周期）
 - `CopilotEndpoint.models` 语义：**空列表 = 通配**（接受所有模型）；填值则只服务列表内模型。和 Azure 的 `deployments` 语义不同（Azure 必须列出可用部署），所以 Copilot 自己实现 `_select_endpoint(model)` 不复用 `LoadBalancer.select_endpoint_for_model()`
-- `_UnsupportedModelError`: 上游返回 `model_not_found` / `unsupported_model` / `unknown model` 等关键字时抛出，路由层捕获后 fallback 到 Azure（仅在未发任何 chunk 时有效，由 `sent_any_chunk` 守卫）
+- `_UnsupportedModelError`: non-stream/buffered 请求可在 HTTP response start 前由路由层捕获并 fallback Azure；direct streaming 已提交 HTTP 200 后不能透明切 provider，此时返回明确的 `unsupported_model` SSE error + `[DONE]`
 - 路由分流入口: `_route_openai_chat()` / `_route_openai_responses()`：先检查 `claude-*` 名拒绝（必须走 `/v1/messages`）；再 try Copilot；如抛 `_UnsupportedModelError` 或 HTTPException 404/503 就 fallback Azure
 
 #### 可观测性 / 探针
 
 - **`/health/live`**：仅检查进程能响应（K8s livenessProbe，避免上游故障导致 Pod 被 kill）
 - **`/health/ready`**：检查依赖就绪 — 至少 1 个 ADB endpoint 可用 + 至少 1 个 Copilot endpoint token 有效（K8s readinessProbe）
-- **`/metrics`**：Prometheus 文本格式，暴露 `copilot_session_token_remaining_seconds`、`copilot_token_refresh_total`、`copilot_token_refresh_failed_total`、`copilot_token_reload_total`、`copilot_endpoint_circuit_open`、`databricks_endpoint_*`、`azure_openai_endpoint_*` 等
+- **`/metrics`**：Prometheus 文本格式，除 token/circuit/provider 指标外，还暴露 `copilot_stream_connections_active`、`copilot_stream_connection_oldest_seconds`、`copilot_stream_upstream_idle_max_seconds`、`copilot_stream_disconnects_detected_total`、`copilot_stream_forced_releases_total`、`copilot_pool_timeout_total` 等连接生命周期指标
 - **JSON 日志**：`LOG_FORMAT=json` 切换；字段 `ts`/`level`/`logger`/`message`，AKS Log Analytics 可直接 KQL 解析；接管 `uvicorn`/`uvicorn.error`/`uvicorn.access`/`httpx` logger 统一格式
-- **环境变量控制**：`LOG_FORMAT`（text|json）、`LOG_LEVEL`（INFO 等）、`COPILOT_REFRESH_INTERVAL`（秒）、`COPILOT_REFRESH_THRESHOLD`（秒）
+- **环境变量控制**：除日志/token 刷新变量外，连接监控支持 `COPILOT_STREAM_HIGH_WATERMARK=400`、`COPILOT_STREAM_OVERLOAD_GRACE=30`、`COPILOT_STREAM_DISCONNECT_GRACE=15`、`COPILOT_STREAM_MONITOR_INTERVAL=5`
 
 详细 AKS 部署步骤、Token rotation 流程、监控告警建议见 `docs/AKS.md`。常见客户端 / 上游异常排查见 `docs/TROUBLESHOOTING.md`（含 macOS 系统代理拦截 localhost、CC 32MB 限制、ADB 4MB / GHCP 模型 API 约束等）。
 
 ### 流式代理健壮性（`_stream_request` / `_stream_response`）
-- **httpx 客户端**: `timeout=Timeout(connect=10.0, read=None, write=60.0, pool=30.0)`；`limits=Limits(max_connections=200, max_keepalive_connections=50, keepalive_expiry=30.0)`；`http2=False`。`read=None` 必要 —— 流式请求不能整体 read 超时，由逐 chunk 节奏决定
+- **httpx 客户端**: Databricks/Azure 保持 `200/50` 与 `pool=30s`；Copilot 独立使用 `500/200` 与 `pool=60s`。三者均保留 `read=None`，因为流式长 thinking 不能用整体 read timeout 误杀
+- **Copilot lifecycle**: 每个 streaming attempt 使用 exactly-once lease；自定义 `StreamingResponse` 在 ASGI downstream send 失败/取消时显式 `aclose()` body iterator，确保 pump、upstream response 和 `active_requests` 一起释放
+- **高水位兜底**: 后台 monitor 仅在 active requests ≥400 持续 30s 后检查异常 lease；只回收 owner 已结束或 downstream 连续确认断开 15s 的连接。请求总年龄和 upstream idle 仅做观测，绝不单独作为 kill 条件
 - **异常覆盖**: 网络异常 `except` 分支同时捕获 `ConnectTimeout / ReadTimeout / WriteTimeout / ConnectError / RemoteProtocolError / ReadError / WriteError`，上游中途断流（最常见症状即是客户端报 "socket connection closed unexpectedly"）也走熔断 + 切端点重试路径
 - **响应清理**: `response = None` 局部变量 + `finally: await response.aclose()`，避免 httpx 连接池堆积半开连接
 - **后台 pump + 心跳**: 将 `aiter_bytes()` 放入 `asyncio.create_task(_pump(response))`，主循环 `await asyncio.wait_for(queue.get(), timeout=15.0)`；15 秒无 chunk 则 yield 一次 `: keep-alive\n\n`（SSE 注释，Anthropic SDK 会忽略），刷新中间链路 idle 计时。pump 退出时由 `finally` 分支 `pump_task.cancel()` 回收

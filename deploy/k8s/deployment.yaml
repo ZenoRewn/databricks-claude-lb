@@ -54,6 +54,15 @@ spec:
               value: "300"
             - name: COPILOT_REFRESH_THRESHOLD
               value: "600"
+            # Copilot SSE 连接监控：只在持续高水位下回收确认断开的连接
+            - name: COPILOT_STREAM_HIGH_WATERMARK
+              value: "400"
+            - name: COPILOT_STREAM_OVERLOAD_GRACE
+              value: "30"
+            - name: COPILOT_STREAM_DISCONNECT_GRACE
+              value: "15"
+            - name: COPILOT_STREAM_MONITOR_INTERVAL
+              value: "5"
           envFrom:
             # 注入所有 ${ENV_VAR} 占位的实际值（DATABRICKS_TOKEN_*, AZURE_KEY_*, LB_API_KEY 等）
             - secretRef:

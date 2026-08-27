@@ -249,6 +249,10 @@ kubectl -n ingress-nginx get cm ingress-nginx-controller -o yaml | grep -E "body
 | `copilot_endpoint_circuit_open` | == 1 → P1 告警（token 失效，需重新登录 + rotate Secret） |
 | `databricks_endpoint_circuit_open` | == 1 持续 5 min → P2 告警（单 endpoint 不影响整体） |
 | `copilot_endpoint_errors_total` | rate 5min > 0.1 req/s → P3 监控 |
+| `copilot_stream_connections_active` | > 400 持续 30s → P2；结合 forced release / PoolTimeout 判断 |
+| `copilot_pool_timeout_total` | increase 5min > 0 → P1（本地连接池容量压力） |
+| `copilot_stream_forced_releases_total` | increase 15min > 0 → P2（已自动回收确认断开的 SSE） |
+| `copilot_stream_upstream_idle_max_seconds` | 只做诊断，不单独告警/回收；长 thinking 可合法长时间无 token |
 
 ### Azure Monitor managed Prometheus
 

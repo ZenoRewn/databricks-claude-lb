@@ -84,6 +84,10 @@ logger = logging.getLogger(__name__)
 
 
 STREAM_HEARTBEAT_INTERVAL = float(os.getenv("STREAM_HEARTBEAT_INTERVAL", "15"))
+COPILOT_STREAM_HIGH_WATERMARK = int(os.getenv("COPILOT_STREAM_HIGH_WATERMARK", "400"))
+COPILOT_STREAM_OVERLOAD_GRACE = float(os.getenv("COPILOT_STREAM_OVERLOAD_GRACE", "30"))
+COPILOT_STREAM_DISCONNECT_GRACE = float(os.getenv("COPILOT_STREAM_DISCONNECT_GRACE", "15"))
+COPILOT_STREAM_MONITOR_INTERVAL = float(os.getenv("COPILOT_STREAM_MONITOR_INTERVAL", "5"))
 
 
 def _csv_env_set(name: str, default: str) -> set:
@@ -148,6 +152,83 @@ async def _await_with_heartbeat(awaitable, heartbeat: bytes, interval: float = S
                 await task
             except BaseException:  # noqa: BLE001
                 pass
+
+
+async def _await_with_disconnect(awaitable, disconnect_checker, interval: float = 1.0):
+    """Await buffered work while cancelling it promptly after downstream disconnect."""
+    task = asyncio.create_task(awaitable)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=interval)
+            if done:
+                return await task
+            if disconnect_checker is not None and await disconnect_checker():
+                task.cancel()
+                try:
+                    await task
+                except BaseException:  # noqa: BLE001 - preserve the downstream outcome below
+                    pass
+                raise HTTPException(
+                    status_code=499,
+                    detail={"error": {"message": "Client disconnected while waiting for buffered upstream response"}},
+                )
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except BaseException:  # noqa: BLE001
+                pass
+
+
+class _LifecycleAsyncIterator:
+    """Ensure an async response iterator releases its request lease on every exit path."""
+
+    def __init__(self, iterator, release):
+        self._iterator = iterator
+        self._release = release
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return await anext(self._iterator)
+        except BaseException:
+            try:
+                await self._iterator.aclose()
+            finally:
+                await self._release()
+            raise
+
+    async def aclose(self):
+        try:
+            await self._iterator.aclose()
+        finally:
+            await self._release()
+
+
+class _LifecycleStreamingResponse(StreamingResponse):
+    """Close the body iterator even when the downstream ASGI send fails.
+
+    Starlette does not guarantee ``body_iterator.aclose()`` after an OSError from
+    ``send()``. That is exactly the disconnect window where an upstream stream can
+    otherwise retain its httpx response and endpoint request slot.
+    """
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            close = getattr(self.body_iterator, "aclose", None)
+            if close is not None:
+                cleanup_task = asyncio.create_task(close())
+                try:
+                    await asyncio.shield(cleanup_task)
+                except asyncio.CancelledError:
+                    # Preserve cancellation, but do not abandon resource cleanup.
+                    await cleanup_task
+                    raise
 
 
 # ==================== 模型名称映射 ====================
@@ -1804,119 +1885,106 @@ class AzureOpenAIProxy:
 
     async def proxy_responses(self, body: dict, stream: bool = False):
         """代理 Azure OpenAI Responses API"""
-        model = body.get("model", "unknown")
-        max_retries = 3
-        last_error = None
-        start_time = time.time()
-
-        for attempt in range(max_retries):
-            endpoint = self.load_balancer.select_endpoint_for_model(model)
-            if not endpoint:
-                raise HTTPException(status_code=404, detail={"error": {"message": f"No endpoint available for model '{model}'"}})
-
-            await self.load_balancer.on_request_start(endpoint)
-            url = f"{endpoint.endpoint}/openai/v1/responses"
-            headers = {
-                "api-key": endpoint.api_key,
-                "Content-Type": "application/json",
-            }
-
-            logger.info(f"[Azure Responses][{model}] -> {endpoint.name} (attempt {attempt + 1})")
-
-            try:
-                if stream:
-                    return await self._stream_response(endpoint, url, body, headers, model, "responses", start_time)
-                else:
-                    return await self._normal_request(endpoint, url, body, headers, model, "responses", start_time)
-            except httpx.HTTPStatusError as e:
-                last_error = e
-                self.global_stats.total_errors += 1
-                is_client_error = 400 <= e.response.status_code < 500 and e.response.status_code != 429
-                await self.load_balancer.on_request_end(endpoint, success=False, is_client_error=is_client_error)
-                if e.response.status_code in (429, 500, 502, 503, 504):
-                    logger.warning(f"{endpoint.name} returned {e.response.status_code}, retrying...")
-                    await asyncio.sleep(min(2 ** attempt, 8))
-                    continue
-                else:
-                    try:
-                        body_text = e.response.text
-                    except Exception:
-                        body_text = ""
-                    error_body = _build_upstream_error_detail(e.response.status_code, body_text, "Azure OpenAI", endpoint.name)
-                    raise HTTPException(status_code=e.response.status_code, detail=error_body)
-            except Exception as e:
-                last_error = e
-                self.global_stats.total_errors += 1
-                logger.error(f"{endpoint.name} failed: {e}")
-                await self.load_balancer.on_request_end(endpoint, success=False)
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(min(2 ** attempt, 8))
-                    continue
-
-        raise HTTPException(status_code=503, detail={"error": {"message": f"All retries failed: {last_error}"}})
+        return await self._proxy(body, stream=stream, api_type="responses")
 
     async def proxy_chat_completions(self, body: dict, stream: bool = False):
         """代理 Azure OpenAI Chat Completions API"""
+        return await self._proxy(body, stream=stream, api_type="chat")
+
+    async def _proxy(self, body: dict, stream: bool, api_type: str):
         model = body.get("model", "unknown")
         max_retries = 3
         last_error = None
         start_time = time.time()
 
+        if stream and api_type == "chat" and "stream_options" not in body:
+            body["stream_options"] = {"include_usage": True}
+
         for attempt in range(max_retries):
             endpoint = self.load_balancer.select_endpoint_for_model(model)
             if not endpoint:
-                raise HTTPException(status_code=404, detail={"error": {"message": f"No endpoint available for model '{model}'"}})
+                raise HTTPException(
+                    status_code=404,
+                    detail={"error": {"message": f"No endpoint available for model '{model}'"}},
+                )
 
             await self.load_balancer.on_request_start(endpoint)
-            url = f"{endpoint.endpoint}/openai/deployments/{model}/chat/completions?api-version=2024-10-21"
-            headers = {
-                "api-key": endpoint.api_key,
-                "Content-Type": "application/json",
-            }
+            attempt_ended = False
 
-            # 流式请求注入 stream_options 以获取 usage
-            if stream and "stream_options" not in body:
-                body["stream_options"] = {"include_usage": True}
+            async def end_attempt(success: bool, is_client_error: bool = False):
+                nonlocal attempt_ended
+                if attempt_ended:
+                    return
+                await self.load_balancer.on_request_end(
+                    endpoint, success=success, is_client_error=is_client_error
+                )
+                attempt_ended = True
 
-            logger.info(f"[Azure Chat][{model}] -> {endpoint.name} (attempt {attempt + 1})")
+            if api_type == "responses":
+                url = f"{endpoint.endpoint}/openai/v1/responses"
+                label = "Responses"
+            else:
+                url = (
+                    f"{endpoint.endpoint}/openai/deployments/{model}/chat/completions"
+                    "?api-version=2024-10-21"
+                )
+                label = "Chat"
+            headers = {"api-key": endpoint.api_key, "Content-Type": "application/json"}
+            logger.info(f"[Azure {label}][{model}] -> {endpoint.name} (attempt {attempt + 1})")
 
             try:
                 if stream:
-                    return await self._stream_response(endpoint, url, body, headers, model, "chat", start_time)
-                else:
-                    return await self._normal_request(endpoint, url, body, headers, model, "chat", start_time)
+                    # StreamingResponse takes ownership of the active request lease.
+                    return await self._stream_response(
+                        endpoint, url, body, headers, model, api_type, start_time
+                    )
+                result = await self._normal_request(
+                    endpoint, url, body, headers, model, api_type, start_time
+                )
+                await end_attempt(success=True)
+                return result
+            except asyncio.CancelledError:
+                cleanup_task = asyncio.create_task(
+                    end_attempt(success=False, is_client_error=True)
+                )
+                await asyncio.shield(cleanup_task)
+                raise
             except httpx.HTTPStatusError as e:
                 last_error = e
                 self.global_stats.total_errors += 1
-                is_client_error = 400 <= e.response.status_code < 500 and e.response.status_code != 429
-                await self.load_balancer.on_request_end(endpoint, success=False, is_client_error=is_client_error)
-                if e.response.status_code in (429, 500, 502, 503, 504):
-                    logger.warning(f"{endpoint.name} returned {e.response.status_code}, retrying...")
+                status = e.response.status_code
+                is_client_error = 400 <= status < 500 and status != 429
+                await end_attempt(success=False, is_client_error=is_client_error)
+                if status in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                    logger.warning(f"{endpoint.name} returned {status}, retrying...")
                     await asyncio.sleep(min(2 ** attempt, 8))
                     continue
-                else:
-                    try:
-                        body_text = e.response.text
-                    except Exception:
-                        body_text = ""
-                    error_body = _build_upstream_error_detail(e.response.status_code, body_text, "Azure OpenAI", endpoint.name)
-                    raise HTTPException(status_code=e.response.status_code, detail=error_body)
+                try:
+                    body_text = e.response.text
+                except Exception:
+                    body_text = ""
+                error_body = _build_upstream_error_detail(
+                    status, body_text, "Azure OpenAI", endpoint.name
+                )
+                raise HTTPException(status_code=status, detail=error_body)
             except Exception as e:
                 last_error = e
                 self.global_stats.total_errors += 1
                 logger.error(f"{endpoint.name} failed: {e}")
-                await self.load_balancer.on_request_end(endpoint, success=False)
+                await end_attempt(success=False)
                 if attempt < max_retries - 1:
                     await asyncio.sleep(min(2 ** attempt, 8))
                     continue
 
-        raise HTTPException(status_code=503, detail={"error": {"message": f"All retries failed: {last_error}"}})
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"message": f"All retries failed: {last_error}"}},
+        )
 
     async def _normal_request(self, endpoint, url, body, headers, model: str, api_type: str, start_time: float) -> JSONResponse:
-        """非流式请求"""
+        """非流式请求；request lease 由调用方 exactly-once 结算。"""
         response = await self.client.post(url, json=body, headers=headers)
         response.raise_for_status()
-        await self.load_balancer.on_request_end(endpoint, success=True)
 
         elapsed = time.time() - start_time
         resp_json = response.json()
@@ -1939,6 +2007,26 @@ class AzureOpenAIProxy:
 
         proxy_self = self
         max_retries = 3
+        request_lease = {"endpoint": endpoint, "active": True}
+
+        async def end_current_request(success: bool, is_client_error: bool = False):
+            if not request_lease["active"]:
+                return
+            current = request_lease["endpoint"]
+            await proxy_self.load_balancer.on_request_end(
+                current, success=success, is_client_error=is_client_error
+            )
+            request_lease["active"] = False
+
+        async def start_current_request(current):
+            if request_lease["active"]:
+                raise RuntimeError("Azure stream request lease already active")
+            request_lease["endpoint"] = current
+            await proxy_self.load_balancer.on_request_start(current)
+            request_lease["active"] = True
+
+        async def release_abandoned_request():
+            await end_current_request(success=False, is_client_error=True)
 
         async def stream_generator():
             current_endpoint = endpoint
@@ -1981,7 +2069,7 @@ class AzureOpenAIProxy:
                             f"Azure stream failed ({response.status_code}, "
                             f"{'HTML error page' if is_html else 'JSON/text'}): {log_snippet}"
                         )
-                        await proxy_self.load_balancer.on_request_end(current_endpoint, success=False, is_client_error=is_client_error)
+                        await end_current_request(success=False, is_client_error=is_client_error)
 
                         if response.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
                             logger.warning(f"{current_endpoint.name} returned {response.status_code}, retrying stream...")
@@ -1994,7 +2082,7 @@ class AzureOpenAIProxy:
                                 else:
                                     current_url = f"{current_endpoint.endpoint}/openai/deployments/{model}/chat/completions?api-version=2024-10-21"
                                 current_headers = {"api-key": current_endpoint.api_key, "Content-Type": "application/json"}
-                                await proxy_self.load_balancer.on_request_start(current_endpoint)
+                                await start_current_request(current_endpoint)
                                 continue
 
                         yield f"data: {json.dumps(upstream_detail)}\n\ndata: [DONE]\n\n".encode()
@@ -2062,10 +2150,10 @@ class AzureOpenAIProxy:
                     if stream_error is not None:
                         raise stream_error
 
-                    await proxy_self.load_balancer.on_request_end(current_endpoint, success=True)
                     elapsed = time.time() - start_time
                     proxy_self._record_usage(current_endpoint, model, input_tokens, output_tokens, elapsed,
                                             cache_read_tokens=cache_read_tokens)
+                    await end_current_request(success=True)
                     return
 
                 except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
@@ -2073,7 +2161,7 @@ class AzureOpenAIProxy:
                         httpx.ReadError, httpx.WriteError) as e:
                     error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
                     logger.error(f"Azure stream network error on {current_endpoint.name}: {error_detail}")
-                    await proxy_self.load_balancer.on_request_end(current_endpoint, success=False)
+                    await end_current_request(success=False)
 
                     # 已向客户端输出过 chunk 就不能再重放; 否则可以切端点重试
                     if not sent_any_chunk and attempt < max_retries - 1:
@@ -2086,7 +2174,7 @@ class AzureOpenAIProxy:
                             else:
                                 current_url = f"{current_endpoint.endpoint}/openai/deployments/{model}/chat/completions?api-version=2024-10-21"
                             current_headers = {"api-key": current_endpoint.api_key, "Content-Type": "application/json"}
-                            await proxy_self.load_balancer.on_request_start(current_endpoint)
+                            await start_current_request(current_endpoint)
                             continue
 
                     yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\ndata: [DONE]\n\n".encode()
@@ -2095,7 +2183,7 @@ class AzureOpenAIProxy:
                 except Exception as e:
                     error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
                     logger.error(f"Azure stream error: {error_detail}")
-                    await proxy_self.load_balancer.on_request_end(current_endpoint, success=False)
+                    await end_current_request(success=False)
                     yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\ndata: [DONE]\n\n".encode()
                     return
 
@@ -2112,8 +2200,8 @@ class AzureOpenAIProxy:
                         except Exception:
                             pass
 
-        return StreamingResponse(
-            stream_generator(),
+        return _LifecycleStreamingResponse(
+            _LifecycleAsyncIterator(stream_generator(), release_abandoned_request),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -2223,10 +2311,10 @@ class CopilotProxy:
         self.load_balancer = load_balancer  # 装载 CopilotEndpoint
         self.api_key = api_key
         self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=10.0, read=None, write=60.0, pool=30.0),
+            timeout=httpx.Timeout(connect=10.0, read=None, write=60.0, pool=60.0),
             limits=httpx.Limits(
-                max_connections=200,
-                max_keepalive_connections=50,
+                max_connections=500,
+                max_keepalive_connections=200,
                 keepalive_expiry=30.0,
             ),
             http2=False,
@@ -2234,12 +2322,127 @@ class CopilotProxy:
         self.global_stats = GlobalStats()
         # Per-endpoint token-exchange lock，避免并发请求时重复刷新 session token
         self._token_locks: dict = {}
+        # Streaming connection registry. It is diagnostic by default; the watchdog only
+        # cancels connections that the downstream Request explicitly reports disconnected.
+        self._stream_connections: dict[str, dict] = {}
+        self._stream_overload_since: dict[str, float] = {}
+        self.stream_disconnects_detected_total = 0
+        self.stream_forced_releases_total = 0
+        self.pool_timeout_total = 0
 
     def verify_api_key(self, key: str) -> bool:
         return key == self.api_key
 
     async def close(self):
         await self.client.aclose()
+
+    def _register_stream(self, endpoint: CopilotEndpoint, release, disconnect_checker=None) -> str:
+        connection_id = uuid.uuid4().hex
+        now = time.monotonic()
+        self._stream_connections[connection_id] = {
+            "endpoint": endpoint.name,
+            "task": asyncio.current_task(),
+            "release": release,
+            "disconnect_checker": disconnect_checker,
+            "started_at": now,
+            "last_upstream_activity_at": now,
+            "disconnected_since": None,
+        }
+        return connection_id
+
+    def _touch_stream(self, connection_id: Optional[str]):
+        if connection_id and connection_id in self._stream_connections:
+            self._stream_connections[connection_id]["last_upstream_activity_at"] = time.monotonic()
+
+    def _unregister_stream(self, connection_id: Optional[str]):
+        if connection_id:
+            self._stream_connections.pop(connection_id, None)
+
+    def get_stream_connection_stats(self) -> dict:
+        now = time.monotonic()
+        entries = list(self._stream_connections.values())
+        return {
+            "active": len(entries),
+            "oldest_seconds": max((now - item["started_at"] for item in entries), default=0.0),
+            "max_upstream_idle_seconds": max(
+                (now - item["last_upstream_activity_at"] for item in entries), default=0.0
+            ),
+            "overloaded_endpoints": len(self._stream_overload_since),
+            "disconnects_detected_total": self.stream_disconnects_detected_total,
+            "forced_releases_total": self.stream_forced_releases_total,
+        }
+
+    async def connection_monitor_loop(
+        self,
+        interval: float = COPILOT_STREAM_MONITOR_INTERVAL,
+        high_watermark: int = COPILOT_STREAM_HIGH_WATERMARK,
+        overload_grace: float = COPILOT_STREAM_OVERLOAD_GRACE,
+        disconnect_grace: float = COPILOT_STREAM_DISCONNECT_GRACE,
+    ):
+        """Observe Copilot streams and reclaim only confirmed downstream disconnects.
+
+        Long-running or upstream-idle streams remain valid indefinitely. Cleanup is armed
+        only while aggregate Copilot active requests stay above the shared-pool high watermark
+        for the grace
+        period, and only after Request.is_disconnected() remains true for another grace.
+        """
+        logger.info(
+            "[Copilot] connection monitor started: interval=%ss high_watermark=%s "
+            "overload_grace=%ss disconnect_grace=%ss",
+            interval, high_watermark, overload_grace, disconnect_grace,
+        )
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                now = time.monotonic()
+                # All Copilot endpoints share one AsyncClient pool, so gate on the
+                # aggregate active count rather than any individual endpoint.
+                total_active = sum(ep.active_requests for ep in self.load_balancer.endpoints)
+                if total_active >= high_watermark:
+                    self._stream_overload_since.setdefault("shared_pool", now)
+                else:
+                    self._stream_overload_since.pop("shared_pool", None)
+
+                for connection_id, item in list(self._stream_connections.items()):
+                    overload_since = self._stream_overload_since.get("shared_pool")
+                    if overload_since is None or now - overload_since < overload_grace:
+                        item["disconnected_since"] = None
+                        continue
+
+                    task = item.get("task")
+                    owner_abandoned = task is None or task.done() or task.cancelled()
+                    checker = item.get("disconnect_checker")
+                    disconnected = owner_abandoned
+                    if not disconnected and checker is not None:
+                        try:
+                            disconnected = await checker()
+                        except Exception as exc:
+                            logger.warning("[Copilot] disconnect check failed for %s: %s", connection_id, exc)
+                            continue
+
+                    if not disconnected:
+                        item["disconnected_since"] = None
+                        continue
+                    if item["disconnected_since"] is None:
+                        item["disconnected_since"] = now
+                        self.stream_disconnects_detected_total += 1
+                        continue
+                    if now - item["disconnected_since"] < disconnect_grace:
+                        continue
+
+                    logger.warning(
+                        "[Copilot] force-releasing disconnected stream %s endpoint=%s age=%.1fs",
+                        connection_id, item["endpoint"], now - item["started_at"],
+                    )
+                    self.stream_forced_releases_total += 1
+                    if task is not None and not task.done():
+                        task.cancel()
+                    await item["release"]()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._stream_overload_since.clear()
+            logger.info("[Copilot] connection monitor stopped")
 
     # ---- Token 管理 ----
 
@@ -2500,15 +2703,15 @@ class CopilotProxy:
 
     # ---- 代理入口 ----
 
-    async def proxy_chat_completions(self, body: dict, stream: bool = False):
+    async def proxy_chat_completions(self, body: dict, stream: bool = False, disconnect_checker=None):
         """代理 GitHub Copilot Chat Completions API"""
-        return await self._proxy(body, stream, api_type="chat")
+        return await self._proxy(body, stream, api_type="chat", disconnect_checker=disconnect_checker)
 
-    async def proxy_responses(self, body: dict, stream: bool = False):
+    async def proxy_responses(self, body: dict, stream: bool = False, disconnect_checker=None):
         """代理 GitHub Copilot Responses API（用于 GPT-5 系列）"""
-        return await self._proxy(body, stream, api_type="responses")
+        return await self._proxy(body, stream, api_type="responses", disconnect_checker=disconnect_checker)
 
-    async def _proxy(self, body: dict, stream: bool, api_type: str):
+    async def _proxy(self, body: dict, stream: bool, api_type: str, disconnect_checker=None):
         model = body.get("model", "unknown")
         max_retries = 3
         last_error: Optional[Exception] = None
@@ -2525,15 +2728,31 @@ class CopilotProxy:
                 raise HTTPException(status_code=404, detail={"error": {"message": f"No Copilot endpoint available for model '{model}'"}})
 
             await self.load_balancer.on_request_start(endpoint)
+            attempt_ended = False
+
+            async def end_attempt(success: bool, is_client_error: bool = False):
+                nonlocal attempt_ended
+                if attempt_ended:
+                    return
+                await self.load_balancer.on_request_end(
+                    endpoint, success=success, is_client_error=is_client_error
+                )
+                attempt_ended = True
 
             try:
                 headers = await self._build_headers(endpoint, has_image)
+            except asyncio.CancelledError:
+                cleanup_task = asyncio.create_task(
+                    end_attempt(success=False, is_client_error=True)
+                )
+                await asyncio.shield(cleanup_task)
+                raise
             except HTTPException:
-                await self.load_balancer.on_request_end(endpoint, success=False)
+                await end_attempt(success=False)
                 raise
             except Exception as e:
                 logger.error(f"[Copilot {api_type}][{model}] header build failed on {endpoint.name}: {e}")
-                await self.load_balancer.on_request_end(endpoint, success=False)
+                await end_attempt(success=False)
                 last_error = e
                 if attempt < max_retries - 1:
                     await asyncio.sleep(min(2 ** attempt, 8))
@@ -2545,13 +2764,27 @@ class CopilotProxy:
 
             try:
                 if stream:
-                    return await self._stream_response(endpoint, url, body, headers, model, api_type, start_time)
+                    return await self._stream_response(
+                        endpoint, url, body, headers, model, api_type, start_time,
+                        disconnect_checker=disconnect_checker,
+                    )
                 else:
-                    return await self._normal_request(endpoint, url, body, headers, model, api_type, start_time)
+                    result = await self._normal_request(
+                        endpoint, url, body, headers, model, api_type, start_time
+                    )
+                    await end_attempt(success=True)
+                    return result
+            except asyncio.CancelledError:
+                # Handler/client cancellation is local evidence, never endpoint failure.
+                cleanup_task = asyncio.create_task(
+                    end_attempt(success=False, is_client_error=True)
+                )
+                await asyncio.shield(cleanup_task)
+                raise
             except _UnsupportedModelError:
                 # 模型不被 Copilot 支持，向上层抛，由路由 fallback 到 Azure
                 self.global_stats.total_errors += 1
-                await self.load_balancer.on_request_end(endpoint, success=False, is_client_error=True)
+                await end_attempt(success=False, is_client_error=True)
                 raise
             except httpx.HTTPStatusError as e:
                 last_error = e
@@ -2563,12 +2796,12 @@ class CopilotProxy:
                 except Exception:
                     pass
                 if self._is_unsupported_model_error(status, body_text):
-                    await self.load_balancer.on_request_end(endpoint, success=False, is_client_error=True)
+                    await end_attempt(success=False, is_client_error=True)
                     raise _UnsupportedModelError(f"{status}: {body_text[:200]}")
                 # 401 自愈：上游 session token 失效 → 强制刷新后重试一次
                 if status == 401 and attempt < max_retries - 1:
                     logger.warning(f"[Copilot] 401 from upstream on {endpoint.name}, forcing session refresh and retrying")
-                    await self.load_balancer.on_request_end(endpoint, success=False)
+                    await end_attempt(success=False)
                     try:
                         await self.get_session_token(endpoint, force=True)
                         continue
@@ -2576,18 +2809,28 @@ class CopilotProxy:
                         logger.error(f"[Copilot] forced refresh failed: {refresh_err}")
                         # fall through 到正常错误返回
                 is_client_error = 400 <= status < 500 and status != 429
-                await self.load_balancer.on_request_end(endpoint, success=False, is_client_error=is_client_error)
+                await end_attempt(success=False, is_client_error=is_client_error)
                 if status in (429, 500, 502, 503, 504):
                     logger.warning(f"[Copilot] {endpoint.name} returned {status}, retrying...")
                     await asyncio.sleep(min(2 ** attempt, 8))
                     continue
                 error_body = _build_upstream_error_detail(status, body_text, "Copilot", endpoint.name)
                 raise HTTPException(status_code=status, detail=error_body)
+            except httpx.PoolTimeout as e:
+                # Local client saturation is not an upstream endpoint failure.
+                last_error = e
+                self.global_stats.total_errors += 1
+                self.pool_timeout_total += 1
+                logger.warning(f"[Copilot] local connection pool exhausted for {endpoint.name}: {e}")
+                await end_attempt(success=False, is_client_error=True)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(min(2 ** attempt, 8))
+                    continue
             except Exception as e:
                 last_error = e
                 self.global_stats.total_errors += 1
                 logger.error(f"[Copilot] {endpoint.name} failed: {e}")
-                await self.load_balancer.on_request_end(endpoint, success=False)
+                await end_attempt(success=False)
                 if attempt < max_retries - 1:
                     await asyncio.sleep(min(2 ** attempt, 8))
                     continue
@@ -2613,8 +2856,6 @@ class CopilotProxy:
             if self._is_unsupported_model_error(response.status_code, body_text):
                 raise _UnsupportedModelError(f"{response.status_code}: {body_text[:200]}")
             response.raise_for_status()
-        await self.load_balancer.on_request_end(endpoint, success=True)
-
         elapsed = time.time() - start_time
         resp_json = response.json()
         usage = resp_json.get("usage", {}) or {}
@@ -2631,12 +2872,42 @@ class CopilotProxy:
         return JSONResponse(content=resp_json, status_code=response.status_code)
 
     async def _stream_response(self, endpoint: CopilotEndpoint, url: str, body: dict, headers: dict,
-                                model: str, api_type: str, start_time: float) -> StreamingResponse:
+                                model: str, api_type: str, start_time: float,
+                                disconnect_checker=None) -> StreamingResponse:
         """流式请求，复用 AzureOpenAIProxy._stream_response 同款 pump + heartbeat + sent_any_chunk 守卫架构"""
         proxy_self = self
         max_retries = 3
+        request_lease = {"endpoint": endpoint, "active": True}
+        connection_id: Optional[str] = None
+
+        async def end_current_request(success: bool, is_client_error: bool = False):
+            if not request_lease["active"]:
+                return
+            current = request_lease["endpoint"]
+            await proxy_self.load_balancer.on_request_end(
+                current, success=success, is_client_error=is_client_error
+            )
+            request_lease["active"] = False
+
+        async def start_current_request(current):
+            if request_lease["active"]:
+                raise RuntimeError("Copilot stream request lease already active")
+            request_lease["endpoint"] = current
+            await proxy_self.load_balancer.on_request_start(current)
+            request_lease["active"] = True
+            if connection_id and connection_id in proxy_self._stream_connections:
+                proxy_self._stream_connections[connection_id]["endpoint"] = current.name
+
+        async def release_abandoned_request():
+            # Client disconnect / generator close is local, not endpoint health evidence.
+            await end_current_request(success=False, is_client_error=True)
+            proxy_self._unregister_stream(connection_id)
 
         async def stream_generator():
+            nonlocal connection_id
+            connection_id = proxy_self._register_stream(
+                endpoint, release_abandoned_request, disconnect_checker=disconnect_checker
+            )
             current_endpoint = endpoint
             current_url = url
             current_headers = headers
@@ -2659,6 +2930,7 @@ class CopilotProxy:
                             yield payload
                         else:
                             response = payload
+                            proxy_self._touch_stream(connection_id)
 
                     if response.status_code >= 400:
                         error_body = await response.aread()
@@ -2666,9 +2938,10 @@ class CopilotProxy:
                             error_text = error_body.decode("utf-8") if isinstance(error_body, bytes) else str(error_body)
                         except Exception:
                             error_text = ""
-                        # unsupported model：未发任何 chunk 时向上抛触发 Azure fallback
+                        # Streaming HTTP 200 is already committed; convert this to an
+                        # explicit SSE error in the local exception handler below.
                         if not sent_any_chunk and proxy_self._is_unsupported_model_error(response.status_code, error_text):
-                            await proxy_self.load_balancer.on_request_end(current_endpoint, success=False, is_client_error=True)
+                            await end_current_request(success=False, is_client_error=True)
                             raise _UnsupportedModelError(f"{response.status_code}: {error_text[:200]}")
 
                         is_client_error = 400 <= response.status_code < 500 and response.status_code != 429
@@ -2683,7 +2956,7 @@ class CopilotProxy:
                             f"[Copilot] stream failed ({response.status_code}, "
                             f"{'HTML error page' if is_html else 'JSON/text'}): {log_snippet}"
                         )
-                        await proxy_self.load_balancer.on_request_end(current_endpoint, success=False, is_client_error=is_client_error)
+                        await end_current_request(success=False, is_client_error=is_client_error)
 
                         # 401 自愈：force 刷新 session token 后用同 endpoint 重试一次
                         if response.status_code == 401 and attempt < max_retries - 1 and not sent_any_chunk:
@@ -2691,7 +2964,7 @@ class CopilotProxy:
                             try:
                                 await proxy_self.get_session_token(current_endpoint, force=True)
                                 current_headers = await proxy_self._build_headers(current_endpoint, proxy_self._has_image(body))
-                                await proxy_self.load_balancer.on_request_start(current_endpoint)
+                                await start_current_request(current_endpoint)
                                 continue
                             except Exception as he:
                                 logger.error(f"[Copilot] forced refresh during stream retry failed: {he}")
@@ -2710,7 +2983,7 @@ class CopilotProxy:
                                     yield f"data: {json.dumps({'error': {'message': str(he)}})}\n\ndata: [DONE]\n\n".encode()
                                     return
                                 current_url = f"{current_endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
-                                await proxy_self.load_balancer.on_request_start(current_endpoint)
+                                await start_current_request(current_endpoint)
                                 continue
 
                         yield f"data: {json.dumps(upstream_detail)}\n\ndata: [DONE]\n\n".encode()
@@ -2748,6 +3021,7 @@ class CopilotProxy:
                             break
 
                         chunk = payload
+                        proxy_self._touch_stream(connection_id)
                         yield chunk
                         sent_any_chunk = True
                         try:
@@ -2781,21 +3055,26 @@ class CopilotProxy:
                     if stream_error is not None:
                         raise stream_error
 
-                    await proxy_self.load_balancer.on_request_end(current_endpoint, success=True)
+                    await end_current_request(success=True)
                     elapsed = time.time() - start_time
                     proxy_self._record_usage(current_endpoint, model, input_tokens, output_tokens, elapsed,
                                               cache_read_tokens=cache_read_tokens)
                     return
 
-                except _UnsupportedModelError:
-                    # 让上层路由 fallback Azure（仅未发 chunk 才会到这里）
-                    raise
-                except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
-                        httpx.ConnectError, httpx.RemoteProtocolError,
-                        httpx.ReadError, httpx.WriteError) as e:
+                except _UnsupportedModelError as e:
+                    # HTTP 200 has already started, so transparent provider fallback is
+                    # impossible here. Return an explicit SSE error instead of crashing.
+                    await end_current_request(success=False, is_client_error=True)
+                    detail = {"error": {"message": str(e), "code": "unsupported_model"}}
+                    yield f"data: {json.dumps(detail)}\n\ndata: [DONE]\n\n".encode()
+                    return
+                except httpx.PoolTimeout as e:
                     error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
-                    logger.error(f"[Copilot] stream network error on {current_endpoint.name}: {error_detail}")
-                    await proxy_self.load_balancer.on_request_end(current_endpoint, success=False)
+                    proxy_self.pool_timeout_total += 1
+                    logger.warning(
+                        f"[Copilot] local connection pool exhausted for {current_endpoint.name}: {error_detail}"
+                    )
+                    await end_current_request(success=False, is_client_error=True)
 
                     if not sent_any_chunk and attempt < max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt, 8))
@@ -2809,7 +3088,31 @@ class CopilotProxy:
                                 yield f"data: {json.dumps({'error': {'message': str(he)}})}\n\ndata: [DONE]\n\n".encode()
                                 return
                             current_url = f"{current_endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
-                            await proxy_self.load_balancer.on_request_start(current_endpoint)
+                            await start_current_request(current_endpoint)
+                            continue
+
+                    yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\ndata: [DONE]\n\n".encode()
+                    return
+                except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
+                        httpx.ConnectError, httpx.RemoteProtocolError,
+                        httpx.ReadError, httpx.WriteError) as e:
+                    error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
+                    logger.error(f"[Copilot] stream network error on {current_endpoint.name}: {error_detail}")
+                    await end_current_request(success=False)
+
+                    if not sent_any_chunk and attempt < max_retries - 1:
+                        await asyncio.sleep(min(2 ** attempt, 8))
+                        new_endpoint = proxy_self._select_endpoint(model)
+                        if new_endpoint:
+                            current_endpoint = new_endpoint
+                            try:
+                                current_headers = await proxy_self._build_headers(current_endpoint, proxy_self._has_image(body))
+                            except Exception as he:
+                                logger.error(f"[Copilot] header build during retry failed: {he}")
+                                yield f"data: {json.dumps({'error': {'message': str(he)}})}\n\ndata: [DONE]\n\n".encode()
+                                return
+                            current_url = f"{current_endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
+                            await start_current_request(current_endpoint)
                             continue
 
                     yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\ndata: [DONE]\n\n".encode()
@@ -2818,7 +3121,7 @@ class CopilotProxy:
                 except Exception as e:
                     error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
                     logger.error(f"[Copilot] stream error: {error_detail}")
-                    await proxy_self.load_balancer.on_request_end(current_endpoint, success=False)
+                    await end_current_request(success=False)
                     yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\ndata: [DONE]\n\n".encode()
                     return
 
@@ -2835,8 +3138,8 @@ class CopilotProxy:
                         except Exception:
                             pass
 
-        return StreamingResponse(
-            stream_generator(),
+        return _LifecycleStreamingResponse(
+            _LifecycleAsyncIterator(stream_generator(), release_abandoned_request),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -3144,6 +3447,7 @@ async def lifespan(app: FastAPI):
     if azure_proxy:
         logger.info(f"Azure OpenAI proxy enabled with {len(azure_proxy.load_balancer.endpoints)} endpoints")
     copilot_bg_task: Optional[asyncio.Task] = None
+    copilot_connection_monitor_task: Optional[asyncio.Task] = None
     if copilot_proxy:
         logger.info(f"GitHub Copilot proxy enabled with {len(copilot_proxy.load_balancer.endpoints)} endpoints")
         # 后台预热 token，避免阻塞启动；token 无效会在日志中暴露
@@ -3154,7 +3458,16 @@ async def lifespan(app: FastAPI):
         copilot_bg_task = asyncio.create_task(
             copilot_proxy.background_refresh_loop(interval=refresh_interval, threshold=refresh_threshold)
         )
+        copilot_connection_monitor_task = asyncio.create_task(
+            copilot_proxy.connection_monitor_loop()
+        )
     yield
+    if copilot_connection_monitor_task:
+        copilot_connection_monitor_task.cancel()
+        try:
+            await copilot_connection_monitor_task
+        except (asyncio.CancelledError, Exception):
+            pass
     if copilot_bg_task:
         copilot_bg_task.cancel()
         try:
@@ -3637,7 +3950,8 @@ async def _chat_completion_sse_from_payload(chat_payload: dict):
     yield b"data: [DONE]\n\n"
 
 
-async def _route_chat_via_responses(body: dict, stream: bool, request_id: Optional[str] = None):
+async def _route_chat_via_responses(body: dict, stream: bool, request_id: Optional[str] = None,
+                                    disconnect_checker=None):
     responses_body = _build_responses_payload_from_chat(body)
     model = responses_body.get("model", body.get("model", "unknown"))
     rid = request_id or "-"
@@ -3653,7 +3967,14 @@ async def _route_chat_via_responses(body: dict, stream: bool, request_id: Option
             },
         )
     logger.info(f"[Chat->Responses][{rid}] model={model}, stream={stream} (buffered)")
-    response = await _route_openai_responses(responses_body, stream=False, request_id=request_id)
+    upstream_call = _route_openai_responses(
+        responses_body, stream=False, request_id=request_id,
+        disconnect_checker=disconnect_checker,
+    )
+    if disconnect_checker is not None:
+        response = await _await_with_disconnect(upstream_call, disconnect_checker)
+    else:
+        response = await upstream_call
     if not isinstance(response, JSONResponse):
         raise HTTPException(status_code=502, detail={"error": {"message": "Responses adapter expected a JSON response"}})
 
@@ -3742,7 +4063,8 @@ def _log_openai_request(request_id: str, route: str, request: Request, body: dic
     )
 
 
-async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Optional[str] = None):
+async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Optional[str] = None,
+                        disconnect_checker=None):
     """OpenAI 风格入口的通用路由：Copilot 优先 → Azure fallback；
     避免 fallback 时被 Azure 抛误导性 404（Azure 没该 deployment 但显示 'No endpoint available'）"""
     model = body.get("model", "")
@@ -3787,6 +4109,10 @@ async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Opt
     # 1) 优先 Copilot
     if copilot_can:
         try:
+            if disconnect_checker is not None:
+                return await copilot_call(
+                    body, stream=stream, disconnect_checker=disconnect_checker
+                )
             return await copilot_call(body, stream=stream)
         except _UnsupportedModelError as e:
             copilot_failure = f"Copilot does not support model: {e}"
@@ -3855,13 +4181,21 @@ def _build_no_provider_message(model: str) -> str:
     return f"No provider available for model '{model}': {'; '.join(parts)}"
 
 
-async def _route_openai_chat(body: dict, stream: bool, request_id: Optional[str] = None):
+async def _route_openai_chat(body: dict, stream: bool, request_id: Optional[str] = None,
+                             disconnect_checker=None):
     if _should_adapt_chat_to_responses(body.get("model", "")):
-        return await _route_chat_via_responses(body, stream, request_id=request_id)
-    return await _route_openai(body, stream, "chat", request_id=request_id)
+        return await _route_chat_via_responses(
+            body, stream, request_id=request_id,
+            disconnect_checker=disconnect_checker,
+        )
+    return await _route_openai(
+        body, stream, "chat", request_id=request_id,
+        disconnect_checker=disconnect_checker,
+    )
 
 
-async def _route_openai_responses(body: dict, stream: bool, request_id: Optional[str] = None):
+async def _route_openai_responses(body: dict, stream: bool, request_id: Optional[str] = None,
+                                  disconnect_checker=None):
     removed_sampling_fields = _strip_unsupported_responses_sampling_fields(body)
     if removed_sampling_fields:
         rid = request_id or "-"
@@ -3874,13 +4208,29 @@ async def _route_openai_responses(body: dict, stream: bool, request_id: Optional
                 "removed_params": removed_sampling_fields,
             },
         )
-    return await _route_openai(body, stream, "responses", request_id=request_id)
+    return await _route_openai(
+        body, stream, "responses", request_id=request_id,
+        disconnect_checker=disconnect_checker,
+    )
 
 
 def _verify_optional_models_auth(request: Request, x_api_key: Optional[str] = None):
     actual_key = _extract_api_key(request, x_api_key)
     if actual_key and not _verify_lb_api_key(actual_key):
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
+
+
+def _stream_disconnect_checker(request: Request, stream: bool):
+    """Use Request.is_disconnected only when it cannot race Starlette's receive listener."""
+    if not stream:
+        return None
+    try:
+        spec_version = tuple(
+            int(part) for part in request.scope.get("asgi", {}).get("spec_version", "2.0").split(".")
+        )
+    except (TypeError, ValueError):
+        return None
+    return request.is_disconnected if spec_version >= (2, 4) else None
 
 
 @app.get("/models")
@@ -3943,7 +4293,10 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
                 f"{stats['before']/1024:.0f}KB -> {stats['after']/1024:.0f}KB"
             )
     logger.info(f"[Responses] model={body.get('model')}, stream={stream}")
-    return await _route_openai_responses(body, stream=stream, request_id=request_id)
+    return await _route_openai_responses(
+        body, stream=stream, request_id=request_id,
+        disconnect_checker=_stream_disconnect_checker(request, stream),
+    )
 
 
 @app.post("/v1/chat/completions")
@@ -3989,7 +4342,15 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
     if removed_token_fields:
         logger.info(f"[Chat] removed non-positive token fields: {', '.join(removed_token_fields)}")
     logger.info(f"[Chat] model={body.get('model')}, stream={stream}")
-    return await _route_openai_chat(body, stream=stream, request_id=request_id)
+    disconnect_checker = _stream_disconnect_checker(request, stream)
+    if stream and _should_adapt_chat_to_responses(body.get("model", "")):
+        # The adapter buffers before Starlette starts a response, so it is the only
+        # consumer of receive and can safely poll disconnects on every ASGI version.
+        disconnect_checker = request.is_disconnected
+    return await _route_openai_chat(
+        body, stream=stream, request_id=request_id,
+        disconnect_checker=disconnect_checker,
+    )
 
 
 @app.post("/api/event_logging/batch")
@@ -4086,6 +4447,23 @@ async def metrics():
         emit("copilot_endpoint_active_requests", "Currently in-flight requests per Copilot endpoint", "gauge", endpoint_active_samples)
         emit("copilot_endpoint_input_tokens_total", "Cumulative input tokens per Copilot endpoint", "counter", endpoint_input_tokens_samples)
         emit("copilot_endpoint_output_tokens_total", "Cumulative output tokens per Copilot endpoint", "counter", endpoint_output_tokens_samples)
+        stream_stats = copilot_proxy.get_stream_connection_stats()
+        emit("copilot_stream_connections_active", "Currently registered Copilot streaming connections", "gauge",
+             [f"copilot_stream_connections_active {stream_stats['active']}"])
+        emit("copilot_stream_connection_oldest_seconds", "Age of the oldest registered Copilot stream", "gauge",
+             [f"copilot_stream_connection_oldest_seconds {stream_stats['oldest_seconds']:.3f}"])
+        emit("copilot_stream_upstream_idle_max_seconds", "Longest time since an upstream byte among registered streams (diagnostic only)", "gauge",
+             [f"copilot_stream_upstream_idle_max_seconds {stream_stats['max_upstream_idle_seconds']:.3f}"])
+        emit("copilot_stream_overloaded_endpoints", "Endpoints continuously at or above the stream high watermark", "gauge",
+             [f"copilot_stream_overloaded_endpoints {stream_stats['overloaded_endpoints']}"])
+        emit("copilot_stream_disconnects_detected_total", "Downstream disconnects detected by the safety monitor", "counter",
+             [f"copilot_stream_disconnects_detected_total {stream_stats['disconnects_detected_total']}"])
+        emit("copilot_stream_forced_releases_total", "Abnormal Copilot streams force-released by the safety monitor", "counter",
+             [f"copilot_stream_forced_releases_total {stream_stats['forced_releases_total']}"])
+        emit("copilot_pool_timeout_total", "Local Copilot httpx connection pool timeouts", "counter",
+             [f"copilot_pool_timeout_total {copilot_proxy.pool_timeout_total}"])
+        emit("copilot_stream_high_watermark", "Configured active-request high watermark for safety cleanup", "gauge",
+             [f"copilot_stream_high_watermark {COPILOT_STREAM_HIGH_WATERMARK}"])
 
     # Databricks
     if proxy:

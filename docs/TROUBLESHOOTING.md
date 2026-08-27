@@ -242,6 +242,20 @@ Pod 内 ingress / service mesh 的 idle timeout 与 LB 心跳不同步。LB 现�
 
 如果还是遇到（极小概率，超长 thinking + 慢上游），调高 ingress idle timeout 或 LB 心跳间隔；不要在 LB 上方再加短 idle 的反代。
 
+### Copilot 连接池高水位 / active requests 不下降
+
+新版 Copilot streaming 路径在客户端中断后会从 ASGI response 边界关闭 body iterator，取消 upstream pump、执行 `response.aclose()` 并 exactly-once 归还 request slot。`httpx.PoolTimeout` 被归类为 LB 本地容量压力，不再累计 endpoint circuit breaker 错误。
+
+连接 monitor 默认每 5 秒采样：active requests ≥400 持续 30 秒后进入保护状态，只对 owner task 已结束或下游连续确认断开 15 秒的 stream 做强制回收。它不会因为请求运行时间长或 upstream 长时间没有 token 就终止连接，因此 `read=None` 和超长 thinking 仍受支持。
+
+排查时同时看：
+
+- `copilot_stream_connections_active` / `copilot_stream_connection_oldest_seconds`
+- `copilot_stream_upstream_idle_max_seconds`（仅诊断）
+- `copilot_pool_timeout_total`
+- `copilot_stream_disconnects_detected_total` / `copilot_stream_forced_releases_total`
+- `copilot_endpoint_active_requests` / `copilot_endpoint_circuit_open`
+
 ---
 
 ## 9. Cloudflare 504 Gateway time-out

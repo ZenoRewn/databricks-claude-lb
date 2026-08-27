@@ -481,6 +481,10 @@ GHCP 上游会返回 429 + `retry-after` 头。LB 的熔断器会临时摘掉该
 | `OPENAI_CHAT_TO_RESPONSES_MODELS` | 逗号分隔；这些模型从 `/v1/chat/completions` buffered 转到 `/v1/responses` | `gpt-5.5,gpt-5-codex,gpt-5.6-sol,gpt-5.6-luna,gpt-5.6-terra` |
 | `COPILOT_REFRESH_INTERVAL` | GHCP session token 后台刷新扫描间隔（秒） | `300` |
 | `COPILOT_REFRESH_THRESHOLD` | session token 剩余 ≤ 此秒数时主动刷新 | `600` |
+| `COPILOT_STREAM_HIGH_WATERMARK` | 全部 Copilot endpoint 合计 active requests 的连续高水位阈值（共享连接池 500 的 80%） | `400` |
+| `COPILOT_STREAM_OVERLOAD_GRACE` | 高水位持续多久后才启用异常连接兜底回收（秒） | `30` |
+| `COPILOT_STREAM_DISCONNECT_GRACE` | 下游断开持续多久后才强制回收（秒） | `15` |
+| `COPILOT_STREAM_MONITOR_INTERVAL` | Copilot 连接监控采样间隔（秒） | `5` |
 | `ANTHROPIC_BASE_URL` | Claude Code 指向代理地址 | - |
 | `ANTHROPIC_API_KEY` | 与 config.yaml 中 api_key 一致 | - |
 | `OPENAI_API_KEY` | Codex / OpenAI 客户端用，与 api_key 一致 | - |
@@ -546,6 +550,9 @@ A: 已在 v 最新版修复。代理现在会：
 3. 等待上游响应头及流式响应空闲期间每 15s 发送 `: keep-alive\n\n` SSE 注释心跳，防止 Cloudflare / ingress / NAT / 反代因空闲关闭连接
 4. httpx `read` 超时改为 `None`（流式请求由 chunk 节拍保证），配合 uvicorn `timeout_keep_alive=600`，可承受 >5 分钟的长 thinking 响应
 5. `response.aclose()` 在 `finally` 分支执行，避免连接池被半开连接占满
+6. Copilot SSE 使用 exactly-once request lease；即使 ASGI 向已断开的客户端发送 chunk 失败，也会关闭 upstream response、取消 pump 并归还 active slot
+7. Copilot 独立连接池为 `500/200`（总连接/keepalive），`PoolTimeout` 仅表示本地容量压力，不再计作 upstream endpoint 故障或触发熔断
+8. `/metrics` 暴露 active/oldest/upstream-idle、PoolTimeout、断开检测和强制回收计数；高水位持续后只回收已确认断开的连接，**不会按总时长或 upstream idle 杀掉长 thinking**
 
 如果更新后仍有复现，检查日志中是否有 `Stream network error on ...: RemoteProtocolError/ReadError` 字样，对应端点可能需要检查网络或熔断阈值。
 
