@@ -17,29 +17,44 @@ data:
 
     endpoints:
       - name: centralus-adb-ws
-        api_base: https://adb-7405607755654523.3.azuredatabricks.net/serving-endpoints
+        api_base: https://adb-7405606560645390.10.azuredatabricks.net/serving-endpoints
         token: ${DATABRICKS_TOKEN_CENTRALUS}
         weight: 1
       - name: eastus-adb-ws
-        api_base: https://adb-45552463551839.19.azuredatabricks.net/serving-endpoints
+        api_base: https://adb-7405618277982494.14.azuredatabricks.net/serving-endpoints
         token: ${DATABRICKS_TOKEN_EASTUS}
         weight: 1
       - name: eastus2-adb-ws
-        api_base: https://adb-7405604891950998.18.azuredatabricks.net/serving-endpoints
+        api_base: https://adb-7405611375100611.11.azuredatabricks.net/serving-endpoints
         token: ${DATABRICKS_TOKEN_EASTUS2}
         weight: 1
       - name: northcentralus-adb-ws
-        api_base: https://adb-7405611364884122.2.azuredatabricks.net/serving-endpoints
+        api_base: https://adb-7405612144831526.6.azuredatabricks.net/serving-endpoints
         token: ${DATABRICKS_TOKEN_NORTHCENTRALUS}
         weight: 1
       - name: southcentralus-adb-ws
-        api_base: https://adb-7405607913937156.16.azuredatabricks.net/serving-endpoints
+        api_base: https://adb-7405615615815862.2.azuredatabricks.net/serving-endpoints
         token: ${DATABRICKS_TOKEN_SOUTHCENTRALUS}
         weight: 1
       - name: westus-adb-ws
-        api_base: https://adb-7405617838344304.4.azuredatabricks.net/serving-endpoints
+        api_base: https://adb-7405614949147436.16.azuredatabricks.net/serving-endpoints
         token: ${DATABRICKS_TOKEN_WESTUS}
         weight: 1
+      - name: australiaeast-adb-ws
+        api_base: https://adb-7405606772229870.10.azuredatabricks.net/serving-endpoints
+        token: ${DATABRICKS_TOKEN_AUSTRALIAEAST}
+        weight: 1
+      - name: canadacentral-adb-ws
+        api_base: https://adb-7405612250023143.3.azuredatabricks.net/serving-endpoints
+        token: ${DATABRICKS_TOKEN_CANADACENTRAL}
+        weight: 1
+      - name: japaneast-adb-ws
+        api_base: https://adb-7405613397936662.2.azuredatabricks.net/serving-endpoints
+        token: ${DATABRICKS_TOKEN_JAPANEAST}
+        weight: 1
+
+      # eastasia-adb-ws intentionally excluded: endpoint is control-plane READY,
+      # but Anthropic rejects real Claude requests from this region.
 
     azure_openai:
       endpoints:

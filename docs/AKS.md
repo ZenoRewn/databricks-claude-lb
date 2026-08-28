@@ -16,7 +16,7 @@
                   │  │                 │  │ (mem)    │ │
                   │  │ background      │  └────┬─────┘ │      ┌───────────┐
                   │  │ refresh task    │       │       │      │ Databricks│
-                  │  │ (5min scan)     │       │       ├──────▶ x6 region │
+                  │  │ (5min scan)     │       │       ├──────▶ x9 region │
                   │  └────────┬────────┘       │       │      └───────────┘
                   │           │ readiness      │       │      ┌───────────┐
                   │           ▼                │       ├──────▶ Azure AI  │
@@ -100,6 +100,9 @@ kubectl create secret generic claude-lb-secrets -n $NS \
   --from-literal=DATABRICKS_TOKEN_NORTHCENTRALUS="dapi_xxx" \
   --from-literal=DATABRICKS_TOKEN_SOUTHCENTRALUS="dapi_xxx" \
   --from-literal=DATABRICKS_TOKEN_WESTUS="dapi_xxx" \
+  --from-literal=DATABRICKS_TOKEN_AUSTRALIAEAST="dapi_xxx" \
+  --from-literal=DATABRICKS_TOKEN_CANADACENTRAL="dapi_xxx" \
+  --from-literal=DATABRICKS_TOKEN_JAPANEAST="dapi_xxx" \
   --from-literal=AZURE_KEY_EASTUS2="..." \
   --from-literal=AZURE_KEY_SWEDENCENTRAL="..." \
   --from-literal=AZURE_KEY_POLANDCENTRAL="..." \
