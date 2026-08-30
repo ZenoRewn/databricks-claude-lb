@@ -2307,15 +2307,27 @@ class CopilotProxy:
     - 必须带一组模仿 VS Code Copilot Chat 扩展的请求头（COPILOT_HEADERS）
     """
 
+    # httpx client pool limits 与 timeouts；集中定义以便 /stats 和 /metrics 暴露上限。
+    POOL_MAX_CONNECTIONS = int(os.getenv("COPILOT_POOL_MAX_CONNECTIONS", "500"))
+    POOL_MAX_KEEPALIVE = int(os.getenv("COPILOT_POOL_MAX_KEEPALIVE", "200"))
+    POOL_KEEPALIVE_EXPIRY = float(os.getenv("COPILOT_POOL_KEEPALIVE_EXPIRY", "30"))
+    POOL_READ_TIMEOUT = float(os.getenv("COPILOT_POOL_READ_TIMEOUT", "300"))
+    POOL_ACQUIRE_TIMEOUT = float(os.getenv("COPILOT_POOL_ACQUIRE_TIMEOUT", "60"))
+
     def __init__(self, load_balancer: LoadBalancer, api_key: str):
         self.load_balancer = load_balancer  # 装载 CopilotEndpoint
         self.api_key = api_key
         self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=10.0, read=None, write=60.0, pool=60.0),
+            timeout=httpx.Timeout(
+                connect=10.0,
+                read=self.POOL_READ_TIMEOUT,
+                write=60.0,
+                pool=self.POOL_ACQUIRE_TIMEOUT,
+            ),
             limits=httpx.Limits(
-                max_connections=500,
-                max_keepalive_connections=200,
-                keepalive_expiry=30.0,
+                max_connections=self.POOL_MAX_CONNECTIONS,
+                max_keepalive_connections=self.POOL_MAX_KEEPALIVE,
+                keepalive_expiry=self.POOL_KEEPALIVE_EXPIRY,
             ),
             http2=False,
         )
@@ -3171,6 +3183,7 @@ class CopilotProxy:
                 "models": ep.models,  # 用 'models' 区别于 Azure 的 'deployments'
                 "session_token_expires_at": ep.session_token_expires_at,
             })
+        total_active = sum(ep.active_requests for ep in self.load_balancer.endpoints)
         return {
             "global": {
                 "uptime_seconds": round(uptime, 1),
@@ -3183,6 +3196,17 @@ class CopilotProxy:
                 "total_tokens": gs.total_input_tokens + gs.total_output_tokens,
                 "avg_response_time_ms": round(gs.total_response_time / gs.successful_requests * 1000, 1) if gs.successful_requests > 0 else 0,
                 "requests_per_minute": round(gs.total_requests / (uptime / 60), 2) if uptime > 0 else 0,
+            },
+            "pool": {
+                "active_requests": total_active,
+                "max_connections": self.POOL_MAX_CONNECTIONS,
+                "max_keepalive_connections": self.POOL_MAX_KEEPALIVE,
+                "read_timeout_seconds": self.POOL_READ_TIMEOUT,
+                "acquire_timeout_seconds": self.POOL_ACQUIRE_TIMEOUT,
+                "pool_timeout_total": self.pool_timeout_total,
+                "stream_high_watermark": COPILOT_STREAM_HIGH_WATERMARK,
+                "stream_connections_active": len(self._stream_connections),
+                "utilization_pct": round(total_active / self.POOL_MAX_CONNECTIONS * 100, 1) if self.POOL_MAX_CONNECTIONS > 0 else 0,
             },
             "endpoints": endpoints_stats,
         }
@@ -4253,6 +4277,32 @@ async def openai_model(model_id: str, request: Request, x_api_key: Optional[str]
     return JSONResponse(content=_openai_model_entry(model_id))
 
 
+@app.get("/v1/responses")
+@app.get("/v1/responses/{tail:path}")
+async def responses_get_unsupported(request: Request, tail: Optional[str] = None):
+    """Explicitly reject GET polling on /v1/responses.
+
+    Codex 客户端会先 POST 创建 response，然后周期 GET 拉取状态。本 LB 只支持同步 POST（以 SSE 直接回流），没有
+    服务器端 response 持久化。直接回 501 Not Implemented，带 error.type="unsupported_endpoint"，避免
+    404/405 触发客户端指数重试风暴。
+    """
+    return JSONResponse(
+        status_code=501,
+        headers={"Allow": "POST"},
+        content={
+            "error": {
+                "type": "unsupported_endpoint",
+                "code": "responses_get_not_supported",
+                "message": (
+                    "This proxy only supports POST /v1/responses with streaming SSE. "
+                    "GET /v1/responses (background/polling mode) is not implemented; "
+                    "submit requests inline via POST and consume the SSE stream."
+                ),
+            }
+        },
+    )
+
+
 @app.post("/v1/responses")
 async def responses(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
     request_id = f"req_{uuid.uuid4().hex[:8]}"
@@ -4447,6 +4497,11 @@ async def metrics():
         emit("copilot_endpoint_active_requests", "Currently in-flight requests per Copilot endpoint", "gauge", endpoint_active_samples)
         emit("copilot_endpoint_input_tokens_total", "Cumulative input tokens per Copilot endpoint", "counter", endpoint_input_tokens_samples)
         emit("copilot_endpoint_output_tokens_total", "Cumulative output tokens per Copilot endpoint", "counter", endpoint_output_tokens_samples)
+        # Pool capacity gauges: expose configured upper bounds so scrapers / dashboards can alert on saturation
+        emit("copilot_pool_max_connections", "Configured httpx max_connections for the Copilot shared client", "gauge",
+             [f"copilot_pool_max_connections {CopilotProxy.POOL_MAX_CONNECTIONS}"])
+        emit("copilot_pool_max_keepalive_connections", "Configured httpx max_keepalive_connections for the Copilot shared client", "gauge",
+             [f"copilot_pool_max_keepalive_connections {CopilotProxy.POOL_MAX_KEEPALIVE}"])
         stream_stats = copilot_proxy.get_stream_connection_stats()
         emit("copilot_stream_connections_active", "Currently registered Copilot streaming connections", "gauge",
              [f"copilot_stream_connections_active {stream_stats['active']}"])
@@ -5788,6 +5843,8 @@ async function refresh() {
       if (!cpContent.dataset.built) {
         cpContent.innerHTML =
           '<div class="global-grid" id="copilotGlobalGrid"></div>' +
+          '<h2 class="section-title">Connection Pool <small style="opacity:.6">(httpx client shared across Copilot endpoints)</small></h2>' +
+          '<div class="table-wrap" id="copilotPoolCard" style="padding:14px 18px;margin-bottom:18px"></div>' +
           '<div class="grid-2">' +
           '<div class="chart-card"><h3>Model Usage Share</h3><div class="canvas-wrap"><canvas id="copilotModelChart"></canvas></div></div>' +
           '<div class="chart-card"><h3>Endpoint Latency (ms)</h3><div class="canvas-wrap"><canvas id="copilotLatencyChart"></canvas></div></div>' +
@@ -5806,6 +5863,49 @@ async function refresh() {
       }
       const COPILOT_KPIS = KPI_DEFS.filter(k => k.key !== 'estimated_total_cost_usd');
       renderKpiGrid('copilotGlobalGrid', COPILOT_KPIS, d.github_copilot.global, 'kpi-copilot');
+
+      const pool = d.github_copilot.pool || {};
+      const poolCard = document.getElementById('copilotPoolCard');
+      if (poolCard) {
+        const active = +pool.active_requests || 0;
+        const maxConn = +pool.max_connections || 0;
+        const util = +pool.utilization_pct || 0;
+        const timeouts = +pool.pool_timeout_total || 0;
+        const streams = +pool.stream_connections_active || 0;
+        const hwm = +pool.stream_high_watermark || 0;
+        // 颜色：<50% ok，50-80% warn，>=80% err
+        const utilColor = util >= 80 ? 'var(--err)' : util >= 50 ? 'var(--warn)' : 'var(--ok)';
+        const utilBg = util >= 80 ? 'rgba(248,113,113,.15)' : util >= 50 ? 'rgba(251,191,36,.15)' : 'rgba(74,222,128,.15)';
+        poolCard.innerHTML =
+          '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px">' +
+            '<div><div style="opacity:.6;font-size:12px;text-transform:uppercase;letter-spacing:.5px">Active / Max Connections</div>' +
+              '<div style="font-size:22px;font-weight:600;font-family:JetBrains Mono,monospace">' +
+                '<span style="color:' + utilColor + '">' + active + '</span>' +
+                ' <span style="opacity:.4">/</span> ' + maxConn +
+              '</div>' +
+              '<div style="margin-top:6px;height:6px;background:' + utilBg + ';border-radius:3px;overflow:hidden">' +
+                '<div style="height:100%;width:' + Math.min(100, util) + '%;background:' + utilColor + ';transition:width .3s"></div>' +
+              '</div>' +
+              '<div style="opacity:.6;font-size:11px;margin-top:4px">' + util.toFixed(1) + '% utilized</div>' +
+            '</div>' +
+            '<div><div style="opacity:.6;font-size:12px;text-transform:uppercase;letter-spacing:.5px">Pool Timeouts</div>' +
+              '<div style="font-size:22px;font-weight:600;font-family:JetBrains Mono,monospace;color:' + (timeouts > 0 ? 'var(--warn)' : 'var(--text-0)') + '">' + fmt(timeouts) + '</div>' +
+              '<div style="opacity:.6;font-size:11px;margin-top:4px">cumulative since pod start</div>' +
+            '</div>' +
+            '<div><div style="opacity:.6;font-size:12px;text-transform:uppercase;letter-spacing:.5px">Streaming / Watermark</div>' +
+              '<div style="font-size:22px;font-weight:600;font-family:JetBrains Mono,monospace">' + streams + ' <span style="opacity:.4">/</span> ' + hwm + '</div>' +
+              '<div style="opacity:.6;font-size:11px;margin-top:4px">registered SSE streams</div>' +
+            '</div>' +
+            '<div><div style="opacity:.6;font-size:12px;text-transform:uppercase;letter-spacing:.5px">Keepalive Cap</div>' +
+              '<div style="font-size:22px;font-weight:600;font-family:JetBrains Mono,monospace">' + (pool.max_keepalive_connections || '-') + '</div>' +
+              '<div style="opacity:.6;font-size:11px;margin-top:4px">idle connections retained</div>' +
+            '</div>' +
+            '<div><div style="opacity:.6;font-size:12px;text-transform:uppercase;letter-spacing:.5px">Read Timeout</div>' +
+              '<div style="font-size:22px;font-weight:600;font-family:JetBrains Mono,monospace">' + (pool.read_timeout_seconds || '-') + 's</div>' +
+              '<div style="opacity:.6;font-size:11px;margin-top:4px">acquire=' + (pool.acquire_timeout_seconds || '-') + 's</div>' +
+            '</div>' +
+          '</div>';
+      }
 
       const cpBody = document.getElementById('copilotEndpointBody');
       const cpSeen = new Set();
