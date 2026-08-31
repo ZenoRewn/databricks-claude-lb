@@ -2036,6 +2036,15 @@ class AzureOpenAIProxy:
             output_tokens = 0
             cache_read_tokens = 0
             sent_any_chunk = False
+            # Track whether we ever saw the terminal event we expected:
+            #   - Responses API : an SSE event whose `type` is `response.completed`
+            #                     (also treat `response.failed`/`response.incomplete`
+            #                     as valid terminals — they are still upstream telling
+            #                     us the response ended deliberately).
+            #   - Chat API      : `data: [DONE]` sentinel.
+            # If upstream closes the SSE without any of these, that is silent
+            # truncation and clients see "stream closed before response.completed".
+            saw_completion = False
 
             HEARTBEAT = b": keep-alive\n\n"
 
@@ -2127,11 +2136,22 @@ class AzureOpenAIProxy:
                             while "\n\n" in buffer:
                                 event_str, buffer = buffer.split("\n\n", 1)
                                 for line in event_str.split("\n"):
-                                    if not line.startswith("data: ") or line.strip() == "data: [DONE]":
+                                    if not line.startswith("data: "):
+                                        continue
+                                    if line.strip() == "data: [DONE]":
+                                        if api_type != "responses":
+                                            saw_completion = True
                                         continue
                                     data = json.loads(line[6:])
                                     if api_type == "responses":
-                                        if data.get("type") == "response.completed":
+                                        ev_type = data.get("type")
+                                        if ev_type in (
+                                            "response.completed",
+                                            "response.failed",
+                                            "response.incomplete",
+                                        ):
+                                            saw_completion = True
+                                        if ev_type == "response.completed":
                                             usage = data.get("response", {}).get("usage", {})
                                             input_tokens = usage.get("input_tokens", 0)
                                             output_tokens = usage.get("output_tokens", 0)
@@ -2149,6 +2169,44 @@ class AzureOpenAIProxy:
 
                     if stream_error is not None:
                         raise stream_error
+
+                    # Silent upstream truncation detector (mirrors CopilotProxy).
+                    if sent_any_chunk and not saw_completion:
+                        elapsed_trunc = time.time() - start_time
+                        logger.error(
+                            "[Azure] upstream closed stream on %s without terminal "
+                            "event: api_type=%s model=%s elapsed=%.1fs",
+                            current_endpoint.name, api_type, model, elapsed_trunc,
+                        )
+                        await end_current_request(success=False)
+                        if api_type == "responses":
+                            fail_event = {
+                                "type": "response.failed",
+                                "response": {
+                                    "error": {
+                                        "code": "upstream_truncated",
+                                        "message": (
+                                            "Azure upstream closed the SSE stream before "
+                                            "emitting response.completed. Likely upstream "
+                                            "timeout or size limit."
+                                        ),
+                                    }
+                                },
+                            }
+                            yield f"data: {json.dumps(fail_event)}\n\n".encode()
+                        else:
+                            err_event = {
+                                "error": {
+                                    "code": "upstream_truncated",
+                                    "message": (
+                                        "Azure upstream closed the SSE stream before "
+                                        "emitting [DONE]. Likely upstream timeout or "
+                                        "size limit."
+                                    ),
+                                }
+                            }
+                            yield f"data: {json.dumps(err_event)}\n\ndata: [DONE]\n\n".encode()
+                        return
 
                     elapsed = time.time() - start_time
                     proxy_self._record_usage(current_endpoint, model, input_tokens, output_tokens, elapsed,
@@ -2341,6 +2399,17 @@ class CopilotProxy:
         self.stream_disconnects_detected_total = 0
         self.stream_forced_releases_total = 0
         self.pool_timeout_total = 0
+        # Distinct diagnostic counters. `pool_timeout_total` mixes real pool saturation
+        # with upstream connect/handshake stalls, which is exactly the false positive
+        # that misled prior triage. Keep it for backwards compat in /stats and expose
+        # the two causes separately.
+        self.pool_timeout_saturated_total = 0
+        self.pool_timeout_upstream_stall_total = 0
+        # Streams where upstream `aiter_bytes` returned EOF without emitting the
+        # terminal event we expected (`response.completed` for the Responses API,
+        # `[DONE]` for chat/completions). This surfaces silent upstream truncation
+        # that clients previously observed only as "stream closed before completion".
+        self.stream_truncated_no_completion_total = 0
 
     def verify_api_key(self, key: str) -> bool:
         return key == self.api_key
@@ -2369,6 +2438,50 @@ class CopilotProxy:
     def _unregister_stream(self, connection_id: Optional[str]):
         if connection_id:
             self._stream_connections.pop(connection_id, None)
+
+    def _describe_pool_timeout(self, endpoint_name: str, exc: httpx.PoolTimeout) -> tuple[str, str]:
+        """Return (log_message, sse_error_message) for a PoolTimeout event.
+
+        httpx.PoolTimeout is raised for two very different reasons:
+          1. Our local httpx ConnectionPool actually holds `max_connections` slots
+             ("real" saturation).
+          2. httpcore.PoolTimeout wraps a stalled upstream connect/TLS handshake
+             where the pool acquire waits longer than `timeout.pool`, but the pool
+             itself has slots free. In this case `str(exc)` is usually empty and our
+             internal active_requests counter shows plenty of headroom.
+
+        We used to log both as "local connection pool exhausted", which sent triage
+        on the wrong trail (see 2026-08-31 investigation). Label them correctly now.
+        """
+        total_active = sum(ep.active_requests for ep in self.load_balancer.endpoints)
+        exc_repr = str(exc) or "no message from httpcore (empty)"
+        state = (
+            f"pool_active={total_active}/{self.POOL_MAX_CONNECTIONS} "
+            f"keepalive_max={self.POOL_MAX_KEEPALIVE} "
+            f"streams={len(self._stream_connections)}"
+        )
+        if total_active >= self.POOL_MAX_CONNECTIONS:
+            self.pool_timeout_saturated_total += 1
+            return (
+                f"[Copilot] local pool saturated for {endpoint_name} after "
+                f"{self.POOL_ACQUIRE_TIMEOUT}s wait ({state}): {exc_repr}",
+                (
+                    f"Copilot local pool saturated "
+                    f"({total_active}/{self.POOL_MAX_CONNECTIONS})"
+                ),
+            )
+        self.pool_timeout_upstream_stall_total += 1
+        return (
+            f"[Copilot] upstream connect/handshake stalled for {endpoint_name}: "
+            f"httpx.PoolTimeout after {self.POOL_ACQUIRE_TIMEOUT}s while acquiring "
+            f"a NEW connection; local pool still has slots ({state}). "
+            f"Likely api.enterprise.githubcopilot.com is slow to establish TCP/TLS "
+            f"or its DNS response is delayed. Upstream detail: {exc_repr}",
+            (
+                f"Copilot upstream connect stalled for {endpoint_name} "
+                f"(no new connection returned within {self.POOL_ACQUIRE_TIMEOUT}s)"
+            ),
+        )
 
     def get_stream_connection_stats(self) -> dict:
         now = time.monotonic()
@@ -2833,7 +2946,8 @@ class CopilotProxy:
                 last_error = e
                 self.global_stats.total_errors += 1
                 self.pool_timeout_total += 1
-                logger.warning(f"[Copilot] local connection pool exhausted for {endpoint.name}: {e}")
+                log_msg, _ = self._describe_pool_timeout(endpoint.name, e)
+                logger.warning(log_msg)
                 await end_attempt(success=False, is_client_error=True)
                 if attempt < max_retries - 1:
                     await asyncio.sleep(min(2 ** attempt, 8))
@@ -3041,14 +3155,26 @@ class CopilotProxy:
                             while "\n\n" in buffer:
                                 event_str, buffer = buffer.split("\n\n", 1)
                                 for line in event_str.split("\n"):
-                                    if not line.startswith("data: ") or line.strip() == "data: [DONE]":
+                                    if not line.startswith("data: "):
+                                        continue
+                                    if line.strip() == "data: [DONE]":
+                                        # Chat/completions terminal marker.
+                                        if api_type != "responses":
+                                            saw_completion = True
                                         continue
                                     try:
                                         data = json.loads(line[6:])
                                     except Exception:
                                         continue
                                     if api_type == "responses":
-                                        if data.get("type") == "response.completed":
+                                        ev_type = data.get("type")
+                                        if ev_type in (
+                                            "response.completed",
+                                            "response.failed",
+                                            "response.incomplete",
+                                        ):
+                                            saw_completion = True
+                                        if ev_type == "response.completed":
                                             usage = data.get("response", {}).get("usage", {}) or {}
                                             input_tokens = usage.get("input_tokens", 0)
                                             output_tokens = usage.get("output_tokens", 0)
@@ -3067,6 +3193,55 @@ class CopilotProxy:
                     if stream_error is not None:
                         raise stream_error
 
+                    # Detect silent upstream truncation: aiter_bytes returned EOF but
+                    # we never saw the terminal event the client expects. Codex, the
+                    # OpenAI JS SDK, and Anthropic SDKs surface this as
+                    # "stream closed before response.completed" (or the equivalent),
+                    # which used to be indistinguishable from a clean end in this LB.
+                    upstream_truncated = sent_any_chunk and not saw_completion
+                    if upstream_truncated:
+                        proxy_self.stream_truncated_no_completion_total += 1
+                        elapsed = time.time() - start_time
+                        logger.error(
+                            "[Copilot] upstream closed stream on %s without terminal "
+                            "event: api_type=%s model=%s elapsed=%.1fs input_bytes=%d "
+                            "has_image=%s (likely upstream timeout or size limit)",
+                            current_endpoint.name, api_type, model, elapsed,
+                            len(json.dumps(body, ensure_ascii=False, default=str)),
+                            proxy_self._has_image(body),
+                        )
+                        await end_current_request(success=False)
+                        # Emit an explicit terminal SSE event so clients report a real
+                        # error instead of a silent disconnect.
+                        if api_type == "responses":
+                            fail_event = {
+                                "type": "response.failed",
+                                "response": {
+                                    "error": {
+                                        "code": "upstream_truncated",
+                                        "message": (
+                                            "Copilot upstream closed the SSE stream before "
+                                            "emitting response.completed. This usually means "
+                                            "the upstream hit a timeout or size limit."
+                                        ),
+                                    }
+                                },
+                            }
+                            yield f"data: {json.dumps(fail_event)}\n\n".encode()
+                        else:
+                            err_event = {
+                                "error": {
+                                    "code": "upstream_truncated",
+                                    "message": (
+                                        "Copilot upstream closed the SSE stream before "
+                                        "emitting [DONE]. This usually means the upstream "
+                                        "hit a timeout or size limit."
+                                    ),
+                                }
+                            }
+                            yield f"data: {json.dumps(err_event)}\n\ndata: [DONE]\n\n".encode()
+                        return
+
                     await end_current_request(success=True)
                     elapsed = time.time() - start_time
                     proxy_self._record_usage(current_endpoint, model, input_tokens, output_tokens, elapsed,
@@ -3081,11 +3256,10 @@ class CopilotProxy:
                     yield f"data: {json.dumps(detail)}\n\ndata: [DONE]\n\n".encode()
                     return
                 except httpx.PoolTimeout as e:
-                    error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
                     proxy_self.pool_timeout_total += 1
-                    logger.warning(
-                        f"[Copilot] local connection pool exhausted for {current_endpoint.name}: {error_detail}"
-                    )
+                    log_msg, sse_msg = proxy_self._describe_pool_timeout(current_endpoint.name, e)
+                    logger.warning(log_msg)
+                    error_detail = sse_msg
                     await end_current_request(success=False, is_client_error=True)
 
                     if not sent_any_chunk and attempt < max_retries - 1:
@@ -3204,6 +3378,9 @@ class CopilotProxy:
                 "read_timeout_seconds": self.POOL_READ_TIMEOUT,
                 "acquire_timeout_seconds": self.POOL_ACQUIRE_TIMEOUT,
                 "pool_timeout_total": self.pool_timeout_total,
+                "pool_timeout_saturated_total": self.pool_timeout_saturated_total,
+                "pool_timeout_upstream_stall_total": self.pool_timeout_upstream_stall_total,
+                "stream_truncated_no_completion_total": self.stream_truncated_no_completion_total,
                 "stream_high_watermark": COPILOT_STREAM_HIGH_WATERMARK,
                 "stream_connections_active": len(self._stream_connections),
                 "utilization_pct": round(total_active / self.POOL_MAX_CONNECTIONS * 100, 1) if self.POOL_MAX_CONNECTIONS > 0 else 0,
@@ -4517,6 +4694,17 @@ async def metrics():
              [f"copilot_stream_forced_releases_total {stream_stats['forced_releases_total']}"])
         emit("copilot_pool_timeout_total", "Local Copilot httpx connection pool timeouts", "counter",
              [f"copilot_pool_timeout_total {copilot_proxy.pool_timeout_total}"])
+        emit("copilot_pool_timeout_saturated_total",
+             "PoolTimeouts explained by real local pool saturation", "counter",
+             [f"copilot_pool_timeout_saturated_total {copilot_proxy.pool_timeout_saturated_total}"])
+        emit("copilot_pool_timeout_upstream_stall_total",
+             "PoolTimeouts caused by stalled upstream connect/handshake (pool not saturated)",
+             "counter",
+             [f"copilot_pool_timeout_upstream_stall_total {copilot_proxy.pool_timeout_upstream_stall_total}"])
+        emit("copilot_stream_truncated_no_completion_total",
+             "Streams closed by upstream without the expected terminal event",
+             "counter",
+             [f"copilot_stream_truncated_no_completion_total {copilot_proxy.stream_truncated_no_completion_total}"])
         emit("copilot_stream_high_watermark", "Configured active-request high watermark for safety cleanup", "gauge",
              [f"copilot_stream_high_watermark {COPILOT_STREAM_HIGH_WATERMARK}"])
 
