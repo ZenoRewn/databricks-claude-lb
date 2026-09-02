@@ -99,6 +99,12 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         proxy.stream_disconnects_detected_total = 0
         proxy.stream_forced_releases_total = 0
         proxy.pool_timeout_total = 0
+        proxy.pool_timeout_saturated_total = 0
+        proxy.pool_timeout_upstream_stall_total = 0
+        proxy.stream_truncated_no_completion_total = 0
+        proxy.stream_truncated_no_completion_by_model = {}
+        proxy.stream_read_timeout_total = 0
+        proxy.stream_pump_queue_full_events_total = 0
         proxy._build_headers = AsyncMock(return_value={"Authorization": "Bearer test"})
         return proxy, load_balancer, endpoint
 
@@ -490,6 +496,125 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(load_balancer.on_request_end.await_count, 1)
         self.assertEqual(proxy._stream_connections, {})
 
+    async def test_stream_responses_missing_completion_event_emits_upstream_truncated(self):
+        """P0 regression: `saw_completion` used to be uninitialized on the Copilot
+        path. When upstream sent chunks but never emitted `response.completed`,
+        the truncation check hit `UnboundLocalError` and the client saw a raw
+        socket close ("stream closed before response.completed"). Now the LB must
+        emit an explicit ``response.failed{code: upstream_truncated}`` event.
+        """
+        # An SSE stream carrying only mid-response events; upstream EOF closes it
+        # without any `response.completed` marker.
+        chunks = [
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\" there\"}\n\n",
+        ]
+        upstream = _StreamResponse(chunks)
+        proxy, load_balancer, endpoint = self._make_proxy(_StreamClient([upstream]))
+        await load_balancer.on_request_start(endpoint)
+
+        response = await proxy._stream_response(
+            endpoint,
+            "https://example.test/responses",
+            {"model": "gpt-test", "input": "hello"},
+            {},
+            "gpt-test",
+            "responses",
+            main.time.time(),
+        )
+        body = b"".join([c async for c in response.body_iterator])
+
+        # Every mid-stream chunk must pass through untouched…
+        for original in chunks:
+            self.assertIn(original, body)
+        # …and the LB must append a Responses-shaped failure event (no `[DONE]`
+        # sentinel, which would break Codex/JS SDK JSON parsing).
+        self.assertIn(b'"type": "response.failed"', body)
+        self.assertIn(b'"code": "upstream_truncated"', body)
+        self.assertNotIn(b"data: [DONE]\n\n", body)
+        # Counters increment for both aggregate and (model, api_type) breakdown.
+        self.assertEqual(proxy.stream_truncated_no_completion_total, 1)
+        self.assertEqual(
+            proxy.stream_truncated_no_completion_by_model.get(("gpt-test", "responses")), 1
+        )
+        self.assertEqual(endpoint.active_requests, 0)
+
+    async def test_stream_responses_event_header_terminal_is_accepted(self):
+        """SSE per WHATWG allows the terminal signal to be carried on the
+        ``event:`` header line instead of inside the ``data:`` payload. Some
+        GHCP model releases emit ``event: response.completed\\ndata: {"id":...}``
+        with no ``type`` field in the payload. The LB must treat that as a
+        legitimate completion and NOT fire silent-truncation.
+        """
+        chunks = [
+            b"event: response.created\ndata: {\"id\":\"resp_1\"}\n\n",
+            b"event: response.output_text.delta\ndata: {\"delta\":\"ok\"}\n\n",
+            # Real Responses API `response.completed` payload keeps usage nested
+            # under `response`; here we omit the payload `type` field on purpose
+            # so the terminal signal must be recognised via the `event:` header.
+            b"event: response.completed\ndata: {\"response\":{\"id\":\"resp_1\","
+            b"\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}}\n\n",
+        ]
+        upstream = _StreamResponse(chunks)
+        proxy, load_balancer, endpoint = self._make_proxy(_StreamClient([upstream]))
+        await load_balancer.on_request_start(endpoint)
+
+        response = await proxy._stream_response(
+            endpoint,
+            "https://example.test/responses",
+            {"model": "gpt-test", "input": "hello"},
+            {},
+            "gpt-test",
+            "responses",
+            main.time.time(),
+        )
+        body = b"".join([c async for c in response.body_iterator])
+
+        # Client sees the raw upstream verbatim, no synthetic terminal appended.
+        for original in chunks:
+            self.assertIn(original, body)
+        self.assertNotIn(b'"code": "upstream_truncated"', body)
+        self.assertNotIn(b'"type": "response.failed"', body)
+        # Truncation counter must remain zero — this stream completed cleanly
+        # through the header path.
+        self.assertEqual(proxy.stream_truncated_no_completion_total, 0)
+        self.assertEqual(proxy.stream_truncated_no_completion_by_model, {})
+        # Usage from the terminal payload must be recorded.
+        self.assertEqual(endpoint.total_input_tokens, 10)
+        self.assertEqual(endpoint.total_output_tokens, 2)
+        self.assertEqual(endpoint.active_requests, 0)
+        self.assertEqual(endpoint.total_errors, 0)
+
+    async def test_stream_chat_missing_done_emits_upstream_truncated(self):
+        """Chat/completions companion of the Responses-truncation test."""
+        chunks = [
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        ]
+        upstream = _StreamResponse(chunks)
+        proxy, load_balancer, endpoint = self._make_proxy(_StreamClient([upstream]))
+        await load_balancer.on_request_start(endpoint)
+
+        response = await proxy._stream_response(
+            endpoint,
+            "https://example.test/chat/completions",
+            {"model": "gpt-test", "messages": []},
+            {},
+            "gpt-test",
+            "chat",
+            main.time.time(),
+        )
+        body = b"".join([c async for c in response.body_iterator])
+
+        self.assertIn(chunks[0], body)
+        # Chat truncation path must append `[DONE]` after the synthetic error so
+        # legacy clients still see a valid stream end.
+        self.assertIn(b'"code": "upstream_truncated"', body)
+        self.assertTrue(body.rstrip().endswith(b"data: [DONE]"))
+        self.assertEqual(proxy.stream_truncated_no_completion_total, 1)
+        self.assertEqual(
+            proxy.stream_truncated_no_completion_by_model.get(("gpt-test", "chat")), 1
+        )
+
     async def test_stream_unsupported_model_returns_explicit_sse_error(self):
         upstream = _ErrorStreamResponse(
             404, b'{"error":{"code":"model_not_found","message":"unsupported"}}'
@@ -508,8 +633,13 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         chunks = [chunk async for chunk in response.body_iterator]
         body = b"".join(chunks)
 
+        # Responses API terminal MUST be `response.failed` shape (no `[DONE]`).
+        # Sending `[DONE]` on a Responses stream breaks Codex Desktop and the
+        # OpenAI JS SDK — they `serde_json` each `data:` line and `[DONE]` is
+        # not valid JSON. See commit 6a0a6aa and `_sse_terminal_error`.
+        self.assertIn(b'"type": "response.failed"', body)
         self.assertIn(b'"code": "unsupported_model"', body)
-        self.assertTrue(body.endswith(b"data: [DONE]\n\n"))
+        self.assertNotIn(b"data: [DONE]", body)
         self.assertTrue(upstream.closed)
         self.assertEqual(endpoint.active_requests, 0)
         self.assertEqual(endpoint.total_errors, 0)
@@ -611,6 +741,12 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             f"copilot_stream_high_watermark {main.COPILOT_STREAM_HIGH_WATERMARK}", body
         )
+        # Newly exposed counters must be present with 0 baseline.
+        self.assertIn("copilot_stream_truncated_no_completion_total 0", body)
+        self.assertIn("copilot_stream_read_timeout_total 0", body)
+        self.assertIn("copilot_stream_pump_queue_full_events_total 0", body)
+        # read_timeout gauge exports -1 sentinel for unlimited (default: None).
+        self.assertRegex(body, r"copilot_pool_read_timeout_seconds -1|copilot_pool_read_timeout_seconds \d")
 
 
 class AzureRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
