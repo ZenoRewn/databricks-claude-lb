@@ -943,3 +943,49 @@ class AzureRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RequestIdSurfaceTests(unittest.IsolatedAsyncioTestCase):
+    """Codex-rs (openai/codex codex-api/src/sse/responses.rs) reads
+    ``REQUEST_ID_HEADER = "x-request-id"`` and does NOT parse
+    ``error.metadata`` from an SSE ``response.failed`` payload. These tests
+    guard the three surfacing channels so no future refactor can silently
+    strand the ID from the client's view.
+    """
+
+    def test_apply_request_id_prefix_prepends_when_metadata_has_id(self):
+        out = main._apply_request_id_prefix("upstream stalled", {"request_id": "req_x"})
+        self.assertTrue(out.startswith("[req=req_x] "))
+        self.assertIn("upstream stalled", out)
+
+    def test_apply_request_id_prefix_noop_when_no_metadata(self):
+        self.assertEqual(main._apply_request_id_prefix("boom", None), "boom")
+        self.assertEqual(main._apply_request_id_prefix("boom", {}), "boom")
+        self.assertEqual(main._apply_request_id_prefix("boom", {"endpoint": "x"}), "boom")
+
+    def test_apply_request_id_prefix_idempotent(self):
+        once = main._apply_request_id_prefix("hi", {"request_id": "req_x"})
+        twice = main._apply_request_id_prefix(once, {"request_id": "req_x"})
+        self.assertEqual(once, twice)  # already-prefixed message is left alone
+
+    def test_sse_terminal_error_prefixes_message_and_embeds_metadata(self):
+        payload = main._sse_terminal_error(
+            "responses", "upstream_truncated", "stream died",
+            metadata={"request_id": "req_xyz", "endpoint": "gh-1"},
+        )
+        text = payload.decode("utf-8")
+        import json as _json
+        data = _json.loads(text.split("data: ", 1)[1])
+        err = data["response"]["error"]
+        self.assertTrue(err["message"].startswith("[req=req_xyz] "))
+        self.assertEqual(err["metadata"]["request_id"], "req_xyz")
+        self.assertEqual(err["metadata"]["endpoint"], "gh-1")
+
+    def test_request_id_response_headers_returns_pair(self):
+        h = main._request_id_response_headers("req_abc")
+        self.assertEqual(h.get("X-Request-Id"), "req_abc")
+        self.assertEqual(h.get("OpenAI-Request-Id"), "req_abc")
+
+    def test_request_id_response_headers_empty_when_none(self):
+        self.assertEqual(main._request_id_response_headers(None), {})
+        self.assertEqual(main._request_id_response_headers(""), {})

@@ -233,6 +233,31 @@ class _LifecycleStreamingResponse(StreamingResponse):
 
 # ==================== SSE 终止事件辅助 ====================
 
+def _apply_request_id_prefix(message: str, metadata: Optional[dict]) -> str:
+    """Prepend ``[req=<request_id>]`` to ``message`` when metadata carries one.
+
+    Rationale: Codex-rs's SSE parser (see openai/codex `codex-api/src/sse/responses.rs`)
+    only deserializes these fields from an ``error`` payload: ``type / code /
+    message / plan_type / resets_at / misalignment``. It does NOT read
+    ``error.metadata`` or a nested ``error.request_id``. Codex does read the
+    HTTP response header ``x-request-id`` (constant ``REQUEST_ID_HEADER``), but
+    that only helps for streams that fail during the header phase — once we're
+    inside an SSE event, only fields Codex actually deserialises reach the user.
+
+    Prefixing the ``message`` guarantees the request_id survives to every
+    client, whether it prints ``error.message`` verbatim, ignores metadata, or
+    swallows response headers.
+    """
+    if not metadata:
+        return message
+    rid = metadata.get("request_id")
+    if not rid:
+        return message
+    if message.startswith("[req="):
+        return message
+    return f"[req={rid}] {message}"
+
+
 def _sse_terminal_error(api_type: str, code: str, message: str,
                         metadata: Optional[dict] = None) -> bytes:
     """Emit a properly formatted terminal SSE error for the target API shape.
@@ -246,11 +271,13 @@ def _sse_terminal_error(api_type: str, code: str, message: str,
       - ``responses`` -> ``data: {"type":"response.failed", ...}`` (no ``[DONE]``)
       - ``chat``      -> ``data: {"error": ...}`` followed by ``data: [DONE]``
 
-    ``metadata`` (optional) is embedded as ``error.metadata`` so the client-side
-    error surfaces a ``request_id`` / ``endpoint`` that the operator can grep
-    server logs by. Codex's own error message doesn't necessarily print it, but
-    a support engineer reading the SSE body directly gets an instant pointer.
+    ``metadata`` (optional): the ``request_id`` inside it is prefixed onto
+    ``message`` so Codex-rs (which does not parse ``error.metadata``) still
+    surfaces the ID to the user. The full metadata dict is also emitted under
+    ``error.metadata`` as structured backup for clients that DO read it (curl,
+    OpenAI Python SDK, some enterprise wrappers).
     """
+    message = _apply_request_id_prefix(message, metadata)
     error_body: dict = {"code": code, "message": message}
     if metadata:
         error_body["metadata"] = metadata
@@ -269,7 +296,8 @@ def _sse_terminal_from_upstream_detail(api_type: str, upstream_detail: dict,
     ``{"error": {...}}`` (via ``_build_upstream_error_detail``). For the
     Responses API we wrap it inside a ``response.failed`` event; for Chat we
     forward it verbatim followed by ``[DONE]``. ``metadata`` (optional) merges
-    into ``error.metadata`` — see ``_sse_terminal_error`` for rationale.
+    into ``error.metadata`` AND its ``request_id`` is prefixed onto
+    ``error.message`` — see ``_sse_terminal_error`` for rationale.
     """
     upstream_detail = upstream_detail or {}
     error = dict(upstream_detail.get("error") or {"message": "upstream error"})
@@ -277,11 +305,30 @@ def _sse_terminal_from_upstream_detail(api_type: str, upstream_detail: dict,
         merged = dict(error.get("metadata") or {})
         merged.update(metadata)
         error["metadata"] = merged
+        if isinstance(error.get("message"), str):
+            error["message"] = _apply_request_id_prefix(error["message"], metadata)
     if api_type == "responses":
         payload = {"type": "response.failed", "response": {"error": error}}
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
     payload_dict = {"error": error}
     return f"data: {json.dumps(payload_dict, ensure_ascii=False)}\n\ndata: [DONE]\n\n".encode()
+
+
+def _request_id_response_headers(request_id: Optional[str]) -> dict:
+    """Build the ``X-Request-Id`` / ``OpenAI-Request-Id`` header pair.
+
+    Codex-rs reads ``x-request-id`` verbatim (see openai/codex
+    `codex-api/src/sse/responses.rs::REQUEST_ID_HEADER`). ``openai-request-id``
+    is the newer name some OpenAI-flavored SDKs prefer; sending both maximises
+    the chance the client attaches the ID to its user-visible error message
+    even for a stream that dies before any SSE event is emitted.
+    """
+    if not request_id:
+        return {}
+    return {
+        "X-Request-Id": request_id,
+        "OpenAI-Request-Id": request_id,
+    }
 
 
 def _log_copilot_request_end(*, outcome: str, level: int, request_id: Optional[str],
@@ -3210,7 +3257,8 @@ class CopilotProxy:
             output_tokens=output_tokens,
             cache_read_tokens=cache_read_tokens,
         )
-        return JSONResponse(content=resp_json, status_code=response.status_code)
+        return JSONResponse(content=resp_json, status_code=response.status_code,
+                            headers=_request_id_response_headers(request_id))
 
     async def _stream_response(self, endpoint: CopilotEndpoint, url: str, body: dict, headers: dict,
                                 model: str, api_type: str, start_time: float,
@@ -3690,14 +3738,20 @@ class CopilotProxy:
                         except Exception:
                             pass
 
+        # X-Request-Id / OpenAI-Request-Id: Codex-rs reads these headers even
+        # when the SSE body never reaches the client (e.g. upstream 5xx during
+        # header phase). Set them on the HTTP response envelope so a Codex
+        # user's error surfaces the ID one way or another.
+        response_headers = {
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+        response_headers.update(_request_id_response_headers(request_id))
         return _LifecycleStreamingResponse(
             _LifecycleAsyncIterator(stream_generator(), release_abandoned_request),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            }
+            headers=response_headers,
         )
 
     def get_stats(self) -> dict:
@@ -4058,6 +4112,32 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Databricks Claude Proxy (Native Anthropic)", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def _inject_request_id_middleware(request: Request, call_next):
+    """Ensure every response carries ``X-Request-Id`` / ``OpenAI-Request-Id``.
+
+    Handlers that already generate a ``request_id`` (currently the OpenAI-style
+    /v1/responses and /v1/chat/completions entry points) stash it on
+    ``request.state.request_id`` right after generation; the middleware picks
+    it up after the handler returns and adds the header to whatever response
+    the handler produced — including FastAPI's default HTTPException JSON.
+    If no handler set one, we honour an inbound ``X-Request-Id`` (common when
+    an upstream proxy/ingress already assigned one) or synthesise a fresh id
+    so every response gets a traceable value.
+    """
+    inbound = request.headers.get("x-request-id") or request.headers.get("openai-request-id")
+    if inbound:
+        request.state.request_id = inbound
+    response = await call_next(request)
+    rid = getattr(request.state, "request_id", None) or inbound
+    if rid:
+        # Do NOT overwrite if the handler-generated response already set one;
+        # a handler-set id is authoritative (it's the one the log line quotes).
+        response.headers.setdefault("X-Request-Id", rid)
+        response.headers.setdefault("OpenAI-Request-Id", rid)
+    return response
 
 
 MAX_REQUEST_SIZE = 4 * 1024 * 1024  # Databricks 4MB 上游硬限制（压缩后仍超才 413）
@@ -4886,7 +4966,14 @@ async def responses_get_unsupported(request: Request, tail: Optional[str] = None
 
 @app.post("/v1/responses")
 async def responses(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
-    request_id = f"req_{uuid.uuid4().hex[:8]}"
+    # Honour inbound request id when the upstream proxy / ingress already
+    # assigned one so log correlation survives an extra hop.
+    request_id = (
+        request.headers.get("x-request-id")
+        or request.headers.get("openai-request-id")
+        or f"req_{uuid.uuid4().hex[:8]}"
+    )
+    request.state.request_id = request_id
     if not (azure_proxy or copilot_proxy):
         raise HTTPException(status_code=404, detail={"error": {"message": "No OpenAI-style provider (Azure / Copilot) configured"}})
 
@@ -4932,7 +5019,14 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
-    request_id = f"req_{uuid.uuid4().hex[:8]}"
+    # Honour inbound request id when the upstream proxy / ingress already
+    # assigned one so log correlation survives an extra hop.
+    request_id = (
+        request.headers.get("x-request-id")
+        or request.headers.get("openai-request-id")
+        or f"req_{uuid.uuid4().hex[:8]}"
+    )
+    request.state.request_id = request_id
     if not (azure_proxy or copilot_proxy):
         raise HTTPException(status_code=404, detail={"error": {"message": "No OpenAI-style provider (Azure / Copilot) configured"}})
 
