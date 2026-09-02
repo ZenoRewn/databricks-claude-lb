@@ -273,6 +273,77 @@ def _sse_terminal_from_upstream_detail(api_type: str, upstream_detail: dict) -> 
     )
 
 
+def _escape_label(value: str) -> str:
+    """Escape a Prometheus label value per the exposition format.
+
+    Only backslash, double-quote, and newline require escaping; every other byte
+    is passed through. Model names in this project are ASCII (e.g. ``gpt-5-codex``),
+    so this is defensive — a stray double-quote in an api_type or model must never
+    corrupt the /metrics output.
+    """
+    return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+
+
+# Terminal events we accept as valid completion for the Responses API. Any of them
+# indicates upstream deliberately ended the response; only `response.completed`
+# additionally carries the final usage.
+_RESPONSES_TERMINAL_EVENTS = frozenset(
+    {"response.completed", "response.failed", "response.incomplete"}
+)
+
+
+def _parse_sse_event_block(event_block: str) -> tuple[Optional[str], Optional[dict], bool]:
+    """Parse one SSE event block into (event_name, data_json, is_chat_done).
+
+    SSE (per WHATWG) allows the terminal event to be signalled either by the
+    ``event:`` header line or by an in-payload ``type`` field. GHCP's Responses
+    stream has been observed to use both variants across model releases:
+
+      * ``event: response.completed\\ndata: {"id":"...","object":"response",...}``
+        (no ``type`` field in the payload)
+      * ``data: {"type":"response.completed", "response": {...}}``
+        (no ``event:`` header line)
+
+    Reading only the second form is what let "silent completion" streams register
+    as truncation. This helper returns whichever form was present so the caller
+    can OR them together.
+
+    ``data:`` lines may repeat within one event (SSE line concatenation). We join
+    them with ``\\n`` before ``json.loads`` for robustness, though GHCP has never
+    been observed doing this in practice.
+
+    Returns ``(None, None, False)`` when the block is empty / carries only
+    comments.
+    """
+    event_name: Optional[str] = None
+    data_lines: list[str] = []
+    is_chat_done = False
+    for raw in event_block.split("\n"):
+        line = raw.rstrip("\r")
+        if not line or line.startswith(":"):
+            continue
+        if line.startswith("event:"):
+            event_name = line[len("event:"):].strip() or None
+        elif line.startswith("data:"):
+            payload = line[len("data:"):]
+            if payload.startswith(" "):
+                payload = payload[1:]
+            if payload == "[DONE]":
+                is_chat_done = True
+            else:
+                data_lines.append(payload)
+    data_json: Optional[dict] = None
+    if data_lines:
+        joined = "\n".join(data_lines)
+        try:
+            parsed = json.loads(joined)
+            if isinstance(parsed, dict):
+                data_json = parsed
+        except Exception:  # noqa: BLE001 - malformed events are ignored (best-effort parse)
+            data_json = None
+    return event_name, data_json, is_chat_done
+
+
 # ==================== 模型名称映射 ====================
 
 DATABRICKS_MODELS = {
@@ -2082,11 +2153,15 @@ class AzureOpenAIProxy:
             #   - Responses API : an SSE event whose `type` is `response.completed`
             #                     (also treat `response.failed`/`response.incomplete`
             #                     as valid terminals — they are still upstream telling
-            #                     us the response ended deliberately).
+            #                     us the response ended deliberately). Accepted from
+            #                     either the SSE `event:` header or the payload `type`.
             #   - Chat API      : `data: [DONE]` sentinel.
             # If upstream closes the SSE without any of these, that is silent
             # truncation and clients see "stream closed before response.completed".
             saw_completion = False
+            chunks_yielded_count = 0
+            first_event_name: Optional[str] = None
+            last_event_name: Optional[str] = None
 
             HEARTBEAT = b": keep-alive\n\n"
 
@@ -2173,37 +2248,45 @@ class AzureOpenAIProxy:
                         chunk = payload
                         yield chunk
                         sent_any_chunk = True
+                        chunks_yielded_count += 1
                         try:
                             buffer += chunk.decode("utf-8", errors="ignore")
                             while "\n\n" in buffer:
                                 event_str, buffer = buffer.split("\n\n", 1)
-                                for line in event_str.split("\n"):
-                                    if not line.startswith("data: "):
-                                        continue
-                                    if line.strip() == "data: [DONE]":
-                                        if api_type != "responses":
-                                            saw_completion = True
-                                        continue
-                                    data = json.loads(line[6:])
-                                    if api_type == "responses":
-                                        ev_type = data.get("type")
-                                        if ev_type in (
-                                            "response.completed",
-                                            "response.failed",
-                                            "response.incomplete",
-                                        ):
-                                            saw_completion = True
-                                        if ev_type == "response.completed":
-                                            usage = data.get("response", {}).get("usage", {})
-                                            input_tokens = usage.get("input_tokens", 0)
-                                            output_tokens = usage.get("output_tokens", 0)
-                                            cache_read_tokens = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
-                                    else:
-                                        usage = data.get("usage")
-                                        if usage:
-                                            input_tokens = usage.get("prompt_tokens", 0)
-                                            output_tokens = usage.get("completion_tokens", 0)
-                                            cache_read_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+                                event_name, data_json, is_chat_done = _parse_sse_event_block(event_str)
+                                if event_name:
+                                    if first_event_name is None:
+                                        first_event_name = event_name
+                                    last_event_name = event_name
+                                elif isinstance(data_json, dict) and data_json.get("type"):
+                                    payload_type = data_json.get("type")
+                                    if first_event_name is None:
+                                        first_event_name = payload_type
+                                    last_event_name = payload_type
+                                if is_chat_done and api_type != "responses":
+                                    saw_completion = True
+                                if api_type == "responses":
+                                    ev_type = (data_json or {}).get("type") if isinstance(data_json, dict) else None
+                                    terminal_name = event_name or ev_type
+                                    if terminal_name in _RESPONSES_TERMINAL_EVENTS:
+                                        saw_completion = True
+                                    if terminal_name == "response.completed" and isinstance(data_json, dict):
+                                        usage = (data_json.get("response") or {}).get("usage") or {}
+                                        input_tokens = usage.get("input_tokens", 0) or input_tokens
+                                        output_tokens = usage.get("output_tokens", 0) or output_tokens
+                                        cache_read_tokens = (
+                                            (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
+                                            or cache_read_tokens
+                                        )
+                                elif isinstance(data_json, dict):
+                                    usage = data_json.get("usage")
+                                    if usage:
+                                        input_tokens = usage.get("prompt_tokens", 0) or input_tokens
+                                        output_tokens = usage.get("completion_tokens", 0) or output_tokens
+                                        cache_read_tokens = (
+                                            (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+                                            or cache_read_tokens
+                                        )
                                 if len(buffer) > 65536:
                                     buffer = ""
                         except Exception:
@@ -2217,8 +2300,10 @@ class AzureOpenAIProxy:
                         elapsed_trunc = time.time() - start_time
                         logger.error(
                             "[Azure] upstream closed stream on %s without terminal "
-                            "event: api_type=%s model=%s elapsed=%.1fs",
+                            "event: api_type=%s model=%s elapsed=%.1fs "
+                            "chunks_yielded=%d first_event=%s last_event=%s",
                             current_endpoint.name, api_type, model, elapsed_trunc,
+                            chunks_yielded_count, first_event_name, last_event_name,
                         )
                         await end_current_request(success=False)
                         if api_type == "responses":
@@ -2411,7 +2496,17 @@ class CopilotProxy:
     POOL_MAX_CONNECTIONS = int(os.getenv("COPILOT_POOL_MAX_CONNECTIONS", "500"))
     POOL_MAX_KEEPALIVE = int(os.getenv("COPILOT_POOL_MAX_KEEPALIVE", "200"))
     POOL_KEEPALIVE_EXPIRY = float(os.getenv("COPILOT_POOL_KEEPALIVE_EXPIRY", "30"))
-    POOL_READ_TIMEOUT = float(os.getenv("COPILOT_POOL_READ_TIMEOUT", "300"))
+    # read=None (the default) keeps parity with Databricks/Azure clients: a long
+    # thinking phase from GHCP can legitimately go many minutes with no bytes, and
+    # a global read timeout would kill it. Upstream stalls that never resolve are
+    # still bounded by the connection_monitor_loop, downstream disconnect_checker,
+    # and the client's own read deadline. Set COPILOT_POOL_READ_TIMEOUT=<seconds>
+    # to force a finite cap only if you actively need one.
+    _read_env = os.getenv("COPILOT_POOL_READ_TIMEOUT", "").strip().lower()
+    POOL_READ_TIMEOUT: Optional[float] = (
+        None if _read_env in ("", "none", "0", "-1") else float(_read_env)
+    )
+    del _read_env
     POOL_ACQUIRE_TIMEOUT = float(os.getenv("COPILOT_POOL_ACQUIRE_TIMEOUT", "60"))
 
     def __init__(self, load_balancer: LoadBalancer, api_key: str):
@@ -2452,6 +2547,26 @@ class CopilotProxy:
         # `[DONE]` for chat/completions). This surfaces silent upstream truncation
         # that clients previously observed only as "stream closed before completion".
         self.stream_truncated_no_completion_total = 0
+        # Per-(model, api_type) breakdown of the same signal — lets scrapers tell
+        # "Codex Responses is truncating" apart from "gpt-4o chat is truncating"
+        # without adding another log-parsing rule.
+        self.stream_truncated_no_completion_by_model: dict[tuple[str, str], int] = {}
+        # httpx.ReadTimeout landing on the Copilot pump (independent from generic
+        # network errors). With read=None this should stay at 0 — a rising value
+        # indicates COPILOT_POOL_READ_TIMEOUT was explicitly capped and started
+        # tripping on long thinking.
+        self.stream_read_timeout_total = 0
+        # Times the internal `queue.put` from the pump task had to wait for the
+        # consumer to drain (queue.full at moment of put). Useful when tuning
+        # `queue = asyncio.Queue(maxsize=64)` under sustained bursts.
+        self.stream_pump_queue_full_events_total = 0
+
+    def _record_truncation(self, model: str, api_type: str) -> None:
+        """Bucket a silent-truncation event by (model, api_type) for Prometheus."""
+        key = ((model or "unknown").lower(), api_type)
+        self.stream_truncated_no_completion_by_model[key] = (
+            self.stream_truncated_no_completion_by_model.get(key, 0) + 1
+        )
 
     def verify_api_key(self, key: str) -> bool:
         return key == self.api_key
@@ -3083,6 +3198,17 @@ class CopilotProxy:
             output_tokens = 0
             cache_read_tokens = 0
             sent_any_chunk = False
+            # Track whether we ever saw the terminal event we expected. Mirrors the
+            # Azure proxy's `saw_completion`. Historically missing here, which caused
+            # `UnboundLocalError` at the truncation check below when a stream produced
+            # chunks but no parseable terminal marker — the crash then closed the
+            # response with no `response.failed` event, which is exactly the client-side
+            # symptom "stream closed before response.completed".
+            saw_completion = False
+            # Diagnostic context for the truncation / error branches.
+            chunks_yielded_count = 0
+            first_event_name: Optional[str] = None
+            last_event_name: Optional[str] = None
             HEARTBEAT = b": keep-alive\n\n"
 
             for attempt in range(max_retries):
@@ -3095,6 +3221,9 @@ class CopilotProxy:
                         proxy_self.client.send(req, stream=True), HEARTBEAT
                     ):
                         if kind == "heartbeat":
+                            # Refresh the registry timestamp so upstream_idle metric
+                            # reflects "still waiting for headers", not "silent since T0".
+                            proxy_self._touch_stream(connection_id)
                             yield payload
                         else:
                             response = payload
@@ -3163,6 +3292,12 @@ class CopilotProxy:
                     async def _pump(resp):
                         try:
                             async for c in resp.aiter_bytes():
+                                # Observe backpressure: a full queue means the consumer
+                                # (the yield loop, ultimately the downstream ASGI send)
+                                # cannot keep up with upstream. Counting the event is
+                                # cheap and lets `queue.maxsize` be tuned with data.
+                                if queue.full():
+                                    proxy_self.stream_pump_queue_full_events_total += 1
                                 await queue.put(("chunk", c))
                             await queue.put(("eof", None))
                         except asyncio.CancelledError:
@@ -3179,6 +3314,10 @@ class CopilotProxy:
                         try:
                             kind, payload = await asyncio.wait_for(queue.get(), timeout=STREAM_HEARTBEAT_INTERVAL)
                         except asyncio.TimeoutError:
+                            # Refresh the registry timestamp so the monitor's
+                            # "upstream idle" gauge tracks reality, then keep the
+                            # downstream connection warm with an SSE comment.
+                            proxy_self._touch_stream(connection_id)
                             yield HEARTBEAT
                             continue
 
@@ -3192,41 +3331,48 @@ class CopilotProxy:
                         proxy_self._touch_stream(connection_id)
                         yield chunk
                         sent_any_chunk = True
+                        chunks_yielded_count += 1
                         try:
                             buffer += chunk.decode("utf-8", errors="ignore")
                             while "\n\n" in buffer:
                                 event_str, buffer = buffer.split("\n\n", 1)
-                                for line in event_str.split("\n"):
-                                    if not line.startswith("data: "):
-                                        continue
-                                    if line.strip() == "data: [DONE]":
-                                        # Chat/completions terminal marker.
-                                        if api_type != "responses":
-                                            saw_completion = True
-                                        continue
-                                    try:
-                                        data = json.loads(line[6:])
-                                    except Exception:
-                                        continue
-                                    if api_type == "responses":
-                                        ev_type = data.get("type")
-                                        if ev_type in (
-                                            "response.completed",
-                                            "response.failed",
-                                            "response.incomplete",
-                                        ):
-                                            saw_completion = True
-                                        if ev_type == "response.completed":
-                                            usage = data.get("response", {}).get("usage", {}) or {}
-                                            input_tokens = usage.get("input_tokens", 0)
-                                            output_tokens = usage.get("output_tokens", 0)
-                                            cache_read_tokens = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
-                                    else:
-                                        usage = data.get("usage")
-                                        if usage:
-                                            input_tokens = usage.get("prompt_tokens", 0)
-                                            output_tokens = usage.get("completion_tokens", 0)
-                                            cache_read_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+                                event_name, data_json, is_chat_done = _parse_sse_event_block(event_str)
+                                # Track first/last named event for diagnostics on truncation.
+                                if event_name:
+                                    if first_event_name is None:
+                                        first_event_name = event_name
+                                    last_event_name = event_name
+                                elif isinstance(data_json, dict) and data_json.get("type"):
+                                    payload_type = data_json.get("type")
+                                    if first_event_name is None:
+                                        first_event_name = payload_type
+                                    last_event_name = payload_type
+                                if is_chat_done and api_type != "responses":
+                                    saw_completion = True
+                                if api_type == "responses":
+                                    # Accept the terminal signal in either shape:
+                                    # `event:` header or in-payload `type` field.
+                                    ev_type = (data_json or {}).get("type") if isinstance(data_json, dict) else None
+                                    terminal_name = event_name or ev_type
+                                    if terminal_name in _RESPONSES_TERMINAL_EVENTS:
+                                        saw_completion = True
+                                    if terminal_name == "response.completed" and isinstance(data_json, dict):
+                                        usage = (data_json.get("response") or {}).get("usage") or {}
+                                        input_tokens = usage.get("input_tokens", 0) or input_tokens
+                                        output_tokens = usage.get("output_tokens", 0) or output_tokens
+                                        cache_read_tokens = (
+                                            (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
+                                            or cache_read_tokens
+                                        )
+                                elif isinstance(data_json, dict):
+                                    usage = data_json.get("usage")
+                                    if usage:
+                                        input_tokens = usage.get("prompt_tokens", 0) or input_tokens
+                                        output_tokens = usage.get("completion_tokens", 0) or output_tokens
+                                        cache_read_tokens = (
+                                            (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+                                            or cache_read_tokens
+                                        )
                                 if len(buffer) > 65536:
                                     buffer = ""
                         except Exception:
@@ -3243,12 +3389,15 @@ class CopilotProxy:
                     upstream_truncated = sent_any_chunk and not saw_completion
                     if upstream_truncated:
                         proxy_self.stream_truncated_no_completion_total += 1
+                        proxy_self._record_truncation(model, api_type)
                         elapsed = time.time() - start_time
                         logger.error(
                             "[Copilot] upstream closed stream on %s without terminal "
-                            "event: api_type=%s model=%s elapsed=%.1fs input_bytes=%d "
-                            "has_image=%s (likely upstream timeout or size limit)",
-                            current_endpoint.name, api_type, model, elapsed,
+                            "event: connection_id=%s api_type=%s model=%s elapsed=%.1fs "
+                            "chunks_yielded=%d first_event=%s last_event=%s "
+                            "input_bytes=%d has_image=%s (likely upstream timeout or size limit)",
+                            current_endpoint.name, connection_id, api_type, model, elapsed,
+                            chunks_yielded_count, first_event_name, last_event_name,
                             len(json.dumps(body, ensure_ascii=False, default=str)),
                             proxy_self._has_image(body),
                         )
@@ -3323,7 +3472,16 @@ class CopilotProxy:
                 except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
                         httpx.ConnectError, httpx.RemoteProtocolError,
                         httpx.ReadError, httpx.WriteError) as e:
-                    error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
+                    if isinstance(e, httpx.ReadTimeout):
+                        # Independent counter so `read=None` regressions become
+                        # visible before users notice. With the default POOL_READ_TIMEOUT
+                        # of None this should stay at 0.
+                        proxy_self.stream_read_timeout_total += 1
+                    error_detail = (
+                        f"{type(e).__name__}: {str(e) or 'Unknown error'} "
+                        f"(connection_id={connection_id} chunks_yielded={chunks_yielded_count} "
+                        f"first_event={first_event_name} last_event={last_event_name})"
+                    )
                     logger.error(f"[Copilot] stream network error on {current_endpoint.name}: {error_detail}")
                     await end_current_request(success=False)
 
@@ -3422,6 +3580,12 @@ class CopilotProxy:
                 "pool_timeout_saturated_total": self.pool_timeout_saturated_total,
                 "pool_timeout_upstream_stall_total": self.pool_timeout_upstream_stall_total,
                 "stream_truncated_no_completion_total": self.stream_truncated_no_completion_total,
+                "stream_truncated_no_completion_by_model": {
+                    f"{model}|{api_type}": count
+                    for (model, api_type), count in self.stream_truncated_no_completion_by_model.items()
+                },
+                "stream_read_timeout_total": self.stream_read_timeout_total,
+                "stream_pump_queue_full_events_total": self.stream_pump_queue_full_events_total,
                 "stream_high_watermark": COPILOT_STREAM_HIGH_WATERMARK,
                 "stream_connections_active": len(self._stream_connections),
                 "utilization_pct": round(total_active / self.POOL_MAX_CONNECTIONS * 100, 1) if self.POOL_MAX_CONNECTIONS > 0 else 0,
@@ -4462,8 +4626,21 @@ def _verify_optional_models_auth(request: Request, x_api_key: Optional[str] = No
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
 
 
+_DISCONNECT_CHECKER_WARNED = {"parsed": False, "fallback": False}
+
+
 def _stream_disconnect_checker(request: Request, stream: bool):
-    """Use Request.is_disconnected only when it cannot race Starlette's receive listener."""
+    """Use Request.is_disconnected only when it cannot race Starlette's receive listener.
+
+    ASGI spec 2.4 clarified how `receive` co-existence works with
+    `Request.is_disconnected`; earlier versions would race with Starlette's own
+    receive listener and corrupt one another. When the server reports an older
+    version we return ``None`` so the Copilot connection monitor falls back to
+    "owner task finished" as its only disconnect signal — the safety net still
+    catches the common case, but latency to detect a client hangup grows to the
+    order of ``COPILOT_STREAM_MONITOR_INTERVAL``. Warn once so operators know
+    they lost the fast path (e.g. after a uvicorn downgrade).
+    """
     if not stream:
         return None
     try:
@@ -4471,8 +4648,25 @@ def _stream_disconnect_checker(request: Request, stream: bool):
             int(part) for part in request.scope.get("asgi", {}).get("spec_version", "2.0").split(".")
         )
     except (TypeError, ValueError):
+        if not _DISCONNECT_CHECKER_WARNED["parsed"]:
+            logger.warning(
+                "[Copilot] ASGI spec_version missing/unparseable in scope; "
+                "downstream disconnect fast-path disabled. Streams will only "
+                "be reclaimed after the owner task completes."
+            )
+            _DISCONNECT_CHECKER_WARNED["parsed"] = True
         return None
-    return request.is_disconnected if spec_version >= (2, 4) else None
+    if spec_version < (2, 4):
+        if not _DISCONNECT_CHECKER_WARNED["fallback"]:
+            logger.warning(
+                "[Copilot] ASGI spec_version=%s < 2.4; Request.is_disconnected "
+                "would race Starlette's receive listener. Fast disconnect path "
+                "disabled; monitor will rely on owner-task completion only.",
+                ".".join(str(p) for p in spec_version),
+            )
+            _DISCONNECT_CHECKER_WARNED["fallback"] = True
+        return None
+    return request.is_disconnected
 
 
 @app.get("/models")
@@ -4746,6 +4940,30 @@ async def metrics():
              "Streams closed by upstream without the expected terminal event",
              "counter",
              [f"copilot_stream_truncated_no_completion_total {copilot_proxy.stream_truncated_no_completion_total}"])
+        # Per (model, api_type) breakdown of the same signal.
+        truncated_by_model_samples = [
+            f'copilot_stream_truncated_no_completion_by_model_total'
+            f'{{model="{_escape_label(model)}",api_type="{_escape_label(api_type)}"}} {count}'
+            for (model, api_type), count in copilot_proxy.stream_truncated_no_completion_by_model.items()
+        ]
+        emit("copilot_stream_truncated_no_completion_by_model_total",
+             "Silent-truncation events broken down by (model, api_type)",
+             "counter", truncated_by_model_samples)
+        emit("copilot_stream_read_timeout_total",
+             "httpx.ReadTimeout events hitting the Copilot stream pump. With POOL_READ_TIMEOUT=None this stays at 0.",
+             "counter",
+             [f"copilot_stream_read_timeout_total {copilot_proxy.stream_read_timeout_total}"])
+        emit("copilot_stream_pump_queue_full_events_total",
+             "Times the pump task hit a full internal queue before put; useful for tuning maxsize.",
+             "counter",
+             [f"copilot_stream_pump_queue_full_events_total {copilot_proxy.stream_pump_queue_full_events_total}"])
+        # Read timeout is either None (unlimited) or a float; export as a numeric gauge
+        # with -1 sentinel for unlimited so PromQL can filter without a string parse.
+        _rt = copilot_proxy.POOL_READ_TIMEOUT
+        emit("copilot_pool_read_timeout_seconds",
+             "Configured httpx per-connection read timeout (-1 sentinel means unlimited / None)",
+             "gauge",
+             [f"copilot_pool_read_timeout_seconds {-1 if _rt is None else _rt}"])
         emit("copilot_stream_high_watermark", "Configured active-request high watermark for safety cleanup", "gauge",
              [f"copilot_stream_high_watermark {COPILOT_STREAM_HIGH_WATERMARK}"])
 
