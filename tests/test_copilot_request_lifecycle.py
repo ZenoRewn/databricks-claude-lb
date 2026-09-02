@@ -496,6 +496,87 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(load_balancer.on_request_end.await_count, 1)
         self.assertEqual(proxy._stream_connections, {})
 
+    async def test_stream_end_log_carries_request_id_and_outcome(self):
+        """Every Codex stream must emit exactly one `[Copilot stream_end]` line
+        with a stable set of fields, so post-mortem doesn't require /metrics.
+
+        Verifies:
+          * INFO log for `outcome=completed` on a happy Responses stream
+          * ERROR log for `outcome=truncated` on a stream that never emits
+            `response.completed`
+          * `req=<id>` field carries the request_id the caller passed in
+          * Key fields (`endpoint`, `model`, `api_type`, `elapsed`, `chunks`,
+            `first_event`, `last_event`, `saw_completion`) are all present
+        """
+        import logging
+        # Case A: clean completion with event: header form (exercises new parser).
+        clean_upstream = _StreamResponse([
+            b"event: response.created\ndata: {\"id\":\"r_1\"}\n\n",
+            b"event: response.completed\ndata: {\"response\":{\"usage\":"
+            b"{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
+        ])
+        proxy, load_balancer, endpoint = self._make_proxy(_StreamClient([clean_upstream]))
+        await load_balancer.on_request_start(endpoint)
+
+        with self.assertLogs("main", level="INFO") as log_ctx_ok:
+            response = await proxy._stream_response(
+                endpoint,
+                "https://example.test/responses",
+                {"model": "gpt-test", "input": "hi"},
+                {},
+                "gpt-test",
+                "responses",
+                main.time.time(),
+                request_id="req_smoketest",
+            )
+            _ = b"".join([c async for c in response.body_iterator])
+
+        end_lines = [r for r in log_ctx_ok.records
+                     if "[Copilot stream_end]" in r.getMessage()]
+        self.assertEqual(len(end_lines), 1, "exactly one stream_end log per request")
+        msg = end_lines[0].getMessage()
+        self.assertIn("req=req_smoketest", msg)
+        self.assertIn("outcome=completed", msg)
+        self.assertIn("api_type=responses", msg)
+        self.assertIn("model=gpt-test", msg)
+        self.assertIn("endpoint=copilot-test", msg)
+        self.assertIn("saw_completion=True", msg)
+        self.assertIn("first_event=response.created", msg)
+        self.assertIn("last_event=response.completed", msg)
+        self.assertEqual(end_lines[0].levelno, logging.INFO)
+
+        # Case B: truncation → ERROR level, outcome=truncated.
+        trunc_upstream = _StreamResponse([b"data: {\"type\":\"response.output_text.delta\"}\n\n"])
+        proxy2, lb2, ep2 = self._make_proxy(_StreamClient([trunc_upstream]))
+        await lb2.on_request_start(ep2)
+        with self.assertLogs("main", level="INFO") as log_ctx_bad:
+            response = await proxy2._stream_response(
+                ep2,
+                "https://example.test/responses",
+                {"model": "gpt-test", "input": "hi"},
+                {},
+                "gpt-test",
+                "responses",
+                main.time.time(),
+                request_id="req_trunc",
+            )
+            body = b"".join([c async for c in response.body_iterator])
+
+        # SSE body must carry the request_id in error.metadata so client-side
+        # error correlates back to the log line.
+        self.assertIn(b'"request_id": "req_trunc"', body)
+        self.assertIn(b'"endpoint": "copilot-test"', body)
+
+        end_lines = [r for r in log_ctx_bad.records
+                     if "[Copilot stream_end]" in r.getMessage()]
+        self.assertEqual(len(end_lines), 1)
+        msg = end_lines[0].getMessage()
+        self.assertIn("req=req_trunc", msg)
+        self.assertIn("outcome=truncated", msg)
+        self.assertIn("saw_completion=False", msg)
+        self.assertIn("sent_any_chunk=True", msg)
+        self.assertEqual(end_lines[0].levelno, logging.ERROR)
+
     async def test_stream_responses_missing_completion_event_emits_upstream_truncated(self):
         """P0 regression: `saw_completion` used to be uninitialized on the Copilot
         path. When upstream sent chunks but never emitted `response.completed`,

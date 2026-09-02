@@ -233,7 +233,8 @@ class _LifecycleStreamingResponse(StreamingResponse):
 
 # ==================== SSE 终止事件辅助 ====================
 
-def _sse_terminal_error(api_type: str, code: str, message: str) -> bytes:
+def _sse_terminal_error(api_type: str, code: str, message: str,
+                        metadata: Optional[dict] = None) -> bytes:
     """Emit a properly formatted terminal SSE error for the target API shape.
 
     Codex, the OpenAI JS SDK, and other Responses-API clients ``serde_json`` the
@@ -244,33 +245,67 @@ def _sse_terminal_error(api_type: str, code: str, message: str) -> bytes:
 
       - ``responses`` -> ``data: {"type":"response.failed", ...}`` (no ``[DONE]``)
       - ``chat``      -> ``data: {"error": ...}`` followed by ``data: [DONE]``
+
+    ``metadata`` (optional) is embedded as ``error.metadata`` so the client-side
+    error surfaces a ``request_id`` / ``endpoint`` that the operator can grep
+    server logs by. Codex's own error message doesn't necessarily print it, but
+    a support engineer reading the SSE body directly gets an instant pointer.
     """
+    error_body: dict = {"code": code, "message": message}
+    if metadata:
+        error_body["metadata"] = metadata
     if api_type == "responses":
-        payload = {
-            "type": "response.failed",
-            "response": {"error": {"code": code, "message": message}},
-        }
+        payload = {"type": "response.failed", "response": {"error": error_body}}
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
-    payload = {"error": {"code": code, "message": message}}
+    payload = {"error": error_body}
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\ndata: [DONE]\n\n".encode()
 
 
-def _sse_terminal_from_upstream_detail(api_type: str, upstream_detail: dict) -> bytes:
+def _sse_terminal_from_upstream_detail(api_type: str, upstream_detail: dict,
+                                       metadata: Optional[dict] = None) -> bytes:
     """Emit terminal SSE preserving an upstream-provided error envelope.
 
     Some paths already produced an ``upstream_detail`` dict shaped as
     ``{"error": {...}}`` (via ``_build_upstream_error_detail``). For the
     Responses API we wrap it inside a ``response.failed`` event; for Chat we
-    forward it verbatim followed by ``[DONE]``.
+    forward it verbatim followed by ``[DONE]``. ``metadata`` (optional) merges
+    into ``error.metadata`` — see ``_sse_terminal_error`` for rationale.
     """
     upstream_detail = upstream_detail or {}
+    error = dict(upstream_detail.get("error") or {"message": "upstream error"})
+    if metadata:
+        merged = dict(error.get("metadata") or {})
+        merged.update(metadata)
+        error["metadata"] = merged
     if api_type == "responses":
-        error = upstream_detail.get("error") or {"message": "upstream error"}
         payload = {"type": "response.failed", "response": {"error": error}}
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
-    return (
-        f"data: {json.dumps(upstream_detail, ensure_ascii=False)}\n\ndata: [DONE]\n\n".encode()
-    )
+    payload_dict = {"error": error}
+    return f"data: {json.dumps(payload_dict, ensure_ascii=False)}\n\ndata: [DONE]\n\n".encode()
+
+
+def _log_copilot_request_end(*, outcome: str, level: int, request_id: Optional[str],
+                             endpoint_name: str, model: str, api_type: str, elapsed: float,
+                             **extra) -> None:
+    """One-line structured request-end log for Copilot (stream + non-stream share it).
+
+    Grep-friendly ``key=value`` shape so a support engineer can pivot on any
+    field (`req=<id>`, `outcome=truncated`, `endpoint=gh-account-1`,
+    `model=gpt-5-codex`) without touching /metrics. Streaming path enriches
+    with the loop-local diagnostics via ``**extra``.
+    """
+    fields = {
+        "req": request_id or "-",
+        "endpoint": endpoint_name,
+        "model": model,
+        "api_type": api_type,
+        "outcome": outcome,
+        "elapsed": f"{elapsed:.3f}s",
+    }
+    fields.update(extra)
+    parts = " ".join(f"{k}={v}" for k, v in fields.items())
+    logger.log(level, f"[Copilot request_end] {parts}",
+               extra={"kind": "copilot_request_end", **fields})
 
 
 def _escape_label(value: str) -> str:
@@ -2985,15 +3020,22 @@ class CopilotProxy:
 
     # ---- 代理入口 ----
 
-    async def proxy_chat_completions(self, body: dict, stream: bool = False, disconnect_checker=None):
+    async def proxy_chat_completions(self, body: dict, stream: bool = False, disconnect_checker=None,
+                                     request_id: Optional[str] = None):
         """代理 GitHub Copilot Chat Completions API"""
-        return await self._proxy(body, stream, api_type="chat", disconnect_checker=disconnect_checker)
+        return await self._proxy(body, stream, api_type="chat",
+                                 disconnect_checker=disconnect_checker,
+                                 request_id=request_id)
 
-    async def proxy_responses(self, body: dict, stream: bool = False, disconnect_checker=None):
+    async def proxy_responses(self, body: dict, stream: bool = False, disconnect_checker=None,
+                              request_id: Optional[str] = None):
         """代理 GitHub Copilot Responses API（用于 GPT-5 系列）"""
-        return await self._proxy(body, stream, api_type="responses", disconnect_checker=disconnect_checker)
+        return await self._proxy(body, stream, api_type="responses",
+                                 disconnect_checker=disconnect_checker,
+                                 request_id=request_id)
 
-    async def _proxy(self, body: dict, stream: bool, api_type: str, disconnect_checker=None):
+    async def _proxy(self, body: dict, stream: bool, api_type: str, disconnect_checker=None,
+                     request_id: Optional[str] = None):
         model = body.get("model", "unknown")
         max_retries = 3
         last_error: Optional[Exception] = None
@@ -3049,10 +3091,12 @@ class CopilotProxy:
                     return await self._stream_response(
                         endpoint, url, body, headers, model, api_type, start_time,
                         disconnect_checker=disconnect_checker,
+                        request_id=request_id,
                     )
                 else:
                     result = await self._normal_request(
-                        endpoint, url, body, headers, model, api_type, start_time
+                        endpoint, url, body, headers, model, api_type, start_time,
+                        request_id=request_id,
                     )
                     await end_attempt(success=True)
                     return result
@@ -3132,7 +3176,8 @@ class CopilotProxy:
         raise HTTPException(status_code=503, detail={"error": {"message": f"All Copilot retries failed: {type(last_error).__name__ if last_error else 'unknown'}: {str(last_error)[:300] if last_error else ''}"}})
 
     async def _normal_request(self, endpoint: CopilotEndpoint, url: str, body: dict, headers: dict,
-                               model: str, api_type: str, start_time: float) -> JSONResponse:
+                               model: str, api_type: str, start_time: float,
+                               request_id: Optional[str] = None) -> JSONResponse:
         response = await self.client.post(url, json=body, headers=headers)
         if response.status_code >= 400:
             body_text = response.text
@@ -3152,16 +3197,64 @@ class CopilotProxy:
             cache_read_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
         self._record_usage(endpoint, model, input_tokens, output_tokens, elapsed,
                            cache_read_tokens=cache_read_tokens)
+        # Same shape as the streaming `[Copilot stream_end]`: one row per request.
+        _log_copilot_request_end(
+            outcome="completed",
+            level=logging.INFO,
+            request_id=request_id,
+            endpoint_name=endpoint.name,
+            model=model,
+            api_type=api_type,
+            elapsed=elapsed,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+        )
         return JSONResponse(content=resp_json, status_code=response.status_code)
 
     async def _stream_response(self, endpoint: CopilotEndpoint, url: str, body: dict, headers: dict,
                                 model: str, api_type: str, start_time: float,
-                                disconnect_checker=None) -> StreamingResponse:
+                                disconnect_checker=None,
+                                request_id: Optional[str] = None) -> StreamingResponse:
         """流式请求，复用 AzureOpenAIProxy._stream_response 同款 pump + heartbeat + sent_any_chunk 守卫架构"""
         proxy_self = self
         max_retries = 3
         request_lease = {"endpoint": endpoint, "active": True}
         connection_id: Optional[str] = None
+        # State shared with `release_abandoned_request` so client-disconnect logs
+        # can quote the same fields as inline terminal branches. Mutated by
+        # `stream_generator` in-place (dict is safe under closure semantics).
+        stream_state: dict = {
+            "chunks_yielded": 0,
+            "first_event": None,
+            "last_event": None,
+            "saw_completion": False,
+            "sent_any_chunk": False,
+            "attempt": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "terminal_emitted": False,   # set by _emit_stream_end so release_abandoned won't double-log
+        }
+        # Compute once so retries and log lines share a single measurement.
+        try:
+            body_bytes_size = len(json.dumps(body, ensure_ascii=False, default=str))
+        except Exception:
+            body_bytes_size = -1
+        has_image_cached = self._has_image(body)
+
+        def _sse_error_metadata() -> dict:
+            """Build the `error.metadata` block embedded in SSE terminal errors.
+
+            Client observes `request_id` + `endpoint` in its own error surface;
+            an engineer can then grep server logs for the same `req=<id>` and
+            find the matching `[Copilot stream_end] ... outcome=... first_event=...`
+            row without any /metrics scrape.
+            """
+            md = {"endpoint": request_lease["endpoint"].name}
+            if request_id:
+                md["request_id"] = request_id
+            return md
 
         async def end_current_request(success: bool, is_client_error: bool = False):
             if not request_lease["active"]:
@@ -3185,6 +3278,33 @@ class CopilotProxy:
             # Client disconnect / generator close is local, not endpoint health evidence.
             await end_current_request(success=False, is_client_error=True)
             proxy_self._unregister_stream(connection_id)
+            # Log the disconnect with the same shape as `_emit_stream_end` (so
+            # `grep 'kind=copilot_stream_end'` covers every Codex request), unless
+            # an inline terminal branch already emitted this row.
+            if not stream_state["terminal_emitted"]:
+                stream_state["terminal_emitted"] = True
+                fields = {
+                    "req": request_id or "-",
+                    "endpoint": request_lease["endpoint"].name,
+                    "model": model,
+                    "api_type": api_type,
+                    "outcome": "client_disconnect",
+                    "elapsed": f"{time.time() - start_time:.3f}s",
+                    "chunks": stream_state["chunks_yielded"],
+                    "first_event": stream_state["first_event"] or "-",
+                    "last_event": stream_state["last_event"] or "-",
+                    "saw_completion": stream_state["saw_completion"],
+                    "sent_any_chunk": stream_state["sent_any_chunk"],
+                    "attempt": stream_state["attempt"],
+                    "input_bytes": body_bytes_size,
+                    "has_image": has_image_cached,
+                    "input_tokens": stream_state["input_tokens"],
+                    "output_tokens": stream_state["output_tokens"],
+                    "connection_id": connection_id,
+                }
+                parts = " ".join(f"{k}={v}" for k, v in fields.items())
+                logger.info(f"[Copilot stream_end] {parts}",
+                            extra={"kind": "copilot_stream_end", **fields})
 
         async def stream_generator():
             nonlocal connection_id
@@ -3210,6 +3330,49 @@ class CopilotProxy:
             first_event_name: Optional[str] = None
             last_event_name: Optional[str] = None
             HEARTBEAT = b": keep-alive\n\n"
+
+            def _emit_stream_end(outcome: str, level: int, **extra):
+                """Emit exactly one structured summary log line per stream terminal.
+
+                One grep across the log by `req=<id>` (or `outcome=truncated`, or
+                `endpoint=gh-account-1`) reveals what happened to any Codex stream
+                — no /metrics scrape needed. Keys are stable and space-separated
+                so Kusto / awk / grep all cope. `stream_state` is refreshed so
+                the client-disconnect path (release_abandoned_request) can quote
+                the same fields.
+                """
+                stream_state["terminal_emitted"] = True
+                stream_state["chunks_yielded"] = chunks_yielded_count
+                stream_state["first_event"] = first_event_name
+                stream_state["last_event"] = last_event_name
+                stream_state["saw_completion"] = saw_completion
+                stream_state["sent_any_chunk"] = sent_any_chunk
+                stream_state["attempt"] = attempt
+                stream_state["input_tokens"] = input_tokens
+                stream_state["output_tokens"] = output_tokens
+                fields = {
+                    "req": request_id or "-",
+                    "endpoint": current_endpoint.name,
+                    "model": model,
+                    "api_type": api_type,
+                    "outcome": outcome,
+                    "elapsed": f"{time.time() - start_time:.3f}s",
+                    "chunks": chunks_yielded_count,
+                    "first_event": first_event_name or "-",
+                    "last_event": last_event_name or "-",
+                    "saw_completion": saw_completion,
+                    "sent_any_chunk": sent_any_chunk,
+                    "attempt": attempt,
+                    "input_bytes": body_bytes_size,
+                    "has_image": has_image_cached,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "connection_id": connection_id,
+                }
+                fields.update(extra)
+                parts = " ".join(f"{k}={v}" for k, v in fields.items())
+                logger.log(level, f"[Copilot stream_end] {parts}",
+                           extra={"kind": "copilot_stream_end", **fields})
 
             for attempt in range(max_retries):
                 response = None
@@ -3283,7 +3446,14 @@ class CopilotProxy:
                                 await start_current_request(current_endpoint)
                                 continue
 
-                        yield _sse_terminal_from_upstream_detail(api_type, upstream_detail)
+                        yield _sse_terminal_from_upstream_detail(
+                            api_type, upstream_detail, metadata=_sse_error_metadata()
+                        )
+                        _emit_stream_end(
+                            "upstream_http_error",
+                            logging.WARNING,
+                            upstream_status=response.status_code,
+                        )
                         return
 
                     # ---- 透传 + 心跳 + 后台 pump ----
@@ -3390,60 +3560,39 @@ class CopilotProxy:
                     if upstream_truncated:
                         proxy_self.stream_truncated_no_completion_total += 1
                         proxy_self._record_truncation(model, api_type)
-                        elapsed = time.time() - start_time
-                        logger.error(
-                            "[Copilot] upstream closed stream on %s without terminal "
-                            "event: connection_id=%s api_type=%s model=%s elapsed=%.1fs "
-                            "chunks_yielded=%d first_event=%s last_event=%s "
-                            "input_bytes=%d has_image=%s (likely upstream timeout or size limit)",
-                            current_endpoint.name, connection_id, api_type, model, elapsed,
-                            chunks_yielded_count, first_event_name, last_event_name,
-                            len(json.dumps(body, ensure_ascii=False, default=str)),
-                            proxy_self._has_image(body),
-                        )
                         await end_current_request(success=False)
-                        # Emit an explicit terminal SSE event so clients report a real
-                        # error instead of a silent disconnect.
-                        if api_type == "responses":
-                            fail_event = {
-                                "type": "response.failed",
-                                "response": {
-                                    "error": {
-                                        "code": "upstream_truncated",
-                                        "message": (
-                                            "Copilot upstream closed the SSE stream before "
-                                            "emitting response.completed. This usually means "
-                                            "the upstream hit a timeout or size limit."
-                                        ),
-                                    }
-                                },
-                            }
-                            yield f"data: {json.dumps(fail_event)}\n\n".encode()
-                        else:
-                            err_event = {
-                                "error": {
-                                    "code": "upstream_truncated",
-                                    "message": (
-                                        "Copilot upstream closed the SSE stream before "
-                                        "emitting [DONE]. This usually means the upstream "
-                                        "hit a timeout or size limit."
-                                    ),
-                                }
-                            }
-                            yield f"data: {json.dumps(err_event)}\n\ndata: [DONE]\n\n".encode()
+                        message_body = (
+                            "Copilot upstream closed the SSE stream before emitting "
+                            "response.completed. This usually means the upstream hit "
+                            "a timeout or size limit."
+                            if api_type == "responses"
+                            else "Copilot upstream closed the SSE stream before emitting "
+                                 "[DONE]. This usually means the upstream hit a timeout "
+                                 "or size limit."
+                        )
+                        yield _sse_terminal_error(
+                            api_type, "upstream_truncated", message_body,
+                            metadata=_sse_error_metadata(),
+                        )
+                        _emit_stream_end("truncated", logging.ERROR)
                         return
 
                     await end_current_request(success=True)
                     elapsed = time.time() - start_time
                     proxy_self._record_usage(current_endpoint, model, input_tokens, output_tokens, elapsed,
                                               cache_read_tokens=cache_read_tokens)
+                    _emit_stream_end("completed", logging.INFO,
+                                      cache_read_tokens=cache_read_tokens)
                     return
 
                 except _UnsupportedModelError as e:
                     # HTTP 200 has already started, so transparent provider fallback is
                     # impossible here. Return an explicit SSE error instead of crashing.
                     await end_current_request(success=False, is_client_error=True)
-                    yield _sse_terminal_error(api_type, "unsupported_model", str(e))
+                    yield _sse_terminal_error(api_type, "unsupported_model", str(e),
+                                              metadata=_sse_error_metadata())
+                    _emit_stream_end("unsupported_model", logging.WARNING,
+                                      reason=str(e)[:200])
                     return
                 except httpx.PoolTimeout as e:
                     proxy_self.pool_timeout_total += 1
@@ -3458,21 +3607,29 @@ class CopilotProxy:
                         if new_endpoint:
                             current_endpoint = new_endpoint
                             try:
-                                current_headers = await proxy_self._build_headers(current_endpoint, proxy_self._has_image(body))
+                                current_headers = await proxy_self._build_headers(current_endpoint, has_image_cached)
                             except Exception as he:
                                 logger.error(f"[Copilot] header build during retry failed: {he}")
-                                yield _sse_terminal_error(api_type, "upstream_header_build_failed", str(he))
+                                yield _sse_terminal_error(api_type, "upstream_header_build_failed", str(he),
+                                                          metadata=_sse_error_metadata())
+                                _emit_stream_end("header_build_failed", logging.ERROR,
+                                                  reason=str(he)[:200])
                                 return
                             current_url = f"{current_endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
                             await start_current_request(current_endpoint)
                             continue
 
-                    yield _sse_terminal_error(api_type, "upstream_connect_stalled", error_detail)
+                    yield _sse_terminal_error(api_type, "upstream_connect_stalled", error_detail,
+                                              metadata=_sse_error_metadata())
+                    _emit_stream_end("pool_stall", logging.WARNING,
+                                      pool_saturated=proxy_self.pool_timeout_saturated_total,
+                                      upstream_stall=proxy_self.pool_timeout_upstream_stall_total)
                     return
                 except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
                         httpx.ConnectError, httpx.RemoteProtocolError,
                         httpx.ReadError, httpx.WriteError) as e:
-                    if isinstance(e, httpx.ReadTimeout):
+                    is_read_timeout = isinstance(e, httpx.ReadTimeout)
+                    if is_read_timeout:
                         # Independent counter so `read=None` regressions become
                         # visible before users notice. With the default POOL_READ_TIMEOUT
                         # of None this should stay at 0.
@@ -3491,23 +3648,33 @@ class CopilotProxy:
                         if new_endpoint:
                             current_endpoint = new_endpoint
                             try:
-                                current_headers = await proxy_self._build_headers(current_endpoint, proxy_self._has_image(body))
+                                current_headers = await proxy_self._build_headers(current_endpoint, has_image_cached)
                             except Exception as he:
                                 logger.error(f"[Copilot] header build during retry failed: {he}")
-                                yield _sse_terminal_error(api_type, "upstream_header_build_failed", str(he))
+                                yield _sse_terminal_error(api_type, "upstream_header_build_failed", str(he),
+                                                          metadata=_sse_error_metadata())
+                                _emit_stream_end("header_build_failed", logging.ERROR,
+                                                  reason=str(he)[:200])
                                 return
                             current_url = f"{current_endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
                             await start_current_request(current_endpoint)
                             continue
 
-                    yield _sse_terminal_error(api_type, "upstream_network_error", error_detail)
+                    yield _sse_terminal_error(api_type, "upstream_network_error", error_detail,
+                                              metadata=_sse_error_metadata())
+                    _emit_stream_end("network_error", logging.ERROR,
+                                      exc_type=type(e).__name__,
+                                      read_timeout=is_read_timeout)
                     return
 
                 except Exception as e:
                     error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
                     logger.error(f"[Copilot] stream error: {error_detail}")
                     await end_current_request(success=False)
-                    yield _sse_terminal_error(api_type, "upstream_error", error_detail)
+                    yield _sse_terminal_error(api_type, "upstream_error", error_detail,
+                                              metadata=_sse_error_metadata())
+                    _emit_stream_end("internal_error", logging.ERROR,
+                                      exc_type=type(e).__name__)
                     return
 
                 finally:
@@ -4517,9 +4684,11 @@ async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Opt
         try:
             if disconnect_checker is not None:
                 return await copilot_call(
-                    body, stream=stream, disconnect_checker=disconnect_checker
+                    body, stream=stream,
+                    disconnect_checker=disconnect_checker,
+                    request_id=request_id,
                 )
-            return await copilot_call(body, stream=stream)
+            return await copilot_call(body, stream=stream, request_id=request_id)
         except _UnsupportedModelError as e:
             copilot_failure = f"Copilot does not support model: {e}"
             if azure_supports:

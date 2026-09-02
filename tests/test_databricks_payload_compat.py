@@ -317,7 +317,8 @@ class OpenAICompatAsyncTests(unittest.IsolatedAsyncioTestCase):
             def can_handle(self, model):
                 return True
 
-            async def proxy_responses(self, body, stream=False):
+            async def proxy_responses(self, body, stream=False, disconnect_checker=None,
+                                      request_id=None):
                 raise main._UnsupportedModelError("404: unsupported")
 
         old_copilot, old_azure = main.copilot_proxy, main.azure_proxy
