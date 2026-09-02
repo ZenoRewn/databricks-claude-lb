@@ -231,6 +231,48 @@ class _LifecycleStreamingResponse(StreamingResponse):
                     raise
 
 
+# ==================== SSE 终止事件辅助 ====================
+
+def _sse_terminal_error(api_type: str, code: str, message: str) -> bytes:
+    """Emit a properly formatted terminal SSE error for the target API shape.
+
+    Codex, the OpenAI JS SDK, and other Responses-API clients ``serde_json`` the
+    payload after each ``data:`` line. Sending ``data: [DONE]`` (a Chat/Completions
+    marker) on a Responses-API stream makes those clients report
+    ``error decoding response body`` because ``[DONE]`` is not valid JSON. Route
+    the terminal event based on ``api_type``:
+
+      - ``responses`` -> ``data: {"type":"response.failed", ...}`` (no ``[DONE]``)
+      - ``chat``      -> ``data: {"error": ...}`` followed by ``data: [DONE]``
+    """
+    if api_type == "responses":
+        payload = {
+            "type": "response.failed",
+            "response": {"error": {"code": code, "message": message}},
+        }
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
+    payload = {"error": {"code": code, "message": message}}
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\ndata: [DONE]\n\n".encode()
+
+
+def _sse_terminal_from_upstream_detail(api_type: str, upstream_detail: dict) -> bytes:
+    """Emit terminal SSE preserving an upstream-provided error envelope.
+
+    Some paths already produced an ``upstream_detail`` dict shaped as
+    ``{"error": {...}}`` (via ``_build_upstream_error_detail``). For the
+    Responses API we wrap it inside a ``response.failed`` event; for Chat we
+    forward it verbatim followed by ``[DONE]``.
+    """
+    upstream_detail = upstream_detail or {}
+    if api_type == "responses":
+        error = upstream_detail.get("error") or {"message": "upstream error"}
+        payload = {"type": "response.failed", "response": {"error": error}}
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
+    return (
+        f"data: {json.dumps(upstream_detail, ensure_ascii=False)}\n\ndata: [DONE]\n\n".encode()
+    )
+
+
 # ==================== 模型名称映射 ====================
 
 DATABRICKS_MODELS = {
@@ -2094,7 +2136,7 @@ class AzureOpenAIProxy:
                                 await start_current_request(current_endpoint)
                                 continue
 
-                        yield f"data: {json.dumps(upstream_detail)}\n\ndata: [DONE]\n\n".encode()
+                        yield _sse_terminal_from_upstream_detail(api_type, upstream_detail)
                         return
 
                     # ---- 透传 + 心跳 + 后台 pump ----
@@ -2235,14 +2277,14 @@ class AzureOpenAIProxy:
                             await start_current_request(current_endpoint)
                             continue
 
-                    yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\ndata: [DONE]\n\n".encode()
+                    yield _sse_terminal_error(api_type, "upstream_network_error", error_detail)
                     return
 
                 except Exception as e:
                     error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
                     logger.error(f"Azure stream error: {error_detail}")
                     await end_current_request(success=False)
-                    yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\ndata: [DONE]\n\n".encode()
+                    yield _sse_terminal_error(api_type, "upstream_error", error_detail)
                     return
 
                 finally:
@@ -3106,13 +3148,13 @@ class CopilotProxy:
                                     current_headers = await proxy_self._build_headers(current_endpoint, proxy_self._has_image(body))
                                 except Exception as he:
                                     logger.error(f"[Copilot] header build during retry failed: {he}")
-                                    yield f"data: {json.dumps({'error': {'message': str(he)}})}\n\ndata: [DONE]\n\n".encode()
+                                    yield _sse_terminal_error(api_type, "upstream_header_build_failed", str(he))
                                     return
                                 current_url = f"{current_endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
                                 await start_current_request(current_endpoint)
                                 continue
 
-                        yield f"data: {json.dumps(upstream_detail)}\n\ndata: [DONE]\n\n".encode()
+                        yield _sse_terminal_from_upstream_detail(api_type, upstream_detail)
                         return
 
                     # ---- 透传 + 心跳 + 后台 pump ----
@@ -3252,8 +3294,7 @@ class CopilotProxy:
                     # HTTP 200 has already started, so transparent provider fallback is
                     # impossible here. Return an explicit SSE error instead of crashing.
                     await end_current_request(success=False, is_client_error=True)
-                    detail = {"error": {"message": str(e), "code": "unsupported_model"}}
-                    yield f"data: {json.dumps(detail)}\n\ndata: [DONE]\n\n".encode()
+                    yield _sse_terminal_error(api_type, "unsupported_model", str(e))
                     return
                 except httpx.PoolTimeout as e:
                     proxy_self.pool_timeout_total += 1
@@ -3271,13 +3312,13 @@ class CopilotProxy:
                                 current_headers = await proxy_self._build_headers(current_endpoint, proxy_self._has_image(body))
                             except Exception as he:
                                 logger.error(f"[Copilot] header build during retry failed: {he}")
-                                yield f"data: {json.dumps({'error': {'message': str(he)}})}\n\ndata: [DONE]\n\n".encode()
+                                yield _sse_terminal_error(api_type, "upstream_header_build_failed", str(he))
                                 return
                             current_url = f"{current_endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
                             await start_current_request(current_endpoint)
                             continue
 
-                    yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\ndata: [DONE]\n\n".encode()
+                    yield _sse_terminal_error(api_type, "upstream_connect_stalled", error_detail)
                     return
                 except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
                         httpx.ConnectError, httpx.RemoteProtocolError,
@@ -3295,20 +3336,20 @@ class CopilotProxy:
                                 current_headers = await proxy_self._build_headers(current_endpoint, proxy_self._has_image(body))
                             except Exception as he:
                                 logger.error(f"[Copilot] header build during retry failed: {he}")
-                                yield f"data: {json.dumps({'error': {'message': str(he)}})}\n\ndata: [DONE]\n\n".encode()
+                                yield _sse_terminal_error(api_type, "upstream_header_build_failed", str(he))
                                 return
                             current_url = f"{current_endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
                             await start_current_request(current_endpoint)
                             continue
 
-                    yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\ndata: [DONE]\n\n".encode()
+                    yield _sse_terminal_error(api_type, "upstream_network_error", error_detail)
                     return
 
                 except Exception as e:
                     error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
                     logger.error(f"[Copilot] stream error: {error_detail}")
                     await end_current_request(success=False)
-                    yield f"data: {json.dumps({'error': {'message': error_detail}})}\n\ndata: [DONE]\n\n".encode()
+                    yield _sse_terminal_error(api_type, "upstream_error", error_detail)
                     return
 
                 finally:
