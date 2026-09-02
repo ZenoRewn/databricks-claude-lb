@@ -478,9 +478,14 @@ GHCP 上游会返回 429 + `retry-after` 头。LB 的熔断器会临时摘掉该
 | `LOG_FORMAT` | 日志格式（`json` / `text`） | `text` |
 | `LOG_LEVEL` | 日志级别 | `INFO` |
 | `STREAM_HEARTBEAT_INTERVAL` | streaming 等待上游响应头及 chunk 空闲期间的 SSE 心跳间隔（秒） | `15` |
-| `OPENAI_CHAT_TO_RESPONSES_MODELS` | 逗号分隔；这些模型从 `/v1/chat/completions` buffered 转到 `/v1/responses` | `gpt-5.5,gpt-5-codex,gpt-5.6-sol,gpt-5.6-luna,gpt-5.6-terra` |
+| `OPENAI_CHAT_TO_RESPONSES_MODELS` | 逗号分隔；这些模型从 `/v1/chat/completions` buffered 转到 `/v1/responses`。遇到 GHCP `model X is not accessible via the /chat/completions endpoint` 报错时把 X 追加到这里即可 | `gpt-5.5,gpt-5-codex,gpt-5.6-sol,gpt-5.6-luna,gpt-5.6-terra` |
 | `COPILOT_REFRESH_INTERVAL` | GHCP session token 后台刷新扫描间隔（秒） | `300` |
 | `COPILOT_REFRESH_THRESHOLD` | session token 剩余 ≤ 此秒数时主动刷新 | `600` |
+| `COPILOT_POOL_MAX_CONNECTIONS` | Copilot 共享 httpx client 的 `max_connections` | `500` |
+| `COPILOT_POOL_MAX_KEEPALIVE` | Copilot 共享 httpx client 的 `max_keepalive_connections` | `200` |
+| `COPILOT_POOL_KEEPALIVE_EXPIRY` | httpx keepalive 过期时间（秒） | `30` |
+| `COPILOT_POOL_ACQUIRE_TIMEOUT` | 从连接池获取连接的 `timeout.pool`（秒） | `60` |
+| `COPILOT_POOL_READ_TIMEOUT` | 每连接 read timeout（秒）。默认无上限；设 `None`/`0`/空 = 无上限（推荐，长 thinking 不误伤），设正数则强制封顶 | *(none)* |
 | `COPILOT_STREAM_HIGH_WATERMARK` | 全部 Copilot endpoint 合计 active requests 的连续高水位阈值（共享连接池 500 的 80%） | `400` |
 | `COPILOT_STREAM_OVERLOAD_GRACE` | 高水位持续多久后才启用异常连接兜底回收（秒） | `30` |
 | `COPILOT_STREAM_DISCONNECT_GRACE` | 下游断开持续多久后才强制回收（秒） | `15` |

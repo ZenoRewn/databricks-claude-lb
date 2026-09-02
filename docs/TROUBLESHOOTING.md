@@ -141,7 +141,7 @@ LB 自带图片自动压缩（>200KB base64 → ≤1280px JPEG@82）；如果压
 
 | 保护 | 环境变量 | 默认 | 说明 |
 |------|----------|------|------|
-| 图片张数上限 | `IMG_MAX_COUNT` | `15` | 单请求图片超此数 → 413 |
+| 图片张数上限 | `IMG_MAX_COUNT` | `50` | 单请求图片超此数 → 413 |
 | 总像素预算 | `IMG_MAX_TOTAL_PIXELS` | `100000000` | 所有图 w×h 累加超此值 → 413（≈8 张 4K）|
 | 压缩并发削峰 | `IMG_COMPRESS_CONCURRENCY` | `2` | 同时解码的图片数，`Semaphore` 限流 |
 | 总开关 | `IMG_ADMISSION_ENABLED` | `1` | 设 `0` 关闭准入检查（仅保留压缩）|
@@ -228,19 +228,26 @@ python main.py --copilot-login --endpoint gh-account-1
 
 ---
 
-## 8. 流式响应客户端报 "stream disconnected before completion"
+## 8. 流式响应客户端报 "stream disconnected before completion" / "stream closed before response.completed"
 
 ### 症状
 
-SSE 流提前断开，客户端拼接到一半挂了。
+SSE 流提前断开，客户端拼接到一半挂了。Codex Desktop / OpenAI JS SDK / OpenAI Python SDK 有时会具体报 `stream disconnected before completion: stream closed before response.completed`（Responses API 客户端 SDK 自己在 SSE EOF 后没看到 `response.completed` 事件时抛出）。
 
-### 真因（已修复）
+### 真因链（按发生概率排序）
 
-Pod 内 ingress / service mesh 的 idle timeout 与 LB 心跳不同步。LB 现在每 15 秒发一次 SSE keep-alive 注释（`: keep-alive`），覆盖大部分 idle 检测。
+1. **LB 内部曾经缺 `saw_completion = False` 初始化**（Copilot 侧 `_stream_response`）。上游至少吐了 1 个 chunk 但没有任何 `data: {"type":"response.completed"...}` payload 时，LB 触发 `UnboundLocalError` → `finally` 只关 response、不 yield 任何终止事件 → 客户端观察到 socket 直接断。**已修复**（v2026-09 修复：初始化 + Azure/Copilot 两侧对齐）。
+2. **GHCP 上游 SSE 用 `event: response.completed\ndata: {...}` header 形式**发送终止事件，data payload 里 `type` 字段缺失。原先只识别 payload `type` 会把这类流误判为 silent truncation → 客户端看到 `response.failed{code: upstream_truncated}` 而非真正的 `response.completed`。**已修复**（`_parse_sse_event_block` 兼容两种形态）。
+3. **httpx `read` timeout 太短**打断长 thinking：`COPILOT_POOL_READ_TIMEOUT` 曾默认 `300s`，Codex `reasoning_effort=high` 常见上游 idle >300s。现在默认 `None`（无限），与 Databricks/Azure 一致；有多层兜底：`_await_with_heartbeat` 在等 headers 时也发 SSE 心跳、`connection_monitor_loop` 高水位 400 + 客户端断开 15s 才强制回收、`Request.is_disconnected` 快速路径。
+4. **上游 Ingress / service mesh idle timeout 与心跳不同步**：LB 每 `STREAM_HEARTBEAT_INTERVAL`（默认 15s）发 SSE `: keep-alive`，见 Cloudflare 章节。
+5. **Codex 客户端自身 timeout**（与 LB 无关）：检查 `~/.codex/config.toml` 里的 `request_max_retries` / `stream_max_retries` / `stream_idle_timeout_ms`。
 
-### 解决
+### 排查步骤
 
-如果还是遇到（极小概率，超长 thinking + 慢上游），调高 ingress idle timeout 或 LB 心跳间隔；不要在 LB 上方再加短 idle 的反代。
+1. `curl -s :8000/metrics | grep -E 'copilot_stream_(truncated|read_timeout|forced|disconnects|pump_queue)'`
+2. 查日志 grep `[Copilot] upstream closed stream on` — 现在带 `connection_id / chunks_yielded / first_event / last_event` 完整上下文，能直接定位是哪个模型的哪种事件断的
+3. 若 `copilot_stream_read_timeout_total` >0,说明有人把 `COPILOT_POOL_READ_TIMEOUT` 设成了有限值。恢复成 `None`（或删掉环境变量）
+4. 若 `copilot_stream_truncated_no_completion_by_model_total{model="X"}` 集中在某个模型,该模型的 GHCP 端可能在长 reasoning 期间会主动 EOF —— 目前只能降 reasoning_effort 或切换模型
 
 ### Copilot 连接池高水位 / active requests 不下降
 
@@ -252,8 +259,11 @@ Pod 内 ingress / service mesh 的 idle timeout 与 LB 心跳不同步。LB 现�
 
 - `copilot_stream_connections_active` / `copilot_stream_connection_oldest_seconds`
 - `copilot_stream_upstream_idle_max_seconds`（仅诊断）
-- `copilot_pool_timeout_total`
+- `copilot_pool_timeout_total` / `copilot_pool_read_timeout_seconds`
 - `copilot_stream_disconnects_detected_total` / `copilot_stream_forced_releases_total`
+- `copilot_stream_truncated_no_completion_by_model_total{model="...",api_type="responses|chat"}`
+- `copilot_stream_read_timeout_total`（`read=None` 时应该恒为 0）
+- `copilot_stream_pump_queue_full_events_total`（backpressure 观察）
 - `copilot_endpoint_active_requests` / `copilot_endpoint_circuit_open`
 
 ---

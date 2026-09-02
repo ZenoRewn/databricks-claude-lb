@@ -112,19 +112,21 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 - **`/health/ready`**：检查依赖就绪 — 至少 1 个 ADB endpoint 可用 + 至少 1 个 Copilot endpoint token 有效（K8s readinessProbe）
 - **`/metrics`**：Prometheus 文本格式，除 token/circuit/provider 指标外，还暴露 `copilot_stream_connections_active`、`copilot_stream_connection_oldest_seconds`、`copilot_stream_upstream_idle_max_seconds`、`copilot_stream_disconnects_detected_total`、`copilot_stream_forced_releases_total`、`copilot_pool_timeout_total` 等连接生命周期指标
 - **JSON 日志**：`LOG_FORMAT=json` 切换；字段 `ts`/`level`/`logger`/`message`，AKS Log Analytics 可直接 KQL 解析；接管 `uvicorn`/`uvicorn.error`/`uvicorn.access`/`httpx` logger 统一格式
-- **环境变量控制**：除日志/token 刷新变量外，连接监控支持 `COPILOT_STREAM_HIGH_WATERMARK=400`、`COPILOT_STREAM_OVERLOAD_GRACE=30`、`COPILOT_STREAM_DISCONNECT_GRACE=15`、`COPILOT_STREAM_MONITOR_INTERVAL=5`
+- **环境变量控制**：除日志/token 刷新变量外，连接监控支持 `COPILOT_STREAM_HIGH_WATERMARK=400`、`COPILOT_STREAM_OVERLOAD_GRACE=30`、`COPILOT_STREAM_DISCONNECT_GRACE=15`、`COPILOT_STREAM_MONITOR_INTERVAL=5`；httpx 池另有 `COPILOT_POOL_MAX_CONNECTIONS=500`、`COPILOT_POOL_MAX_KEEPALIVE=200`、`COPILOT_POOL_KEEPALIVE_EXPIRY=30`、`COPILOT_POOL_ACQUIRE_TIMEOUT=60`、`COPILOT_POOL_READ_TIMEOUT`（默认无上限；设 `None`/`0`/空 = 无上限，设正数则强制封顶，仅在极端诊断场景使用）；SSE 心跳间隔 `STREAM_HEARTBEAT_INTERVAL=15`
 
 详细 AKS 部署步骤、Token rotation 流程、监控告警建议见 `docs/AKS.md`。常见客户端 / 上游异常排查见 `docs/TROUBLESHOOTING.md`（含 macOS 系统代理拦截 localhost、CC 32MB 限制、ADB 4MB / GHCP 模型 API 约束等）。
 
 ### 流式代理健壮性（`_stream_request` / `_stream_response`）
-- **httpx 客户端**: Databricks/Azure 保持 `200/50` 与 `pool=30s`；Copilot 独立使用 `500/200` 与 `pool=60s`。三者均保留 `read=None`，因为流式长 thinking 不能用整体 read timeout 误杀
+- **httpx 客户端**: Databricks/Azure 保持 `200/50` 与 `pool=30s`；Copilot 独立使用 `500/200` 与 `pool=60s`。三者 `read` 默认都为 `None`，长 thinking 不能用整体 read timeout 误杀。Copilot 的 `read` 可通过 `COPILOT_POOL_READ_TIMEOUT` 强制封顶（罕见场景需要），设为 `None`/`0`/空表示无上限
 - **Copilot lifecycle**: 每个 streaming attempt 使用 exactly-once lease；自定义 `StreamingResponse` 在 ASGI downstream send 失败/取消时显式 `aclose()` body iterator，确保 pump、upstream response 和 `active_requests` 一起释放
 - **高水位兜底**: 后台 monitor 仅在 active requests ≥400 持续 30s 后检查异常 lease；只回收 owner 已结束或 downstream 连续确认断开 15s 的连接。请求总年龄和 upstream idle 仅做观测，绝不单独作为 kill 条件
-- **异常覆盖**: 网络异常 `except` 分支同时捕获 `ConnectTimeout / ReadTimeout / WriteTimeout / ConnectError / RemoteProtocolError / ReadError / WriteError`，上游中途断流（最常见症状即是客户端报 "socket connection closed unexpectedly"）也走熔断 + 切端点重试路径
+- **异常覆盖**: 网络异常 `except` 分支同时捕获 `ConnectTimeout / ReadTimeout / WriteTimeout / ConnectError / RemoteProtocolError / ReadError / WriteError`，上游中途断流（最常见症状即是客户端报 "socket connection closed unexpectedly"）也走熔断 + 切端点重试路径；`httpx.ReadTimeout` 在 Copilot 侧另计 `stream_read_timeout_total`，默认 `read=None` 下应恒为 0
 - **响应清理**: `response = None` 局部变量 + `finally: await response.aclose()`，避免 httpx 连接池堆积半开连接
-- **后台 pump + 心跳**: 将 `aiter_bytes()` 放入 `asyncio.create_task(_pump(response))`，主循环 `await asyncio.wait_for(queue.get(), timeout=15.0)`；15 秒无 chunk 则 yield 一次 `: keep-alive\n\n`（SSE 注释，Anthropic SDK 会忽略），刷新中间链路 idle 计时。pump 退出时由 `finally` 分支 `pump_task.cancel()` 回收
-- **SSE 终止规范化**: `sent_message_start` 跟踪是否已向客户端发出 `event: message_start`；若在已发送后 upstream 失败，先补发 `event: message_stop\ndata: {"type":"message_stop"}\n\n` 再发 `event: error`，让 Anthropic SDK 得到合法的流终止序列而不是 socket 异常关闭
-- **重试守卫**: 已 yield 过 `message_start`（Claude）或任意 chunk（Azure `sent_any_chunk`）后，不再切换端点重试，避免客户端看到两段拼接的响应
+- **后台 pump + 心跳**: 将 `aiter_bytes()` 放入 `asyncio.create_task(_pump(response))`，主循环 `await asyncio.wait_for(queue.get(), timeout=15.0)`；15 秒无 chunk 则同时 `_touch_stream(connection_id)` + yield 一次 `: keep-alive\n\n`（SSE 注释，Anthropic/OpenAI SDK 会忽略），刷新中间链路 idle 计时且让 monitor 的 upstream_idle gauge 保持真实。`_await_with_heartbeat` 在等待 headers 阶段也同样心跳 + touch。pump 端观察 `queue.full()` 事件并累计 `stream_pump_queue_full_events_total`。pump 退出时由 `finally` 分支 `pump_task.cancel()` 回收
+- **SSE 终止规范化 (Anthropic)**: `sent_message_start` 跟踪是否已向客户端发出 `event: message_start`；若在已发送后 upstream 失败，先补发 `event: message_stop\ndata: {"type":"message_stop"}\n\n` 再发 `event: error`，让 Anthropic SDK 得到合法的流终止序列而不是 socket 异常关闭
+- **SSE 终止规范化 (Responses / Chat)**: Copilot 和 Azure 都用 `saw_completion` 跟踪终端事件是否见到。Responses 认三种：`event: response.completed|response.failed|response.incomplete` header **或** `data: {"type": "..."}` payload，两种形态由 `_parse_sse_event_block` 统一识别；Chat 认 `data: [DONE]`。上游 EOF 时 `sent_any_chunk and not saw_completion` 触发 silent truncation 分支，补发 `data: {"type":"response.failed","response":{"error":{"code":"upstream_truncated","message":"..."}}}\n\n`（Responses，无 `[DONE]`）或 `data: {"error":{...}}\n\ndata: [DONE]\n\n`（Chat）。所有错误分支的 SSE bytes 由 `_sse_terminal_error` / `_sse_terminal_from_upstream_detail` 统一产出，确保 Responses 流永远不出现 `data: [DONE]`（Codex/OpenAI JS SDK `serde_json` 会把它报为 `error decoding response body`）
+- **truncation 观测**: `stream_truncated_no_completion_total` 是总计数，`stream_truncated_no_completion_by_model` 按 `(model, api_type)` 拆分，`/metrics` 输出 `copilot_stream_truncated_no_completion_by_model_total{model="...",api_type="responses|chat"}`；每次 truncation 日志附带 `connection_id / chunks_yielded / first_event / last_event / input_bytes / has_image` 便于回溯
+- **重试守卫**: 已 yield 过 `message_start`（Claude）或任意 chunk（Azure/Copilot `sent_any_chunk`）后，不再切换端点重试，避免客户端看到两段拼接的响应
 
 ### 服务启动参数
 - `uvicorn.run(..., timeout_keep_alive=600, timeout_graceful_shutdown=30)`，覆盖最长合理的 thinking 响应时间，避免 uvicorn 默认 5s keep-alive 中断下游连接
