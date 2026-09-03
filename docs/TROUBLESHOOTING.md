@@ -268,7 +268,66 @@ SSE 流提前断开，客户端拼接到一半挂了。Codex Desktop / OpenAI JS
 
 ---
 
-## 9. Cloudflare 504 Gateway time-out
+## 9. Codex/Copilot 报 "Copilot upstream connect stalled … no new connection returned within Ns"
+
+### 症状
+
+Codex Desktop / CLI 抛：
+
+```
+stream disconnected before completion: [req=61153d56...] Copilot upstream connect stalled for gh-account-1 (no new connection returned within 20.0s); probe.ok=... dns_ms=... tcp_ms=... ips=...
+```
+
+这段字符串是 LB 自己产出的（`_describe_pool_timeout`）。触发链：`httpx.PoolTimeout` 被抛出 → LB 判断本地 `sum(active_requests) < POOL_MAX_CONNECTIONS` → 归类为 `upstream_connect_stalled`（本地池还有余量、httpx 却 acquire 不到新连接）。
+
+### 真因（按优先级排查）
+
+从 20.0s 起，LB 附带的 DNS+TCP 探针 + httpx 内部池快照直接告诉你是哪一层出问题：
+
+| `probe` 字段 | 含义 | 常见根因 |
+|---|---|---|
+| `probe.ok=true` + httpx `active/total` 都 <500 | 探针正常，本地池也不满 → 上游对本地池"新建连接"这一步慢，可能是 GHCP 服务端限流 / 排队 | 现象常见于短时上游波动；20s 快速失败让 Codex 层重试更快 |
+| `probe.ok=true` + httpx `active` ≈ `total` ≈ 500 | 本地池实际已经饱和，但 LB 自己的 `active_requests` 掉队 —— 说明存在连接泄漏或 keepalive 卡住 | 观察 `copilot_stream_connections_active`、找长时间挂着不释放的 stream；检查 `copilot_stream_pump_queue_full_events_total` |
+| `probe.error=dns_timeout>3s` | Pod 里到 upstream host 的 DNS 解析卡住 | AKS CoreDNS / NodeLocalDNS 故障，或 upstream host 换 IP 但 DNS TTL 未过；`kubectl exec` 进 pod `dig api.githubcopilot.com` 复现 |
+| `probe.error=tcp_timeout>3s` | DNS 拿到 IP 了但 TCP 到 :443 拒绝 / 超时 | 出口 NAT / firewall 限流；确认 pod egress ACL、Azure NAT gateway 端口耗尽 |
+| `probe.error=dns_error: ...` / `tcp_error: ...` | 具体 IO 异常直接打出来 | 按异常类型走 |
+
+### 结构化日志字段
+
+LB 触发这类错误时会发一行结构化日志（`extra.kind=copilot_pool_timeout`），字段包括：
+
+- `request_id / endpoint / attempt / api_type / model` — 谁的哪一次尝试
+- `lb_pool_active / lb_pool_max` — LB 侧计数
+- `httpx_pool` — `{total, active, idle, closing, requests_waiting}`，直接反映 httpx 内部池状态
+- `upstream_probe` — 完整 probe 结果，包括 `resolved_ips`、`dns_ms`、`tcp_ms`
+- `per_endpoint` — 每个端点的 `active_requests / circuit_open / total_errors`
+- `classification` — `local_pool_saturated` 或 `upstream_connect_stalled`
+- `exc` — httpcore 原始异常字符串（多半是空的，凭 classification 判断）
+
+KQL / Loki 直接过：`ContainerLog | where LogEntry contains "copilot_pool_timeout"` 拿 JSON 字段即可。
+
+### 关键设计
+
+- **单端点 + `upstream_connect_stalled` 快速失败**：所有 Copilot endpoint 共享同一个 `httpx.AsyncClient`，"换 endpoint 重试"仍打同一个 pool，等于让用户再等一个 `POOL_ACQUIRE_TIMEOUT`。所以 `len(endpoints) <= 1 and classification == upstream_connect_stalled` 时不重试、直接给客户端 SSE error，让 Codex 自己 retry。
+- **本地饱和**（`local_pool_saturated`）**仍然重试**：因为存在"某个 stream 刚好结束正在归还 slot"的概率，且换 endpoint 也可能命中不同的 httpcore origin pool。
+- **多端点仍走原退避 + `_select_endpoint(model)` 换端点**流程。
+
+### 相关配置
+
+- `COPILOT_POOL_ACQUIRE_TIMEOUT`（默认 20s，从 60s 下调）：httpx 池 acquire 超时。想恢复旧行为设 `60`。
+- `COPILOT_UPSTREAM_PROBE_TIMEOUT`（默认 3s）：DNS + TCP 探针的每一步超时。
+- `COPILOT_UPSTREAM_PROBE_CACHE_TTL`（默认 5s）：探针结果缓存 TTL，防止密集失败风暴。
+- `COPILOT_POOL_MAX_CONNECTIONS` / `COPILOT_POOL_MAX_KEEPALIVE` / `COPILOT_POOL_KEEPALIVE_EXPIRY`：池上限与 keepalive；调大池上限对"本地饱和"有效，对"upstream stall"无效。
+
+### 相关 metrics
+
+- `copilot_pool_timeout_total` — 所有 PoolTimeout 累计（含两类）
+- `copilot_pool_timeout_saturated_total` — 本地池真饱和的次数
+- `copilot_pool_timeout_upstream_stall_total` — 上游握手挂的次数（**用户报错这一条**）
+
+---
+
+## 10. Cloudflare 504 Gateway time-out
 
 ### 症状
 

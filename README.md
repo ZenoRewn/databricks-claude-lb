@@ -190,6 +190,7 @@ docker-compose up -d
 | `/health/ready` | GET | 不需要 | Readiness probe（检查依赖；故障返回 503 + `issues` 数组） |
 | `/metrics` | GET | 不需要 | Prometheus 文本格式 metrics（K8s / Azure Monitor 抓取） |
 | `/admin/copilot/reload` | POST | 需要 | 运维端点：从源重读所有 Copilot endpoint 的 long-lived token + 强制刷新 session（K8s Secret rotation 后立刻生效） |
+| `/admin/copilot/reset-pool` | POST | 需要 | 运维端点：重建共享 httpx.AsyncClient，逐出所有 keepalive/半开连接（怀疑连接池泄漏或 upstream_stall 持续增长时使用） |
 | `/stats` | GET | 不需要 | 端点统计（含成本估算、Azure OpenAI、GitHub Copilot） |
 | `/stats/history` | GET | 不需要 | 历史用量数据（`?days=7`） |
 | `/stats/history` | DELETE | 不需要 | 清理历史数据（`?keep_days=30`） |
@@ -483,9 +484,12 @@ GHCP 上游会返回 429 + `retry-after` 头。LB 的熔断器会临时摘掉该
 | `COPILOT_REFRESH_THRESHOLD` | session token 剩余 ≤ 此秒数时主动刷新 | `600` |
 | `COPILOT_POOL_MAX_CONNECTIONS` | Copilot 共享 httpx client 的 `max_connections` | `500` |
 | `COPILOT_POOL_MAX_KEEPALIVE` | Copilot 共享 httpx client 的 `max_keepalive_connections` | `200` |
-| `COPILOT_POOL_KEEPALIVE_EXPIRY` | httpx keepalive 过期时间（秒） | `30` |
-| `COPILOT_POOL_ACQUIRE_TIMEOUT` | 从连接池获取连接的 `timeout.pool`（秒） | `60` |
+| `COPILOT_POOL_KEEPALIVE_EXPIRY` | httpx keepalive 过期时间（秒）。90 比默认的 30 更省 reconnect，与 Copilot CDN 侧的 idle 容忍度对齐 | `90` |
+| `COPILOT_POOL_ACQUIRE_TIMEOUT` | 从连接池获取连接的 `timeout.pool`（秒）。20 让 upstream_stall 快速返回给客户端，允许 Codex 自己 retry；恢复旧行为设 `60` | `20` |
 | `COPILOT_POOL_READ_TIMEOUT` | 每连接 read timeout（秒）。默认无上限；设 `None`/`0`/空 = 无上限（推荐，长 thinking 不误伤），设正数则强制封顶 | *(none)* |
+| `COPILOT_HTTP2` | 启用 HTTP/2 到 Copilot 上游。一条 TCP 连接承载多路 stream，大幅降低"新建连接"压力；需要 `pip install h2`。启动时会 log 三种状态之一：`HTTP/2 negotiation enabled (h2 pkg X)` / `COPILOT_HTTP2=true but h2 package NOT installed` (ERROR，fallback 到 HTTP/1.1) / `HTTP/1.1 (h2 pkg available/not installed)`；运行时看 `/stats` 里 `github_copilot.pool.last_negotiated_http_version` 或 `/metrics` 的 `copilot_upstream_http_version{version="HTTP/2"}=1` 确认上游 CDN 真的接受了 h2 | `false` |
+| `COPILOT_UPSTREAM_PROBE_TIMEOUT` | PoolTimeout 触发时对上游做 DNS+TCP 探针的每步超时（秒），结果打进日志与 SSE error 尾部 | `3` |
+| `COPILOT_UPSTREAM_PROBE_CACHE_TTL` | 探针结果缓存 TTL（秒），防止密集失败风暴 | `5` |
 | `COPILOT_STREAM_HIGH_WATERMARK` | 全部 Copilot endpoint 合计 active requests 的连续高水位阈值（共享连接池 500 的 80%） | `400` |
 | `COPILOT_STREAM_OVERLOAD_GRACE` | 高水位持续多久后才启用异常连接兜底回收（秒） | `30` |
 | `COPILOT_STREAM_DISCONNECT_GRACE` | 下游断开持续多久后才强制回收（秒） | `15` |

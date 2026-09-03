@@ -102,6 +102,7 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 - Device Flow CLI: `python main.py --copilot-login --endpoint <name>` 使用 VS Code 公开 client_id `Iv1.b507a08c87ecfe98` 走标准 GitHub Device Flow，token 写入 0600 权限文件
 - 启动时 `asyncio.create_task(copilot_proxy.warmup())` + 启动 `background_refresh_loop`
 - `POST /admin/copilot/reload`（运维端点）：立即从源重读所有 endpoint 的 long-lived token + 强制刷新 session token，配合 K8s Secret rotation 实现"零延迟"生效（不等 kubelet 同步周期）
+- `POST /admin/copilot/reset-pool`（运维端点）：怀疑 httpx 连接池泄漏或 keepalive 卡半开时的自救按钮。新建 client、原子替换、后台 30s 后 aclose 旧 client、再 warmup 一次；返回 `previous_pool` 快照给对照。
 - `CopilotEndpoint.models` 语义：**空列表 = 通配**（接受所有模型）；填值则只服务列表内模型。和 Azure 的 `deployments` 语义不同（Azure 必须列出可用部署），所以 Copilot 自己实现 `_select_endpoint(model)` 不复用 `LoadBalancer.select_endpoint_for_model()`
 - `_UnsupportedModelError`: non-stream/buffered 请求可在 HTTP response start 前由路由层捕获并 fallback Azure；direct streaming 已提交 HTTP 200 后不能透明切 provider，此时返回明确的 `unsupported_model` SSE error + `[DONE]`
 - 路由分流入口: `_route_openai_chat()` / `_route_openai_responses()`：先检查 `claude-*` 名拒绝（必须走 `/v1/messages`）；再 try Copilot；如抛 `_UnsupportedModelError` 或 HTTPException 404/503 就 fallback Azure
@@ -112,7 +113,13 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 - **`/health/ready`**：检查依赖就绪 — 至少 1 个 ADB endpoint 可用 + 至少 1 个 Copilot endpoint token 有效（K8s readinessProbe）
 - **`/metrics`**：Prometheus 文本格式，除 token/circuit/provider 指标外，还暴露 `copilot_stream_connections_active`、`copilot_stream_connection_oldest_seconds`、`copilot_stream_upstream_idle_max_seconds`、`copilot_stream_disconnects_detected_total`、`copilot_stream_forced_releases_total`、`copilot_pool_timeout_total` 等连接生命周期指标
 - **JSON 日志**：`LOG_FORMAT=json` 切换；字段 `ts`/`level`/`logger`/`message`，AKS Log Analytics 可直接 KQL 解析；接管 `uvicorn`/`uvicorn.error`/`uvicorn.access`/`httpx` logger 统一格式
-- **环境变量控制**：除日志/token 刷新变量外，连接监控支持 `COPILOT_STREAM_HIGH_WATERMARK=400`、`COPILOT_STREAM_OVERLOAD_GRACE=30`、`COPILOT_STREAM_DISCONNECT_GRACE=15`、`COPILOT_STREAM_MONITOR_INTERVAL=5`；httpx 池另有 `COPILOT_POOL_MAX_CONNECTIONS=500`、`COPILOT_POOL_MAX_KEEPALIVE=200`、`COPILOT_POOL_KEEPALIVE_EXPIRY=30`、`COPILOT_POOL_ACQUIRE_TIMEOUT=60`、`COPILOT_POOL_READ_TIMEOUT`（默认无上限；设 `None`/`0`/空 = 无上限，设正数则强制封顶，仅在极端诊断场景使用）；SSE 心跳间隔 `STREAM_HEARTBEAT_INTERVAL=15`
+- **环境变量控制**：除日志/token 刷新变量外，连接监控支持 `COPILOT_STREAM_HIGH_WATERMARK=400`、`COPILOT_STREAM_OVERLOAD_GRACE=30`、`COPILOT_STREAM_DISCONNECT_GRACE=15`、`COPILOT_STREAM_MONITOR_INTERVAL=5`；httpx 池另有 `COPILOT_POOL_MAX_CONNECTIONS=500`、`COPILOT_POOL_MAX_KEEPALIVE=200`、`COPILOT_POOL_KEEPALIVE_EXPIRY=30`、`COPILOT_POOL_ACQUIRE_TIMEOUT=20`（默认从 60→20，配合"单端点 upstream_stall 快速失败"给客户端更快 error 让 Codex 自己 retry；恢复旧值设 `60`）、`COPILOT_POOL_READ_TIMEOUT`（默认无上限；设 `None`/`0`/空 = 无上限，设正数则强制封顶，仅在极端诊断场景使用）；SSE 心跳间隔 `STREAM_HEARTBEAT_INTERVAL=15`；PoolTimeout 触发时的 DNS+TCP 探针 `COPILOT_UPSTREAM_PROBE_TIMEOUT=3` / `COPILOT_UPSTREAM_PROBE_CACHE_TTL=5`
+
+#### PoolTimeout 诊断（`upstream_connect_stalled` vs `local_pool_saturated`）
+
+- `httpx.PoolTimeout` 触发时 `_describe_pool_timeout` 会同时抓 httpx 内部池状态（`_transport._pool` introspection：`total/active/idle/closing/requests_waiting`）+ 对 upstream host 做一次 3s 内的 DNS + TCP 探针（5s TTL cache，`_probe_upstream_connect`），把结果写进 structured log（`kind=copilot_pool_timeout`，字段含 `classification / httpx_pool / upstream_probe / per_endpoint / request_id`）并塞到给 Codex 的 SSE `error.message` 尾部（`probe.ok=... dns_ms=... tcp_ms=... ips=...`），运维直接在 Codex 报错里能看到本地池 vs 上游握手是哪个环节挂
+- 单 Copilot endpoint + `classification == upstream_connect_stalled` 场景**不重试**：所有 endpoint 共享同一个 `httpx.AsyncClient`，重试还是打同一个 pool，只会让用户多等一个 `POOL_ACQUIRE_TIMEOUT` — 直接给客户端 error，Codex 自己 retry 得更快
+- `local_pool_saturated` 分支（本地池已到 `POOL_MAX_CONNECTIONS`）仍走原退避 + 换端点重试逻辑
 
 详细 AKS 部署步骤、Token rotation 流程、监控告警建议见 `docs/AKS.md`。常见客户端 / 上游异常排查见 `docs/TROUBLESHOOTING.md`（含 macOS 系统代理拦截 localhost、CC 32MB 限制、ADB 4MB / GHCP 模型 API 约束等）。
 
@@ -168,6 +175,7 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 | `/health/ready` | GET | 不需要 | Readiness probe（检查依赖就绪；故障返回 503 + issues 数组） |
 | `/metrics` | GET | 不需要 | Prometheus 文本格式 metrics（K8s / Azure Monitor 抓取） |
 | `/admin/copilot/reload` | POST | 需要 | 运维端点：从源重读所有 Copilot endpoint 的 long-lived token + 强制刷新 session（K8s Secret rotation 后立刻生效） |
+| `/admin/copilot/reset-pool` | POST | 需要 | 运维端点：重建共享 httpx.AsyncClient，逐出所有 keepalive/半开连接 |
 | `/stats` | GET | 不需要 | 端点统计（含成本估算、Azure OpenAI、GitHub Copilot） |
 | `/stats/history` | GET | 不需要 | 历史用量数据（`?days=7`，含每日成本） |
 | `/stats/history` | DELETE | 不需要 | 清理历史数据（`?keep_days=30`） |

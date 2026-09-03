@@ -105,10 +105,24 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         proxy.stream_truncated_no_completion_by_model = {}
         proxy.stream_read_timeout_total = 0
         proxy.stream_pump_queue_full_events_total = 0
+        # Fields introduced when we added the DNS+TCP upstream probe on PoolTimeout.
+        # We stub out the probe so tests never actually touch the network — otherwise
+        # a sandboxed CI would hang on getaddrinfo for the placeholder host.
+        proxy._probe_lock = asyncio.Lock()
+        proxy._last_probe_at = 0.0
+        proxy._last_probe_result = None
+        proxy.last_negotiated_http_version = None
+        proxy._probe_upstream_connect = AsyncMock(return_value={
+            "host": "test", "port": 443, "dns_ms": 1, "tcp_ms": 1,
+            "ok": True, "error": None, "resolved_ips": ["127.0.0.1"], "cached": False,
+        })
         proxy._build_headers = AsyncMock(return_value={"Authorization": "Bearer test"})
         return proxy, load_balancer, endpoint
 
     async def test_non_stream_pool_timeout_is_local_and_retry_ends_once_per_attempt(self):
+        # PoolTimeout with a second endpoint present exercises the retry path.
+        # (With only one endpoint, the upstream_stall classification now fails
+        # fast — see test_non_stream_pool_timeout_single_endpoint_upstream_stall_fails_fast.)
         request = httpx.Request("POST", "https://example.test/chat/completions")
         success = httpx.Response(
             200,
@@ -120,6 +134,14 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
             side_effect=[httpx.PoolTimeout("pool exhausted", request=request), success]
         )
         proxy, load_balancer, endpoint = self._make_proxy(client)
+        second_endpoint = main.CopilotEndpoint(
+            name="copilot-test-2",
+            github_token="token",
+            models=[],
+            session_token="session-token",
+            session_token_expires_at=2**31,
+        )
+        load_balancer.endpoints.append(second_endpoint)
 
         with patch.object(main.asyncio, "sleep", new=AsyncMock()):
             response = await proxy.proxy_chat_completions(
@@ -128,11 +150,43 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(endpoint.active_requests, 0)
-        self.assertEqual(endpoint.total_requests, 2)
+        self.assertEqual(second_endpoint.active_requests, 0)
+        # Both attempts hit exactly one endpoint each (round-robin over 2).
+        self.assertEqual(endpoint.total_requests + second_endpoint.total_requests, 2)
         self.assertEqual(endpoint.total_errors, 0)
         self.assertFalse(endpoint.circuit_open)
         self.assertEqual(load_balancer.on_request_start.await_count, 2)
         self.assertEqual(load_balancer.on_request_end.await_count, 2)
+
+    async def test_non_stream_pool_timeout_single_endpoint_upstream_stall_fails_fast(self):
+        """Single endpoint + upstream_connect_stalled must bail out immediately.
+
+        Retrying against the only endpoint would just replay the same httpx pool
+        wait — up to POOL_ACQUIRE_TIMEOUT * max_retries seconds of pain the user
+        cannot escape. We fail after the first attempt so Codex sees the error
+        and can decide whether to retry at its layer.
+        """
+        request = httpx.Request("POST", "https://example.test/chat/completions")
+        client = unittest.mock.Mock()
+        client.post = AsyncMock(
+            side_effect=httpx.PoolTimeout("pool exhausted", request=request)
+        )
+        proxy, load_balancer, endpoint = self._make_proxy(client)
+
+        with patch.object(main.asyncio, "sleep", new=AsyncMock()):
+            with self.assertRaises(HTTPException) as ctx:
+                await proxy.proxy_chat_completions(
+                    {"model": "gpt-test", "messages": []}, stream=False
+                )
+
+        self.assertEqual(ctx.exception.status_code, 503)
+        # Exactly ONE attempt happened — no retry.
+        self.assertEqual(endpoint.total_requests, 1)
+        self.assertEqual(client.post.await_count, 1)
+        # Accounting still balances.
+        self.assertEqual(endpoint.active_requests, 0)
+        self.assertEqual(load_balancer.on_request_start.await_count, 1)
+        self.assertEqual(load_balancer.on_request_end.await_count, 1)
 
     async def test_non_stream_401_refresh_failure_does_not_double_decrement(self):
         request = httpx.Request("POST", "https://example.test/chat/completions")
@@ -340,12 +394,25 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(load_balancer.on_request_end.await_count, 1)
 
     async def test_stream_pool_timeout_does_not_trip_circuit_or_double_end_retry(self):
+        # PoolTimeout must not trip the circuit or double-end the retry when
+        # the retry does happen (2+ endpoints so the single-endpoint fail-fast
+        # heuristic doesn't apply). See
+        # test_stream_pool_timeout_single_endpoint_fails_fast for the 1-endpoint
+        # behavior.
         request = httpx.Request("POST", "https://example.test/chat/completions")
         pool_timeout = httpx.PoolTimeout("pool exhausted", request=request)
         success = _StreamResponse([b"data: [DONE]\n\n"])
         proxy, load_balancer, endpoint = self._make_proxy(
             _StreamClient([pool_timeout, success]), threshold=1
         )
+        second_endpoint = main.CopilotEndpoint(
+            name="copilot-test-2",
+            github_token="token",
+            models=[],
+            session_token="session-token",
+            session_token_expires_at=2**31,
+        )
+        load_balancer.endpoints.append(second_endpoint)
         await load_balancer.on_request_start(endpoint)
 
         response = await proxy._stream_response(
@@ -362,11 +429,48 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(chunks, [b"data: [DONE]\n\n"])
         self.assertEqual(endpoint.active_requests, 0)
-        self.assertEqual(endpoint.total_requests, 2)
+        self.assertEqual(second_endpoint.active_requests, 0)
         self.assertEqual(endpoint.total_errors, 0)
         self.assertFalse(endpoint.circuit_open)
         self.assertEqual(load_balancer.on_request_start.await_count, 2)
         self.assertEqual(load_balancer.on_request_end.await_count, 2)
+
+    async def test_stream_pool_timeout_single_endpoint_fails_fast(self):
+        """Streaming with a single endpoint bails out on upstream_stall PoolTimeout.
+
+        Symmetric to test_non_stream_pool_timeout_single_endpoint_upstream_stall_fails_fast:
+        the retry loop would just replay the same shared httpx pool wait, so we
+        surface an explicit SSE error immediately and let Codex decide.
+        """
+        request = httpx.Request("POST", "https://example.test/chat/completions")
+        pool_timeout = httpx.PoolTimeout("pool exhausted", request=request)
+        proxy, load_balancer, endpoint = self._make_proxy(
+            _StreamClient([pool_timeout]), threshold=10
+        )
+        await load_balancer.on_request_start(endpoint)
+
+        response = await proxy._stream_response(
+            endpoint,
+            "https://example.test/chat/completions",
+            {"model": "gpt-test", "messages": []},
+            {},
+            "gpt-test",
+            "chat",
+            main.time.time(),
+        )
+        with patch.object(main.asyncio, "sleep", new=AsyncMock()):
+            chunks = [chunk async for chunk in response.body_iterator]
+
+        # Exactly one SSE error frame followed by [DONE] for chat api_type.
+        self.assertEqual(len(chunks), 1)
+        joined = chunks[0]
+        self.assertIn(b"upstream_connect_stalled", joined)
+        self.assertIn(b"[DONE]", joined)
+        # Only one attempt — no retry.
+        self.assertEqual(endpoint.active_requests, 0)
+        self.assertFalse(endpoint.circuit_open)
+        self.assertEqual(load_balancer.on_request_start.await_count, 1)
+        self.assertEqual(load_balancer.on_request_end.await_count, 1)
 
     async def test_stream_retry_updates_registry_to_current_endpoint(self):
         request = httpx.Request("POST", "https://example.test/chat/completions")

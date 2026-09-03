@@ -12,6 +12,7 @@ import json
 import time
 import random
 import logging
+import socket
 import stat
 import uuid
 from io import BytesIO
@@ -20,6 +21,7 @@ from typing import Optional
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
+from urllib.parse import urlparse
 
 import yaml
 import httpx
@@ -2577,7 +2579,29 @@ class CopilotProxy:
     # httpx client pool limits 与 timeouts；集中定义以便 /stats 和 /metrics 暴露上限。
     POOL_MAX_CONNECTIONS = int(os.getenv("COPILOT_POOL_MAX_CONNECTIONS", "500"))
     POOL_MAX_KEEPALIVE = int(os.getenv("COPILOT_POOL_MAX_KEEPALIVE", "200"))
-    POOL_KEEPALIVE_EXPIRY = float(os.getenv("COPILOT_POOL_KEEPALIVE_EXPIRY", "30"))
+    # 从 30s 上调到 90s：Copilot 上游 TCP+TLS 握手不便宜（远端 CDN + 我们模仿 VS Code
+    # 扩展的握手 header 组），越长的 keepalive 意味着越少的 reconnect 频次，
+    # `upstream_connect_stalled` 触发面积随之下降。想恢复旧行为设 `30`。
+    POOL_KEEPALIVE_EXPIRY = float(os.getenv("COPILOT_POOL_KEEPALIVE_EXPIRY", "90"))
+    # HTTP/2 opt-in：Copilot 的 `api.githubcopilot.com` 支持 h2，一条 TCP 连接能承载
+    # 上百条并发 stream，能把"新建连接"这一步的压力几乎归零；但需要 `h2` 包。默认
+    # 关闭以避免未装 h2 时启动 crash——设 `COPILOT_HTTP2=true` 且已装 `h2` 即启用。
+    _http2_env = os.getenv("COPILOT_HTTP2", "").strip().lower()
+    HTTP2_REQUESTED = _http2_env in ("1", "true", "yes", "on")
+    try:
+        import h2 as _h2_pkg  # noqa: F401 - detection only
+        _h2_version = getattr(_h2_pkg, "__version__", "unknown")
+        H2_PACKAGE_AVAILABLE = True
+    except ImportError:
+        _h2_version = None
+        H2_PACKAGE_AVAILABLE = False
+    HTTP2_ENABLED = HTTP2_REQUESTED and H2_PACKAGE_AVAILABLE
+    H2_PACKAGE_VERSION: Optional[str] = _h2_version
+    del _http2_env, _h2_version
+    try:
+        del _h2_pkg
+    except NameError:
+        pass
     # read=None (the default) keeps parity with Databricks/Azure clients: a long
     # thinking phase from GHCP can legitimately go many minutes with no bytes, and
     # a global read timeout would kill it. Upstream stalls that never resolve are
@@ -2589,7 +2613,15 @@ class CopilotProxy:
         None if _read_env in ("", "none", "0", "-1") else float(_read_env)
     )
     del _read_env
-    POOL_ACQUIRE_TIMEOUT = float(os.getenv("COPILOT_POOL_ACQUIRE_TIMEOUT", "60"))
+    # 默认从 60s 下调到 20s：httpx `connect=10s`，池子等 20s 拿不到连接说明已经压
+    # 力异常（要么本地池满、要么上游握手真挂），继续等只让用户端多等一倍。20s + 一
+    # 次重试 (20s) ≈ 40s 出错，比之前 60s + 60s ≈ 120s+ 的体感好非常多；线上需要
+    # 恢复旧行为设 `COPILOT_POOL_ACQUIRE_TIMEOUT=60` 即可。
+    POOL_ACQUIRE_TIMEOUT = float(os.getenv("COPILOT_POOL_ACQUIRE_TIMEOUT", "20"))
+    # 上游 TCP 探针缓存：PoolTimeout 时 fire-and-forget 一次 DNS+TCP 探针到 Copilot
+    # 上游，用来把"本地池满"和"上游握手挂"区分开。缓存 5s 以避免密集失败时探针风暴。
+    UPSTREAM_PROBE_CACHE_TTL = float(os.getenv("COPILOT_UPSTREAM_PROBE_CACHE_TTL", "5"))
+    UPSTREAM_PROBE_TIMEOUT = float(os.getenv("COPILOT_UPSTREAM_PROBE_TIMEOUT", "3"))
 
     def __init__(self, load_balancer: LoadBalancer, api_key: str):
         self.load_balancer = load_balancer  # 装载 CopilotEndpoint
@@ -2606,8 +2638,31 @@ class CopilotProxy:
                 max_keepalive_connections=self.POOL_MAX_KEEPALIVE,
                 keepalive_expiry=self.POOL_KEEPALIVE_EXPIRY,
             ),
-            http2=False,
+            http2=self.HTTP2_ENABLED,
         )
+        # 三种状态要区分，别让"我以为开了 h2 实际没开"这种坑再发生
+        if self.HTTP2_ENABLED:
+            logger.info(
+                "[Copilot] HTTP/2 negotiation enabled (h2 pkg %s). "
+                "Actual protocol depends on TLS ALPN — see stream_end log field `http_version`.",
+                self.H2_PACKAGE_VERSION,
+            )
+        elif self.HTTP2_REQUESTED and not self.H2_PACKAGE_AVAILABLE:
+            # 用户显式请求了 h2 但没装 h2 包——大声报错，别静默降级
+            logger.error(
+                "[Copilot] COPILOT_HTTP2=true but the `h2` package is NOT installed. "
+                "Falling back to HTTP/1.1. Install with `pip install h2` (or add to "
+                "requirements.txt) then restart to actually get HTTP/2."
+            )
+        else:
+            logger.info(
+                "[Copilot] HTTP/1.1 (h2 pkg %s). Set COPILOT_HTTP2=true to opt into HTTP/2.",
+                "available" if self.H2_PACKAGE_AVAILABLE else "not installed",
+            )
+        # 最近一次成功握手谈成的协议版本。首个成功请求（warmup HEAD /models 或首个
+        # 用户请求）把它填成 "HTTP/2" / "HTTP/1.1"。/stats + /metrics 把它 surface
+        # 出来，运维用它判断"我以为 h2 开了 CDN 到底给不给"。
+        self.last_negotiated_http_version: Optional[str] = None
         self.global_stats = GlobalStats()
         # Per-endpoint token-exchange lock，避免并发请求时重复刷新 session token
         self._token_locks: dict = {}
@@ -2642,6 +2697,11 @@ class CopilotProxy:
         # consumer to drain (queue.full at moment of put). Useful when tuning
         # `queue = asyncio.Queue(maxsize=64)` under sustained bursts.
         self.stream_pump_queue_full_events_total = 0
+        # PoolTimeout 触发时对 Copilot 上游做的 DNS+TCP 探针结果缓存。用来把"本地
+        # 池饱和"和"上游握手真慢"区分开，同时避免密集失败时的探针风暴。
+        self._probe_lock = asyncio.Lock()
+        self._last_probe_at: float = 0.0
+        self._last_probe_result: Optional[dict] = None
 
     def _record_truncation(self, model: str, api_type: str) -> None:
         """Bucket a silent-truncation event by (model, api_type) for Prometheus."""
@@ -2678,8 +2738,184 @@ class CopilotProxy:
         if connection_id:
             self._stream_connections.pop(connection_id, None)
 
-    def _describe_pool_timeout(self, endpoint_name: str, exc: httpx.PoolTimeout) -> tuple[str, str]:
-        """Return (log_message, sse_error_message) for a PoolTimeout event.
+    def _httpx_pool_stats(self) -> dict:
+        """Introspect the httpx AsyncClient's internal connection pool.
+
+        Our per-endpoint `active_requests` counter tracks Python-side lifecycle
+        (incremented before `client.send`, decremented after `end_current_request`),
+        but httpx keeps sockets alive independently: a completed response's socket
+        may sit in keepalive for up to `keepalive_expiry`, and a stream whose
+        `finally: aclose()` was skipped stays "in use" from httpx's POV. So the
+        two counters CAN diverge — this helper tries to read what httpx actually
+        sees so we can tell "our accounting is out of sync" apart from "upstream
+        actually stalled".
+
+        Uses private attributes (`_transport._pool._connections`). Wrapped in
+        try/except and every field returned as `None` on failure — introspection
+        is diagnostic-only, never load-bearing.
+        """
+        stats: dict = {
+            "total": None, "active": None, "idle": None, "closing": None,
+            "requests_waiting": None, "error": None,
+        }
+        try:
+            transport = getattr(self.client, "_transport", None)
+            pool = getattr(transport, "_pool", None) if transport is not None else None
+            if pool is None:
+                stats["error"] = "no _transport._pool (httpx version mismatch?)"
+                return stats
+            connections = list(getattr(pool, "_connections", None) or [])
+            stats["total"] = len(connections)
+            active = 0
+            idle = 0
+            closing = 0
+            for conn in connections:
+                # httpcore.AsyncHTTPConnection exposes has_expired/is_available/is_idle
+                # is_closed() and is_idle() are the more reliable predicates across
+                # versions. Any AttributeError just leaves the count where it was.
+                try:
+                    if conn.is_closed():
+                        closing += 1
+                        continue
+                    if conn.is_idle():
+                        idle += 1
+                    else:
+                        active += 1
+                except Exception:  # noqa: BLE001
+                    active += 1
+            stats["active"] = active
+            stats["idle"] = idle
+            stats["closing"] = closing
+            # httpcore's pool exposes waiting requests via `_requests` (list of
+            # PoolRequest objects). Not every version has this — bail cleanly.
+            waiting = getattr(pool, "_requests", None)
+            if waiting is not None:
+                try:
+                    stats["requests_waiting"] = len(waiting)
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as e:  # noqa: BLE001
+            stats["error"] = f"{type(e).__name__}: {e}"
+        return stats
+
+    async def _probe_upstream_connect(
+        self, endpoint: Optional[CopilotEndpoint] = None,
+    ) -> dict:
+        """DNS+TCP probe to the Copilot upstream host. 5s TTL cache to dedupe.
+
+        Runs entirely with asyncio primitives (no threads) and is fire-and-forget
+        safe. Never raises: every failure path fills `error` and returns.
+        """
+        now = time.monotonic()
+        cache_ttl = self.UPSTREAM_PROBE_CACHE_TTL
+        cached = self._last_probe_result
+        if cached is not None and (now - self._last_probe_at) < cache_ttl:
+            return {**cached, "cached": True}
+
+        async with self._probe_lock:
+            # Recheck under lock — someone else may have just probed.
+            now = time.monotonic()
+            cached = self._last_probe_result
+            if cached is not None and (now - self._last_probe_at) < cache_ttl:
+                return {**cached, "cached": True}
+
+            host = "api.githubcopilot.com"
+            port = 443
+            try:
+                base = (endpoint.session_base_url if endpoint else COPILOT_DEFAULT_BASE_URL)
+                parsed = urlparse(base)
+                if parsed.hostname:
+                    host = parsed.hostname
+                if parsed.port:
+                    port = parsed.port
+                elif parsed.scheme == "https":
+                    port = 443
+                elif parsed.scheme == "http":
+                    port = 80
+            except Exception:  # noqa: BLE001
+                pass
+
+            timeout = self.UPSTREAM_PROBE_TIMEOUT
+            result: dict = {
+                "host": host, "port": port, "dns_ms": None, "tcp_ms": None,
+                "ok": False, "error": None, "resolved_ips": [], "cached": False,
+                "timeout": timeout,
+            }
+
+            loop = asyncio.get_running_loop()
+            t0 = time.monotonic()
+            try:
+                infos = await asyncio.wait_for(
+                    loop.getaddrinfo(host, port, type=socket.SOCK_STREAM),
+                    timeout=timeout,
+                )
+                result["dns_ms"] = int((time.monotonic() - t0) * 1000)
+                result["resolved_ips"] = sorted({info[4][0] for info in infos})[:5]
+            except asyncio.TimeoutError:
+                result["error"] = f"dns_timeout>{timeout}s"
+                self._last_probe_at = now
+                self._last_probe_result = result
+                return result
+            except Exception as e:  # noqa: BLE001
+                result["error"] = f"dns_error: {type(e).__name__}: {e}"
+                self._last_probe_at = now
+                self._last_probe_result = result
+                return result
+
+            ip = result["resolved_ips"][0] if result["resolved_ips"] else host
+            t1 = time.monotonic()
+            writer = None
+            try:
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection(ip, port), timeout=timeout,
+                )
+                result["tcp_ms"] = int((time.monotonic() - t1) * 1000)
+                result["ok"] = True
+            except asyncio.TimeoutError:
+                result["error"] = f"tcp_timeout>{timeout}s (target {ip}:{port})"
+            except Exception as e:  # noqa: BLE001
+                result["error"] = f"tcp_error: {type(e).__name__}: {e} (target {ip}:{port})"
+            finally:
+                if writer is not None:
+                    try:
+                        writer.close()
+                        await writer.wait_closed()
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            self._last_probe_at = now
+            self._last_probe_result = result
+            return result
+
+    def _format_probe(self, probe: Optional[dict]) -> str:
+        """Compact string representation for log lines / SSE hints."""
+        if not probe:
+            return "probe=skipped"
+        parts = [f"probe.ok={probe.get('ok')}"]
+        if probe.get("dns_ms") is not None:
+            parts.append(f"dns_ms={probe['dns_ms']}")
+        if probe.get("tcp_ms") is not None:
+            parts.append(f"tcp_ms={probe['tcp_ms']}")
+        if probe.get("resolved_ips"):
+            parts.append("ips=" + ",".join(probe["resolved_ips"][:3]))
+        if probe.get("error"):
+            parts.append(f"probe.error={probe['error']}")
+        if probe.get("cached"):
+            parts.append("probe.cached=true")
+        return " ".join(parts)
+
+    async def _describe_pool_timeout(
+        self,
+        endpoint_name: str,
+        exc: httpx.PoolTimeout,
+        *,
+        endpoint: Optional[CopilotEndpoint] = None,
+        request_id: Optional[str] = None,
+        attempt: Optional[int] = None,
+        api_type: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> tuple[str, str, dict]:
+        """Return (log_message, sse_error_message, structured_fields).
 
         httpx.PoolTimeout is raised for two very different reasons:
           1. Our local httpx ConnectionPool actually holds `max_connections` slots
@@ -2690,37 +2926,75 @@ class CopilotProxy:
              internal active_requests counter shows plenty of headroom.
 
         We used to log both as "local connection pool exhausted", which sent triage
-        on the wrong trail (see 2026-08-31 investigation). Label them correctly now.
+        on the wrong trail (see 2026-08-31 investigation). Label them correctly and
+        attach as much diagnostic context as we can gather without blocking the
+        request response longer than a probe timeout (~3s).
         """
         total_active = sum(ep.active_requests for ep in self.load_balancer.endpoints)
         exc_repr = str(exc) or "no message from httpcore (empty)"
+        httpx_pool = self._httpx_pool_stats()
+        probe = await self._probe_upstream_connect(endpoint)
+
+        per_endpoint = {
+            ep.name: {
+                "active_requests": ep.active_requests,
+                "circuit_open": ep.circuit_open,
+                "total_errors": ep.total_errors,
+            }
+            for ep in self.load_balancer.endpoints
+        }
+        fields = {
+            "endpoint": endpoint_name,
+            "request_id": request_id,
+            "attempt": attempt,
+            "api_type": api_type,
+            "model": model,
+            "acquire_timeout_s": self.POOL_ACQUIRE_TIMEOUT,
+            "lb_pool_active": total_active,
+            "lb_pool_max": self.POOL_MAX_CONNECTIONS,
+            "keepalive_max": self.POOL_MAX_KEEPALIVE,
+            "stream_registry_size": len(self._stream_connections),
+            "httpx_pool": httpx_pool,
+            "per_endpoint": per_endpoint,
+            "upstream_probe": probe,
+            "exc": exc_repr,
+        }
+
         state = (
-            f"pool_active={total_active}/{self.POOL_MAX_CONNECTIONS} "
-            f"keepalive_max={self.POOL_MAX_KEEPALIVE} "
+            f"lb_active={total_active}/{self.POOL_MAX_CONNECTIONS} "
+            f"httpx_active={httpx_pool.get('active')}/"
+            f"idle={httpx_pool.get('idle')}/total={httpx_pool.get('total')} "
+            f"waiting={httpx_pool.get('requests_waiting')} "
             f"streams={len(self._stream_connections)}"
         )
+        probe_str = self._format_probe(probe)
+
         if total_active >= self.POOL_MAX_CONNECTIONS:
             self.pool_timeout_saturated_total += 1
-            return (
+            fields["classification"] = "local_pool_saturated"
+            log_msg = (
                 f"[Copilot] local pool saturated for {endpoint_name} after "
-                f"{self.POOL_ACQUIRE_TIMEOUT}s wait ({state}): {exc_repr}",
-                (
-                    f"Copilot local pool saturated "
-                    f"({total_active}/{self.POOL_MAX_CONNECTIONS})"
-                ),
+                f"{self.POOL_ACQUIRE_TIMEOUT}s wait ({state} | {probe_str}): {exc_repr}"
             )
+            sse_msg = (
+                f"Copilot local pool saturated "
+                f"({total_active}/{self.POOL_MAX_CONNECTIONS}); {probe_str}"
+            )
+            return log_msg, sse_msg, fields
+
         self.pool_timeout_upstream_stall_total += 1
-        return (
+        fields["classification"] = "upstream_connect_stalled"
+        log_msg = (
             f"[Copilot] upstream connect/handshake stalled for {endpoint_name}: "
             f"httpx.PoolTimeout after {self.POOL_ACQUIRE_TIMEOUT}s while acquiring "
-            f"a NEW connection; local pool still has slots ({state}). "
-            f"Likely api.enterprise.githubcopilot.com is slow to establish TCP/TLS "
-            f"or its DNS response is delayed. Upstream detail: {exc_repr}",
-            (
-                f"Copilot upstream connect stalled for {endpoint_name} "
-                f"(no new connection returned within {self.POOL_ACQUIRE_TIMEOUT}s)"
-            ),
+            f"a NEW connection; local pool still has slots ({state} | {probe_str}). "
+            f"Upstream detail: {exc_repr}"
         )
+        sse_msg = (
+            f"Copilot upstream connect stalled for {endpoint_name} "
+            f"(no new connection returned within {self.POOL_ACQUIRE_TIMEOUT}s); {probe_str}"
+        )
+        return log_msg, sse_msg, fields
 
     def get_stream_connection_stats(self) -> dict:
         now = time.monotonic()
@@ -2895,12 +3169,49 @@ class CopilotProxy:
         logger.error(f"[Copilot] endpoint '{endpoint.name}' marked unhealthy: {reason}")
 
     async def warmup(self):
-        """启动时为所有 endpoint 预热 session token（暴露无效 token 为日志而不是首请求 500）"""
+        """启动时为所有 endpoint 预热 session token + TCP/TLS keepalive slot。
+
+        - session token 预热：暴露无效 token 为日志而不是首请求 500
+        - TCP 预热：对每个 endpoint 的 `session_base_url` 做一次极轻量 GET，触发
+          httpx 建立一条 TCP+TLS 连接进入 keepalive 池。冷 Pod 的第一次真实请
+          求不再需要 connect+handshake，`upstream_connect_stalled` 首请求命中面
+          积大幅下降。失败静默：探针失败不影响服务启动。
+        """
         for ep in self.load_balancer.endpoints:
             try:
                 await self.get_session_token(ep)
             except Exception as e:
                 logger.warning(f"[Copilot] warmup failed for {ep.name}: {e}. Endpoint will retry on first request.")
+                continue
+            # 用 HEAD /models 预热 TCP+TLS。上游对 HEAD 常常直接 200/404 都行——
+            # 我们只关心一条连接进入 keepalive 池，不 care 状态码。顺便：
+            # response.http_version 会告诉我们上游 ALPN 到底谈成了 HTTP/2 还是
+            # HTTP/1.1，是判断"h2 客户端 opt-in 但 CDN 没给"的唯一权威信号。
+            try:
+                url = f"{ep.session_base_url}/models"
+                headers = await self._build_headers(ep, has_image=False)
+                warm_resp = await self.client.head(url, headers=headers, timeout=5.0)
+                negotiated = warm_resp.http_version  # e.g. "HTTP/1.1" or "HTTP/2"
+                self.last_negotiated_http_version = negotiated
+                if self.HTTP2_ENABLED and negotiated != "HTTP/2":
+                    logger.warning(
+                        "[Copilot] connection warmup for %s: status=%s but ALPN "
+                        "negotiated %s despite http2=True. Upstream/CDN did NOT accept "
+                        "HTTP/2; you're getting HTTP/1.1 behavior even with h2 pkg loaded.",
+                        ep.name, warm_resp.status_code, negotiated,
+                    )
+                else:
+                    logger.info(
+                        "[Copilot] connection warmup for %s: status=%s protocol=%s "
+                        "(TCP+TLS pre-established)",
+                        ep.name, warm_resp.status_code, negotiated,
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.info(
+                    "[Copilot] connection warmup skipped for %s: %s. First real "
+                    "request will pay the connect+handshake cost.",
+                    ep.name, e,
+                )
 
     async def background_refresh_loop(self, interval: int = 300, threshold: int = 600):
         """后台主动刷新 task：每 interval 秒扫一遍，session token 剩 ≤ threshold 秒就主动刷新。
@@ -3194,9 +3505,25 @@ class CopilotProxy:
                 last_error = e
                 self.global_stats.total_errors += 1
                 self.pool_timeout_total += 1
-                log_msg, _ = self._describe_pool_timeout(endpoint.name, e)
-                logger.warning(log_msg)
+                log_msg, sse_msg, fields = await self._describe_pool_timeout(
+                    endpoint.name, e,
+                    endpoint=endpoint, request_id=request_id,
+                    attempt=attempt, api_type=api_type, model=model,
+                )
+                logger.warning(log_msg, extra={"kind": "copilot_pool_timeout", **fields})
                 await end_attempt(success=False, is_client_error=True)
+                # 只有 1 个 Copilot endpoint 且分类是 upstream_connect_stalled 时，
+                # 重试也是打同一个 httpx pool，同一个上游，赢面很低——快返回，让客
+                # 户端自己决定是否重试，比让用户再等一个 acquire_timeout 好。
+                if (
+                    fields.get("classification") == "upstream_connect_stalled"
+                    and len(self.load_balancer.endpoints) <= 1
+                ):
+                    logger.info(
+                        "[Copilot] skipping retry for %s: only one endpoint and upstream stall",
+                        endpoint.name,
+                    )
+                    break
                 if attempt < max_retries - 1:
                     await asyncio.sleep(min(2 ** attempt, 8))
                     continue
@@ -3226,6 +3553,10 @@ class CopilotProxy:
                                model: str, api_type: str, start_time: float,
                                request_id: Optional[str] = None) -> JSONResponse:
         response = await self.client.post(url, json=body, headers=headers)
+        try:
+            self.last_negotiated_http_version = response.http_version
+        except Exception:  # noqa: BLE001
+            pass
         if response.status_code >= 400:
             body_text = response.text
             if self._is_unsupported_model_error(response.status_code, body_text):
@@ -3439,6 +3770,15 @@ class CopilotProxy:
                         else:
                             response = payload
                             proxy_self._touch_stream(connection_id)
+                            # Record whatever the TLS ALPN actually negotiated for this
+                            # socket. This is the authoritative signal: "the CDN is
+                            # serving HTTP/2" vs "CDN downgraded us to HTTP/1.1 despite
+                            # h2=True". Kept as a lightweight scalar so /stats can
+                            # surface it without another round trip.
+                            try:
+                                proxy_self.last_negotiated_http_version = response.http_version
+                            except Exception:  # noqa: BLE001
+                                pass
 
                     if response.status_code >= 400:
                         error_body = await response.aread()
@@ -3644,12 +3984,25 @@ class CopilotProxy:
                     return
                 except httpx.PoolTimeout as e:
                     proxy_self.pool_timeout_total += 1
-                    log_msg, sse_msg = proxy_self._describe_pool_timeout(current_endpoint.name, e)
-                    logger.warning(log_msg)
+                    log_msg, sse_msg, pt_fields = await proxy_self._describe_pool_timeout(
+                        current_endpoint.name, e,
+                        endpoint=current_endpoint, request_id=request_id,
+                        attempt=attempt, api_type=api_type, model=model,
+                    )
+                    logger.warning(log_msg, extra={"kind": "copilot_pool_timeout",
+                                                    "connection_id": connection_id,
+                                                    **pt_fields})
                     error_detail = sse_msg
                     await end_current_request(success=False, is_client_error=True)
 
-                    if not sent_any_chunk and attempt < max_retries - 1:
+                    single_endpoint = len(proxy_self.load_balancer.endpoints) <= 1
+                    is_upstream_stall = pt_fields.get("classification") == "upstream_connect_stalled"
+
+                    if (
+                        not sent_any_chunk
+                        and attempt < max_retries - 1
+                        and not (single_endpoint and is_upstream_stall)
+                    ):
                         await asyncio.sleep(min(2 ** attempt, 8))
                         new_endpoint = proxy_self._select_endpoint(model)
                         if new_endpoint:
@@ -3671,7 +4024,11 @@ class CopilotProxy:
                                               metadata=_sse_error_metadata())
                     _emit_stream_end("pool_stall", logging.WARNING,
                                       pool_saturated=proxy_self.pool_timeout_saturated_total,
-                                      upstream_stall=proxy_self.pool_timeout_upstream_stall_total)
+                                      upstream_stall=proxy_self.pool_timeout_upstream_stall_total,
+                                      classification=pt_fields.get("classification"),
+                                      probe_ok=(pt_fields.get("upstream_probe") or {}).get("ok"),
+                                      httpx_active=(pt_fields.get("httpx_pool") or {}).get("active"),
+                                      httpx_total=(pt_fields.get("httpx_pool") or {}).get("total"))
                     return
                 except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
                         httpx.ConnectError, httpx.RemoteProtocolError,
@@ -3682,12 +4039,39 @@ class CopilotProxy:
                         # visible before users notice. With the default POOL_READ_TIMEOUT
                         # of None this should stay at 0.
                         proxy_self.stream_read_timeout_total += 1
+                    # Even non-PoolTimeout network errors deserve rich context so an
+                    # AKS log query can distinguish "one bad DNS lookup" from "the
+                    # whole pod is losing egress." We reuse the httpx pool + upstream
+                    # probe surface produced for PoolTimeout diagnostics.
+                    httpx_pool_snapshot = proxy_self._httpx_pool_stats()
+                    probe_snapshot = await proxy_self._probe_upstream_connect(current_endpoint)
+                    probe_str = proxy_self._format_probe(probe_snapshot)
                     error_detail = (
                         f"{type(e).__name__}: {str(e) or 'Unknown error'} "
                         f"(connection_id={connection_id} chunks_yielded={chunks_yielded_count} "
-                        f"first_event={first_event_name} last_event={last_event_name})"
+                        f"first_event={first_event_name} last_event={last_event_name} "
+                        f"{probe_str})"
                     )
-                    logger.error(f"[Copilot] stream network error on {current_endpoint.name}: {error_detail}")
+                    logger.error(
+                        f"[Copilot] stream network error on {current_endpoint.name}: {error_detail}",
+                        extra={
+                            "kind": "copilot_stream_network_error",
+                            "endpoint": current_endpoint.name,
+                            "request_id": request_id,
+                            "attempt": attempt,
+                            "api_type": api_type,
+                            "model": model,
+                            "connection_id": connection_id,
+                            "exc_type": type(e).__name__,
+                            "exc_message": str(e),
+                            "chunks_yielded": chunks_yielded_count,
+                            "first_event": first_event_name,
+                            "last_event": last_event_name,
+                            "sent_any_chunk": sent_any_chunk,
+                            "httpx_pool": httpx_pool_snapshot,
+                            "upstream_probe": probe_snapshot,
+                        },
+                    )
                     await end_current_request(success=False)
 
                     if not sent_any_chunk and attempt < max_retries - 1:
@@ -3810,6 +4194,16 @@ class CopilotProxy:
                 "stream_high_watermark": COPILOT_STREAM_HIGH_WATERMARK,
                 "stream_connections_active": len(self._stream_connections),
                 "utilization_pct": round(total_active / self.POOL_MAX_CONNECTIONS * 100, 1) if self.POOL_MAX_CONNECTIONS > 0 else 0,
+                # HTTP/2 三态说明：
+                #   http2_requested=True + http2_enabled=True + last=HTTP/2 → 完全达成
+                #   http2_requested=True + http2_enabled=False → 装的 h2 包缺失
+                #   http2_requested=True + http2_enabled=True + last=HTTP/1.1 → CDN 拒了
+                #   http2_requested=False → 未 opt-in
+                "http2_requested": self.HTTP2_REQUESTED,
+                "http2_enabled": self.HTTP2_ENABLED,
+                "h2_package_available": self.H2_PACKAGE_AVAILABLE,
+                "h2_package_version": self.H2_PACKAGE_VERSION,
+                "last_negotiated_http_version": self.last_negotiated_http_version,
             },
             "endpoints": endpoints_stats,
         }
@@ -5220,6 +5614,27 @@ async def metrics():
              "Times the pump task hit a full internal queue before put; useful for tuning maxsize.",
              "counter",
              [f"copilot_stream_pump_queue_full_events_total {copilot_proxy.stream_pump_queue_full_events_total}"])
+        # HTTP/2 三态状态：requested / enabled / negotiated
+        emit("copilot_http2_requested",
+             "1 if COPILOT_HTTP2=true was set at startup",
+             "gauge",
+             [f"copilot_http2_requested {1 if copilot_proxy.HTTP2_REQUESTED else 0}"])
+        emit("copilot_http2_enabled",
+             "1 if httpx was constructed with http2=True (COPILOT_HTTP2=true AND h2 package installed)",
+             "gauge",
+             [f"copilot_http2_enabled {1 if copilot_proxy.HTTP2_ENABLED else 0}"])
+        emit("copilot_h2_package_available",
+             "1 if the Python `h2` package can be imported",
+             "gauge",
+             [f"copilot_h2_package_available {1 if copilot_proxy.H2_PACKAGE_AVAILABLE else 0}"])
+        # Negotiated protocol from the last successful upstream response. Value labels
+        # let PromQL alert on protocol downgrade: alert if
+        # copilot_http2_enabled == 1 AND copilot_upstream_http_version{version="HTTP/2"} == 0.
+        neg = copilot_proxy.last_negotiated_http_version or "unknown"
+        emit("copilot_upstream_http_version",
+             "TLS ALPN-negotiated HTTP protocol observed on the most recent upstream response. Label carries the version string.",
+             "gauge",
+             [f'copilot_upstream_http_version{{version="{_escape_label(neg)}"}} 1'])
         # Read timeout is either None (unlimited) or a float; export as a numeric gauge
         # with -1 sentinel for unlimited so PromQL can filter without a string parse.
         _rt = copilot_proxy.POOL_READ_TIMEOUT
@@ -5264,6 +5679,70 @@ async def metrics():
 
     body = "\n".join(lines) + "\n" if lines else "# no providers configured\n"
     return Response(content=body, media_type="text/plain; version=0.0.4")
+
+
+@app.post("/admin/copilot/reset-pool")
+async def admin_copilot_reset_pool(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：重建 Copilot 共享 httpx.AsyncClient，逐出所有 keepalive 连接。
+
+    用途：怀疑 httpx 连接池泄漏或者 keepalive 连接卡在半开状态时的自救按钮。表现常
+    见于 `copilot_pool_timeout_upstream_stall_total` 持续增长、本地 `active_requests`
+    却明显低于 `POOL_MAX_CONNECTIONS`。重建会：
+      1) 用同样的配置新起一个 `httpx.AsyncClient`
+      2) 原子替换 `proxy.client`（新请求立刻走新池）
+      3) 后台 `aclose()` 旧 client（不影响正在进行的请求；旧请求 EOF 后自然收敛）
+      4) 触发一次 `warmup()` 让新池预热一条 keepalive 连接
+
+    鉴权同其他 /admin 端点。返回 `previous_pool` 快照方便对照。
+    """
+    if not copilot_proxy:
+        raise HTTPException(status_code=404, detail={"error": {"message": "GitHub Copilot is not configured"}})
+    actual_key = _extract_api_key(request, x_api_key)
+    if not _verify_lb_api_key(actual_key):
+        raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
+
+    previous_pool = copilot_proxy._httpx_pool_stats()
+    old_client = copilot_proxy.client
+    new_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(
+            connect=10.0,
+            read=copilot_proxy.POOL_READ_TIMEOUT,
+            write=60.0,
+            pool=copilot_proxy.POOL_ACQUIRE_TIMEOUT,
+        ),
+        limits=httpx.Limits(
+            max_connections=copilot_proxy.POOL_MAX_CONNECTIONS,
+            max_keepalive_connections=copilot_proxy.POOL_MAX_KEEPALIVE,
+            keepalive_expiry=copilot_proxy.POOL_KEEPALIVE_EXPIRY,
+        ),
+        http2=copilot_proxy.HTTP2_ENABLED,
+    )
+    copilot_proxy.client = new_client
+    logger.warning(
+        "[Copilot] httpx client rebuilt via /admin/copilot/reset-pool; previous_pool=%s",
+        previous_pool,
+    )
+
+    async def _drain_old_client():
+        # Give in-flight requests on the old client a grace period before closing.
+        await asyncio.sleep(30)
+        try:
+            await old_client.aclose()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[Copilot] old httpx client close failed: %s", e)
+    asyncio.create_task(_drain_old_client())
+    asyncio.create_task(copilot_proxy.warmup())
+    return {
+        "rebuilt": True,
+        "previous_pool": previous_pool,
+        "http2_enabled": copilot_proxy.HTTP2_ENABLED,
+        "config": {
+            "max_connections": copilot_proxy.POOL_MAX_CONNECTIONS,
+            "max_keepalive": copilot_proxy.POOL_MAX_KEEPALIVE,
+            "keepalive_expiry": copilot_proxy.POOL_KEEPALIVE_EXPIRY,
+            "acquire_timeout": copilot_proxy.POOL_ACQUIRE_TIMEOUT,
+        },
+    }
 
 
 @app.post("/admin/copilot/reload")
