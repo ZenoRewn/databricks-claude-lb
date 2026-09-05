@@ -426,3 +426,30 @@ Handoff §7.2 实证：同一 Responses opaque reasoning state 只能被生成�
 - 对长请求优先使用 streaming。LB 的 streaming 路径会在等待上游响应头期间也发送 SSE 注释心跳（默认每 15 秒 `: keep-alive\n\n`），响应头返回后的空闲阶段也继续心跳。
 - 可用 `STREAM_HEARTBEAT_INTERVAL` 调整心跳间隔；建议保持小于 Cloudflare / ingress / service mesh 的 idle timeout。
 - 非 streaming 请求无法在同一个 HTTP 响应里提前写 heartbeat；如果模型处理超过 Cloudflare origin timeout，只能改走 streaming、降低请求复杂度，或调整 Cloudflare/Ingress 超时策略。
+
+---
+
+## 11. Token exchange 被共享 streaming pool 卡住
+
+### 症状与原因
+
+`token exchange network error` / `header build failed` 后异常文本为空，随后 endpoint 熔断；httpx 内部 `total/active` 达到池上限，但业务 `active_requests` 很低。独立连接访问 token endpoint 正常、reset-pool 后恢复，说明不能仅凭业务计数将其判断为 GitHub 鉴权故障。
+
+旧版 `_exchange_token()` 使用推理长流的 `self.client.get()`。httpx 的连接上限跨 origin 共享，即使 token GET 访问 `api.github.com` 而非推理 host，也会等待同一个满池。空文本的 `PoolTimeout` 在 header-build 路径被记为请求失败，可能触发熔断。此处修复的是 **token 控制面与推理池的耦合**；不宣称解决导致 streaming 池堆满的所有泄漏/半开连接问题。
+
+### 修复行为
+
+- 每次 token GET 尝试创建独立短生命周期 `httpx.AsyncClient`，`max_connections=1`、`max_keepalive_connections=0`；buffered GET 读完后立即关闭，异常和取消也经过 async context 清理。不新增常驻池，无需修改 `close()` 或 reset-pool 的生命周期；不会关闭进行中的推理流。
+- 保持 token 请求 connect/read/write/pool **各 10 秒**，不继承 streaming 的 `read=None`、池上限或 HTTP/2 开关。这里是 httpx 每阶段/每次 I/O timeout，不是总墙钟 deadline；既有代理环境设置仍生效。
+- 每次 `_exchange_token()` 最多 **3 次尝试**，间隔 **0.2、0.4 秒**。仅重试 `ConnectTimeout/ReadTimeout/WriteTimeout/PoolTimeout/ConnectError/ReadError/WriteError/RemoteProtocolError`；仅应用于这个可安全重复的 GET，不重放推理 POST。
+- HTTP 状态错误（含 401/403/429/5xx）、解析错误、非白名单异常不进入上述网络重试。**401 仅保留原有自愈链**：从既有来源读到变化的 OAuth token 才再交换一次；没有变化或仍为 401 则熔断。既有业务层换端点/重试逻辑不变，因此一次业务请求可能包含多个有界的 token exchange。
+- 缓存、per-endpoint lock、60 秒提前刷新、后台刷新、admin reload 和成功后的 circuit 恢复保持原语义。
+
+### 观测与上线检查
+
+- 新日志 `kind=copilot_token_exchange_error` 含 `endpoint/error_type/attempt/max_attempts/retry`；文本日志同样带异常类型。重试为 WARNING、最终失败为 ERROR；此日志不输出异常原文、请求头、响应体或 token。
+- `copilot_token_refresh_failed_total` 按失败交换尝试计数（包括被重试恢复的网络失败），`copilot_token_refresh_total` 按成功交换计数；失败计数增长不一定代表最终刷新失败。取消本身不算失败。stream pool/read-timeout 指标不混入 token client 的异常。
+- 无新增依赖、配置或 K8s manifest 变更。按现有流程部署新代码后，关注 token 剩余有效期、refresh 成败计数、circuit 和 readiness；token 刷新不再依赖 reset-pool。仍需独立观察推理池是否饱和，不能用 token 恢复推断长流泄漏已经解决。
+- 取舍：每次刷新增加一次短连接/TLS 建连成本；刷新低频且有缓存/锁，优先选易于清理、不会被旧池污染的短生命周期 client，而非引入另一个共享常驻池。
+
+回归测试：`python -m unittest discover -s tests -v`。`test_copilot_token_exchange.py` 仅用合成 token、MockTransport 和 localhost；真实单槽 httpcore 池被未结束的流占满时，先验证共享 GET 触发 PoolTimeout，再验证隔离刷新成功且不关闭原流，无需真实凭据或访问 GitHub。

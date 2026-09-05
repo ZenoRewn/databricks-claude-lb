@@ -3239,6 +3239,17 @@ class CopilotProxy:
 
     # ---- Token 管理 ----
 
+    # Control-plane GETs must never wait behind long-lived inference streams.
+    # A fresh single-connection client per attempt also discards broken transports
+    # without adding a persistent pool to shutdown or /admin/copilot/reset-pool.
+    TOKEN_EXCHANGE_TIMEOUT = 10.0
+    TOKEN_EXCHANGE_MAX_ATTEMPTS = 3
+    TOKEN_EXCHANGE_RETRY_BACKOFF = 0.2
+    _TOKEN_EXCHANGE_TRANSIENT_ERRORS = (
+        httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout,
+        httpx.ConnectError, httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError,
+    )
+
     def _get_token_lock(self, endpoint: CopilotEndpoint) -> asyncio.Lock:
         lock = self._token_locks.get(endpoint.name)
         if lock is None:
@@ -3247,7 +3258,7 @@ class CopilotProxy:
         return lock
 
     async def _exchange_token(self, endpoint: CopilotEndpoint) -> str:
-        """单次 token 交换（不带自愈逻辑）。401 抛 _LongLivedTokenInvalidError；其他错误向上抛"""
+        """隔离池交换 token；仅瞬时网络错误短退避重试，401 留给调用方 reload。"""
         headers = {
             "Authorization": f"Bearer {endpoint.github_token}",
             "Accept": "application/json",
@@ -3255,12 +3266,43 @@ class CopilotProxy:
             "Editor-Version": COPILOT_HEADERS["Editor-Version"],
             "Editor-Plugin-Version": COPILOT_HEADERS["Editor-Plugin-Version"],
         }
-        try:
-            resp = await self.client.get(COPILOT_TOKEN_URL, headers=headers, timeout=10.0)
-        except Exception as e:
-            endpoint.token_refresh_failed_total += 1
-            logger.error(f"[Copilot] token exchange network error for {endpoint.name}: {e}")
-            raise
+        for attempt in range(1, self.TOKEN_EXCHANGE_MAX_ATTEMPTS + 1):
+            try:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(self.TOKEN_EXCHANGE_TIMEOUT),
+                    limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+                ) as token_client:
+                    # Buffered GET: response body is read before the client closes.
+                    resp = await token_client.get(COPILOT_TOKEN_URL, headers=headers)
+                break
+            except Exception as e:
+                # Preserve per-call failure accounting, including recovered attempts.
+                # CancelledError propagates without retries or failure/circuit metrics.
+                endpoint.token_refresh_failed_total += 1
+                retry = (
+                    isinstance(e, self._TOKEN_EXCHANGE_TRANSIENT_ERRORS)
+                    and attempt < self.TOKEN_EXCHANGE_MAX_ATTEMPTS
+                )
+                # Exception text may be empty or contain sensitive request details;
+                # log type + bounded attempt context, never headers/body/token values.
+                logger.log(
+                    logging.WARNING if retry else logging.ERROR,
+                    "[Copilot] token exchange network error for %s: %s "
+                    "(attempt %s/%s, retry=%s)",
+                    endpoint.name, type(e).__name__, attempt,
+                    self.TOKEN_EXCHANGE_MAX_ATTEMPTS, retry,
+                    extra={
+                        "kind": "copilot_token_exchange_error",
+                        "endpoint": endpoint.name,
+                        "error_type": type(e).__name__,
+                        "attempt": attempt,
+                        "max_attempts": self.TOKEN_EXCHANGE_MAX_ATTEMPTS,
+                        "retry": retry,
+                    },
+                )
+                if not retry:
+                    raise
+                await asyncio.sleep(self.TOKEN_EXCHANGE_RETRY_BACKOFF * 2 ** (attempt - 1))
 
         if resp.status_code == 401:
             endpoint.token_refresh_failed_total += 1
@@ -3336,7 +3378,7 @@ class CopilotProxy:
             try:
                 await self.get_session_token(ep)
             except Exception as e:
-                logger.warning(f"[Copilot] warmup failed for {ep.name}: {e}. Endpoint will retry on first request.")
+                logger.warning(f"[Copilot] warmup failed for {ep.name}: {type(e).__name__}. Endpoint will retry on first request.")
                 continue
             # 用 HEAD /models 预热 TCP+TLS。上游对 HEAD 常常直接 200/404 都行——
             # 我们只关心一条连接进入 keepalive 池，不 care 状态码。顺便：
@@ -3720,13 +3762,13 @@ class CopilotProxy:
                 await end_attempt(success=False)
                 raise
             except Exception as e:
-                logger.error(f"[Copilot {api_type}][{model}] header build failed on {endpoint.name}: {e}")
+                logger.error(f"[Copilot {api_type}][{model}] header build failed on {endpoint.name}: {type(e).__name__}")
                 await end_attempt(success=False)
                 last_error = e
                 if attempt < max_retries - 1:
                     await asyncio.sleep(min(2 ** attempt, 8))
                     continue
-                raise HTTPException(status_code=503, detail={"error": {"message": f"Copilot token exchange failed: {e}"}})
+                raise HTTPException(status_code=503, detail={"error": {"message": f"Copilot token exchange failed: {type(e).__name__}"}})
 
             url = f"{endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
             logger.info(f"[Copilot {api_type}][{model}] -> {endpoint.name} (attempt {attempt + 1})")
