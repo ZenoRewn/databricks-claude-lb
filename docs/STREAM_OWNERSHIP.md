@@ -14,6 +14,24 @@ The helper marks ownership transferred immediately before yielding the result;
 each caller assigns it without an intervening await. After transfer, only the
 caller closes it. The helper must not close a legitimate long-lived response.
 
+The send owner installs `_OwnedResponseStream` on the public HTTPX `stream`
+attribute immediately after headers return, before any await or ownership
+transfer. Its first `aclose()` retains a single task closing the original bound
+stream; every later stream close joins the same task, including its failure.
+This covers HTTPX's implicit EOF close from `aiter_bytes()` and error-body
+`aread()`. HTTPX's early `is_closed` flag is not a cleanup-completion signal;
+explicit finalization also joins the adapter even when `Response.aclose()` skips.
+
+httpcore additionally self-closes *inside* stream iteration when a read fails or
+is cancelled. A close-only outer adapter cannot protect that internal operation.
+Each underlying `anext()` therefore runs in a retained worker with an AnyIO
+cancel scope. Raw caller cancellation cancels that scope (not the worker task),
+then joins the worker before re-raising. httpcore's internal close shields honor
+scope cancellation and can finish releasing the connection. Normal silent reads
+remain cancellable; this does not shield the entire pump, a queue wait, or an
+unlimited read against cancellation. No cancel scope spans a yield. The extra
+per-read task/shield scheduling has not been benchmarked at production load.
+
 Cleanup uses a joined task shielded against repeated `asyncio.Task.cancel()` and
 an AnyIO shielded scope against level cancellation. No cancel scope spans a
 streaming yield. Body-pump cancellation and response close are shielded together,
@@ -25,7 +43,10 @@ and Copilot; send failure must not leave its iterator or active count behind.
 No pool size, keepalive, HTTP/2, read timeout, token exchange, or production
 configuration tuning is part of this change. There is no forced cleanup timeout:
 a non-cooperative custom transport could delay shutdown; the tested HTTPX/httpcore
-transport cooperates. Process kill cannot run Python cleanup.
+transport cooperates. Direct raw cancellation of a private read/close worker is
+not a supported cancellation path and can defeat httpcore's shields; callers
+cancel the pump/iterator, which retains and joins those workers. No code resets
+closed flags or removes private pool entries. Process kill cannot run Python cleanup.
 
 ## Diagnostic/API compatibility
 
@@ -71,6 +92,16 @@ Coverage includes paused heartbeats, pre-header/body cancellation, ASGI 2.4 send
 errors, ASGI 2.3 disconnect cancellation, repeated cancellation during cleanup,
 finish/cancel races, multiple origins, repeated disconnect/recovery cycles,
 normal silent streams, result transfer, and neutral diagnostics.
+
+`tests/test_stream_transport_close.py` additionally exercises implicit EOF close,
+error-body EOF close, and internal close after truncated or cancelled reads for
+all providers. It holds the real httpcore state lock (and separately tests its
+uncontended checkpoint), cancels the original pump/consumer repeatedly, and
+releases the lock independently. Assertions require joined cancellation,
+exactly-once transport/business finalization, zero pool requests/active
+connections, and a completed request to a second origin before client teardown.
+Concurrent close callers, cancelled AnyIO scopes, retained close errors and the
+send-finish/cancel race are covered as well.
 
 The ASGI tests call the real Starlette response with controlled `send`/`receive`;
 they are not a claim to test the complete external ingress/client chain.
