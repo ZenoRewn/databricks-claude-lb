@@ -21,6 +21,8 @@ class Peer:
         self.writer = writer
         self.allow_headers = asyncio.Event()
         self.closed = asyncio.Event()
+        self.status = b'200 OK'
+        self.headers_sent = asyncio.Event()
 
     async def chunk(self, data):
         self.writer.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
@@ -79,9 +81,10 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
                     done, _ = await asyncio.wait({header_wait, eof_wait},
                                                 return_when=asyncio.FIRST_COMPLETED)
                     if eof_wait not in done:
-                        writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n'
+                        writer.write(b'HTTP/1.1 ' + peer.status + b'\r\nContent-Type: text/event-stream\r\n'
                                      b'Transfer-Encoding: chunked\r\n\r\n')
                         await writer.drain()
+                        peer.headers_sent.set()
                         await eof_wait
                 finally:
                     for child in (header_wait, eof_wait):

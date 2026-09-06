@@ -132,15 +132,10 @@ def _is_anthropic_model(model_name: str) -> bool:
     return not (m.startswith(("gpt-", "o1", "o3", "o4", "gemini")) or m in OPENAI_CHAT_TO_RESPONSES_MODELS_LOWER)
 
 
-async def _finish_cleanup(awaitable):
-    """Join cleanup despite AnyIO scope or repeated asyncio cancellation.
-
-    Shielding alone leaves a detached task when its waiter is cancelled. Keep a
-    strong reference and join it before re-raising cancellation to the caller.
-    """
+async def _join_cleanup_task(task):
+    """Join an owned task despite level cancellation or repeated Task.cancel()."""
     cancelled = None
     with anyio.CancelScope(shield=True):
-        task = asyncio.create_task(awaitable)
         while not task.done():
             try:
                 await asyncio.shield(task)
@@ -150,6 +145,71 @@ async def _finish_cleanup(awaitable):
     if cancelled is not None:
         raise cancelled
     return result
+
+
+async def _finish_cleanup(awaitable):
+    """Retain and join cleanup before re-raising cancellation to its waiter."""
+    return await _join_cleanup_task(asyncio.create_task(awaitable))
+
+
+class _OwnedResponseStream(httpx.AsyncByteStream):
+    """Keep the first stream close owned, including HTTPX's implicit EOF close.
+
+    Response.is_closed is set *before* HTTPX awaits stream.aclose(). Shielding a
+    later Response.aclose cannot repair an interrupted first close. Retain one
+    task on the response's stream, and make every stream close join that task.
+    Reads remain cancellable via AnyIO scopes, so httpcore's own error-path
+    close shields also work. No scope spans a yield and read=None is abortable.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._close_task = None
+
+    async def _next_chunk(self, iterator):
+        # httpcore also self-closes *inside* __anext__ on read error/cancellation.
+        # Translate caller Task.cancel into scope cancellation, which its internal
+        # close shields honor. Never raw-cancel this read worker: it may be closing.
+        scope = anyio.CancelScope()
+
+        async def read():
+            with scope:
+                return await anext(iterator)
+
+        task = asyncio.create_task(read())
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            scope.cancel()  # also effective if read() has not started yet
+            try:
+                await _join_cleanup_task(task)
+            except (Exception, asyncio.CancelledError):
+                pass  # Retrieve the read outcome; preserve caller cancellation.
+            raise
+
+    async def __aiter__(self):
+        iterator = self._stream.__aiter__()
+        while True:
+            try:
+                chunk = await self._next_chunk(iterator)
+            except StopAsyncIteration:
+                return
+            yield chunk
+
+    async def aclose(self):
+        # No await between checking and storing: concurrent callers share one task.
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._stream.aclose())
+        await _join_cleanup_task(self._close_task)
+
+
+async def _close_owned_response(response):
+    """Join transport cleanup even if HTTPX's early closed flag skips aclose."""
+    try:
+        await response.aclose()
+    finally:
+        if isinstance(response, httpx.Response) and isinstance(response.stream, _OwnedResponseStream):
+            await response.stream.aclose()
 
 
 async def _close_stream_resources(pump_task, response):
@@ -163,7 +223,7 @@ async def _close_stream_resources(pump_task, response):
             pass
     if response is not None:
         try:
-            await response.aclose()
+            await _close_owned_response(response)
         except Exception:
             pass  # Preserve existing stream-error handling.
 
@@ -174,7 +234,17 @@ async def _await_with_heartbeat(awaitable, heartbeat: bytes, interval: float = S
     Callers must explicitly close this iterator (aclosing), assign a yielded
     result before their next await, and then close that response themselves.
     """
-    task = asyncio.create_task(awaitable)
+    async def send_and_own_response():
+        result = await awaitable
+        # Install inside the send owner, with no intervening await after headers,
+        # before consumption, transfer, or send-finish/cancel-race reclamation.
+        if (isinstance(result, httpx.Response)
+                and isinstance(result.stream, httpx.AsyncByteStream)
+                and not isinstance(result.stream, _OwnedResponseStream)):
+            result.stream = _OwnedResponseStream(result.stream)
+        return result
+
+    task = asyncio.create_task(send_and_own_response())
     transferred = False
 
     async def reclaim_untransferred_result():
@@ -185,7 +255,7 @@ async def _await_with_heartbeat(awaitable, heartbeat: bytes, interval: float = S
         except BaseException:  # Retrieve task failure; preserve caller outcome.
             return
         if not transferred and isinstance(result, httpx.Response):
-            await result.aclose()
+            await _close_owned_response(result)
 
     try:
         while True:
