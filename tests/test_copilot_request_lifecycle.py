@@ -136,8 +136,8 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_non_stream_pool_timeout_is_local_and_retry_ends_once_per_attempt(self):
         # PoolTimeout with a second endpoint present exercises the retry path.
-        # (With only one endpoint, the upstream_stall classification now fails
-        # fast — see test_non_stream_pool_timeout_single_endpoint_upstream_stall_fails_fast.)
+        # (With only one endpoint, the pool timeout now fails
+        # fast — see test_non_stream_pool_timeout_single_endpoint_fails_fast.)
         request = httpx.Request("POST", "https://example.test/chat/completions")
         success = httpx.Response(
             200,
@@ -173,8 +173,8 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(load_balancer.on_request_start.await_count, 2)
         self.assertEqual(load_balancer.on_request_end.await_count, 2)
 
-    async def test_non_stream_pool_timeout_single_endpoint_upstream_stall_fails_fast(self):
-        """Single endpoint + upstream_connect_stalled must bail out immediately.
+    async def test_non_stream_pool_timeout_single_endpoint_fails_fast(self):
+        """Single endpoint + pool_acquire_timeout must bail out immediately.
 
         Retrying against the only endpoint would just replay the same httpx pool
         wait — up to POOL_ACQUIRE_TIMEOUT * max_retries seconds of pain the user
@@ -451,9 +451,9 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(load_balancer.on_request_end.await_count, 2)
 
     async def test_stream_pool_timeout_single_endpoint_fails_fast(self):
-        """Streaming with a single endpoint bails out on upstream_stall PoolTimeout.
+        """Streaming with a single endpoint bails out on PoolTimeout.
 
-        Symmetric to test_non_stream_pool_timeout_single_endpoint_upstream_stall_fails_fast:
+        Symmetric to test_non_stream_pool_timeout_single_endpoint_fails_fast:
         the retry loop would just replay the same shared httpx pool wait, so we
         surface an explicit SSE error immediately and let Codex decide.
         """
@@ -479,7 +479,7 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         # Exactly one SSE error frame followed by [DONE] for chat api_type.
         self.assertEqual(len(chunks), 1)
         joined = chunks[0]
-        self.assertIn(b"upstream_connect_stalled", joined)
+        self.assertIn(b"pool_acquire_timeout", joined)
         self.assertIn(b"[DONE]", joined)
         # Only one attempt — no retry.
         self.assertEqual(endpoint.active_requests, 0)
