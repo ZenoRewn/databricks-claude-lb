@@ -16,11 +16,12 @@ import logging
 import socket
 import stat
 import uuid
+import zlib
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field
-from contextlib import aclosing, asynccontextmanager
+from contextlib import aclosing, closing, asynccontextmanager
 from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
 
@@ -480,64 +481,424 @@ def _escape_label(value: str) -> str:
     return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
 
 
-# Terminal events we accept as valid completion for the Responses API. Any of them
-# indicates upstream deliberately ended the response; only `response.completed`
-# additionally carries the final usage.
-_RESPONSES_TERMINAL_EVENTS = frozenset(
-    {"response.completed", "response.failed", "response.incomplete"}
-)
+def _positive_byte_limit(name: str, default: int) -> int:
+    """Operational bytes, not model limits. Reject unlimited/non-integral settings."""
+    raw = os.environ.get(name, str(default))
+    if not re.fullmatch(r"[0-9]+", raw) or not 0 < int(raw) <= sys.maxsize:
+        raise ValueError(f"{name} must be a positive integer <= sys.maxsize")
+    return int(raw)
+
+
+PER_PENDING_EVENT = _positive_byte_limit("PER_PENDING_EVENT", 8 * 1024 * 1024)
+PER_PROCESS_TOTAL_RETAINED_STREAM_BUFFER = _positive_byte_limit(
+    "PER_PROCESS_TOTAL_RETAINED_STREAM_BUFFER", 64 * 1024 * 1024)
+if PER_PENDING_EVENT > PER_PROCESS_TOTAL_RETAINED_STREAM_BUFFER:
+    raise ValueError("PER_PENDING_EVENT must not exceed PER_PROCESS_TOTAL_RETAINED_STREAM_BUFFER")
+
+
+class _LocalStreamLimit(Exception):
+    code = "protocol_buffer_limit"
+
+
+class _LocalObserverError(Exception):
+    code = "local_observer_error"
+
+
+class _RetainedStreamBudget:
+    """One process/event-loop budget for owned decoded queues and pending frames.
+
+    Not an RSS bound: transport, compressed input, decoding/JSON/copy temporaries,
+    ASGI and kernel buffers are outside this accounting.
+    """
+    def __init__(self, limit):
+        self.limit = limit
+        self.retained = 0
+        self.peak = 0
+
+    def acquire(self, size):
+        if size > self.limit - self.retained:
+            raise _LocalStreamLimit("local_resource_limit: aggregate retained stream buffer exhausted")
+        self.retained += size
+        self.peak = max(self.peak, self.retained)
+
+    def release(self, size):
+        self.retained -= size
+        assert self.retained >= 0
+
+
+_STREAM_BUFFER_BUDGET = _RetainedStreamBudget(PER_PROCESS_TOTAL_RETAINED_STREAM_BUFFER)
+_SSE_NEWLINE = re.compile(rb"[\r\n]")
+
+
+class _SSEFramer:
+    """Complete original-wire frames only; CRLF/CR/LF and split UTF-8/BOM.
+
+    Byte scanning is safe for UTF-8: CR/LF cannot occur inside a multibyte code
+    point. Decode only complete frames using WHATWG replacement semantics. The
+    cap includes framing bytes; no cap applies to the sum of released events.
+    """
+    def __init__(self, budget=None, limit=None):
+        self.budget = budget if budget is not None else _STREAM_BUFFER_BUDGET
+        self.limit = PER_PENDING_EVENT if limit is None else limit
+        self.pending = bytearray()
+        self.line_size = 0
+        self.after_cr = False
+        self.ready = False
+        self.first_frame = True
+        self.events = 0
+        self.decoded_bytes = 0
+        self.peak_pending = 0
+
+    def _append(self, data):
+        size = len(data)
+        if size > self.limit - len(self.pending):
+            raise _LocalStreamLimit("local_resource_limit: pending SSE event exceeds PER_PENDING_EVENT")
+        self.budget.acquire(size)
+        try:
+            self.pending.extend(data)
+        except BaseException:
+            self.budget.release(size)
+            raise
+        self.peak_pending = max(self.peak_pending, len(self.pending))
+
+    def _emit(self):
+        # The yielded bytes remain charged until the caller resumes/closes feed.
+        size = len(self.pending)
+        frame = bytes(self.pending)
+        self.pending = bytearray()
+        self.ready = False
+        self.events += 1
+        try:
+            yield frame
+        finally:
+            self.budget.release(size)
+
+    def feed(self, chunk):
+        self.decoded_bytes += len(chunk)
+        pos = 0
+        while pos < len(chunk):
+            if self.after_cr:
+                self.after_cr = False
+                if chunk[pos] == 10:
+                    self._append(chunk[pos:pos+1])
+                    pos += 1
+                if self.ready:
+                    yield from self._emit()
+                if pos == len(chunk):
+                    break
+            match = _SSE_NEWLINE.search(chunk, pos)
+            end = match.start() if match else len(chunk)
+            self._append(memoryview(chunk)[pos:end])
+            self.line_size += end - pos
+            pos = end
+            if match is None:
+                break
+            byte = chunk[pos]
+            self._append(chunk[pos:pos+1])
+            pos += 1
+            # Only a leading BOM is ignored in the semantic first line.
+            bom_only = self.first_frame and self.line_size == 3 and self.pending[:3] == b"\xef\xbb\xbf"
+            self.ready = self.line_size == 0 or bom_only
+            self.line_size = 0
+            self.first_frame = False
+            self.after_cr = byte == 13
+            if self.ready and not self.after_cr:
+                yield from self._emit()
+
+    def eof(self):
+        # A final CR is a complete line ending; never append a missing delimiter.
+        if self.ready:
+            yield from self._emit()
+
+    def close(self):
+        self.budget.release(len(self.pending))
+        self.pending = bytearray()
+
+
+class _SSEWireOutput:
+    """A BOM stays initial only if no local heartbeat has already been sent."""
+    def __init__(self):
+        self.started = False
+        self.first_frame = True
+
+    def heartbeat(self, value):
+        self.started = True
+        return value
+
+    def frame(self, value):
+        if self.first_frame and self.started and value.startswith(b"\xef\xbb\xbf"):
+            value = value[3:]
+        self.first_frame = False
+        self.started = True
+        return value
+
+
+async def _decoded_stream_chunks(response):
+    """Use supported HTTPX raw iteration for bounded single-gzip expansion.
+
+    HTTPX aiter_bytes(chunk_size=...) slices *after* decompression, not before.
+    For other/stacked encodings or preconsumed test responses, use its supported
+    decoder and immediately check each allocated delivery before queue retention.
+    No private transport/decoder replacement; _OwnedResponseStream stays installed.
+    """
+    encoding = response.headers.get("content-encoding", "").strip().lower() if hasattr(response, "headers") else ""
+    if isinstance(response, httpx.Response) and encoding == "gzip" and not response.is_stream_consumed:
+        decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        async for raw in response.aiter_raw():
+            pending = raw
+            while pending:
+                if decoder.eof:
+                    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                try:
+                    decoded = decoder.decompress(pending, 16384)
+                except zlib.error as exc:
+                    raise httpx.DecodingError("Invalid upstream gzip stream") from exc
+                pending = decoder.unused_data if decoder.eof else decoder.unconsumed_tail
+                if decoded:
+                    yield decoded
+        if not decoder.eof:
+            raise httpx.DecodingError("Incomplete upstream gzip stream")
+    else:
+        async for chunk in response.aiter_bytes():
+            yield chunk
+
+
+async def _framed_sse(response, *, on_activity=None, on_queue_full=None, on_pump=None, metrics=None):
+    """Own byte-charged pump, current delivery and pending frame until cleanup.
+
+    Pressure fails only this stream; no waiting for global memory while holding
+    a partial frame. Queue item count remains 64 as a secondary backpressure cap.
+    """
+    budget = _STREAM_BUFFER_BUDGET
+    framer = _SSEFramer(budget)
+    queue = asyncio.Queue(maxsize=64)
+    queued_bytes = 0
+    pressure = None
+    if metrics is None:
+        metrics = {}
+    metrics.update(decoded_bytes=0, decoded_deliveries=0, frames=0,
+                   pending_eof_bytes=0, peak_pending_bytes=0)
+
+    async def pump():
+        nonlocal queued_bytes, pressure
+        try:
+            async with aclosing(_decoded_stream_chunks(response)) as deliveries:
+                async for chunk in deliveries:
+                    # Fallback HTTPX decoders may already have allocated a huge chunk.
+                    # Check before retaining/queuing it, then close on failure.
+                    metrics["decoded_bytes"] += len(chunk)
+                    metrics["decoded_deliveries"] += 1
+                    budget.acquire(len(chunk))
+                    queued_bytes += len(chunk)
+                    if on_activity:
+                        on_activity()
+                    if queue.full() and on_queue_full:
+                        on_queue_full()
+                    await queue.put(("chunk", chunk))
+                    chunk = None
+            await queue.put(("eof", None))
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            if isinstance(exc, _LocalStreamLimit):
+                # Drop the oversized delivery and its traceback before potentially
+                # waiting for the downstream consumer. Close upstream immediately.
+                pressure = _LocalStreamLimit(str(exc))
+                chunk = None
+                exc = pressure
+                while not queue.empty():
+                    kind, value = queue.get_nowait()
+                    if kind == "chunk":
+                        budget.release(len(value))
+                        queued_bytes -= len(value)
+                    value = None
+                await _finish_cleanup(_close_stream_resources(None, response))
+            await queue.put(("error", exc))
+
+    task = asyncio.create_task(pump())
+    if on_pump:
+        on_pump(task, queue)
+    try:
+        while True:
+            try:
+                kind, chunk = await asyncio.wait_for(queue.get(), STREAM_HEARTBEAT_INTERVAL)
+            except asyncio.TimeoutError:
+                yield None
+                continue
+            if pressure is not None:
+                raise pressure
+            if kind == "error":
+                raise chunk
+            if kind == "eof":
+                metrics["pending_eof_bytes"] = 0 if framer.ready else len(framer.pending)
+                with closing(framer.eof()) as frames:
+                    for frame in frames:
+                        metrics["frames"] += 1
+                        metrics["peak_pending_bytes"] = framer.peak_pending
+                        yield frame
+                return
+            # This delivery stays charged while feed is suspended at a frame.
+            with closing(framer.feed(chunk)) as frames:
+                for frame in frames:
+                    metrics["frames"] += 1
+                    metrics["peak_pending_bytes"] = framer.peak_pending
+                    yield frame
+            budget.release(len(chunk))
+            queued_bytes -= len(chunk)
+            chunk = None
+    finally:
+        try:
+            await _finish_cleanup(_close_stream_resources(task, response))
+        finally:
+            metrics["peak_pending_bytes"] = framer.peak_pending
+            framer.close()
+            budget.release(queued_bytes)
+            # Remove references as well as accounting after the pump has joined.
+            while not queue.empty():
+                queue.get_nowait()
 
 
 def _parse_sse_event_block(event_block: str) -> tuple[Optional[str], Optional[dict], bool]:
-    """Parse one SSE event block into (event_name, data_json, is_chat_done).
-
-    SSE (per WHATWG) allows the terminal event to be signalled either by the
-    ``event:`` header line or by an in-payload ``type`` field. GHCP's Responses
-    stream has been observed to use both variants across model releases:
-
-      * ``event: response.completed\\ndata: {"id":"...","object":"response",...}``
-        (no ``type`` field in the payload)
-      * ``data: {"type":"response.completed", "response": {...}}``
-        (no ``event:`` header line)
-
-    Reading only the second form is what let "silent completion" streams register
-    as truncation. This helper returns whichever form was present so the caller
-    can OR them together.
-
-    ``data:`` lines may repeat within one event (SSE line concatenation). We join
-    them with ``\\n`` before ``json.loads`` for robustness, though GHCP has never
-    been observed doing this in practice.
-
-    Returns ``(None, None, False)`` when the block is empty / carries only
-    comments.
-    """
-    event_name: Optional[str] = None
-    data_lines: list[str] = []
-    is_chat_done = False
-    for raw in event_block.split("\n"):
-        line = raw.rstrip("\r")
+    """WHATWG fields; JSON discriminator, not event header, determines API type."""
+    event_name = None
+    data_lines = []
+    for line in event_block.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         if not line or line.startswith(":"):
             continue
-        if line.startswith("event:"):
-            event_name = line[len("event:"):].strip() or None
-        elif line.startswith("data:"):
-            payload = line[len("data:"):]
-            if payload.startswith(" "):
-                payload = payload[1:]
-            if payload == "[DONE]":
-                is_chat_done = True
-            else:
-                data_lines.append(payload)
-    data_json: Optional[dict] = None
-    if data_lines:
-        joined = "\n".join(data_lines)
+        key, _, value = line.partition(":")
+        if value.startswith(" "):
+            value = value[1:]
+        if key == "event":
+            event_name = value or None
+        elif key == "data":
+            data_lines.append(value)
+    data = "\n".join(data_lines)
+    try:
+        parsed = json.loads(data, parse_constant=lambda value: (_ for _ in ()).throw(ValueError("nonfinite JSON"))) if data_lines else None
+    except (ValueError, RecursionError):
+        parsed = None
+    return event_name, parsed if isinstance(parsed, dict) else None, data == "[DONE]"
+
+
+def _i64(value):
+    return type(value) is int and -(2**63) <= value < 2**63
+
+
+def _valid_responses_completed(response):
+    """Pinned Codex ResponseCompleted/Usage fields, not an invented token ceiling."""
+    if not isinstance(response, dict) or not isinstance(response.get("id"), str):
+        return False
+    if response.get("end_turn") is not None and type(response["end_turn"]) is not bool:
+        return False
+    metadata = response.get("usage_metadata")
+    if metadata is not None and (not isinstance(metadata, dict) or
+            metadata.get("amount") is not None and not isinstance(metadata["amount"], str)):
+        return False
+    usage = response.get("usage")
+    if usage is not None:
+        if not isinstance(usage, dict) or not all(_i64(usage.get(k)) for k in ("input_tokens", "output_tokens", "total_tokens")):
+            return False
+        for field, required in (("input_tokens_details", "cached_tokens"), ("output_tokens_details", "reasoning_tokens")):
+            details = usage.get(field)
+            if details is not None:
+                if not isinstance(details, dict) or not _i64(details.get(required)):
+                    return False
+                if field == "input_tokens_details" and not _i64(details.get("cache_write_tokens", 0)):
+                    return False
+        units = usage.get("codex_rollout_budget_units")
+        if units is not None and (type(units) not in (int, float) or type(units) is float and not math.isfinite(units)):
+            return False
+    # Explicit contradictory outcome must not be counted as successful generation.
+    return response.get("status", "completed") == "completed" and not response.get("error") and not response.get("incomplete_details")
+
+
+class _SSEObservation:
+    """Keep terminal validity, generation outcome and account attribution separate."""
+    def __init__(self, api_type):
+        self.api_type = api_type
+        self.first = True
+        self.first_event = None
+        self.last_event = None
+        self.terminal = None
+        self.neutral = False
+        self.input_tokens = self.output_tokens = self.cache_read_tokens = self.cache_creation_tokens = 0
+
+    def observe(self, frame):
         try:
-            parsed = json.loads(joined)
-            if isinstance(parsed, dict):
-                data_json = parsed
-        except Exception:  # noqa: BLE001 - malformed events are ignored (best-effort parse)
-            data_json = None
-    return event_name, data_json, is_chat_done
+            self._observe(frame)
+        except Exception as exc:
+            # A bug in local observation is never evidence of endpoint failure.
+            raise _LocalObserverError("Local stream observer failed; upstream outcome unknown") from exc
+
+    def _observe(self, frame):
+        text = frame.decode("utf-8-sig" if self.first else "utf-8", errors="replace")
+        self.first = False
+        header, data, done = _parse_sse_event_block(text)
+        kind = data.get("type") if data else None
+        if not isinstance(kind, str):
+            kind = None
+        name = kind or header
+        if name:
+            self.first_event = self.first_event or name
+            self.last_event = name
+        if self.terminal:
+            return
+        response = data.get("response") if data else None
+        if self.api_type == "responses" and data:
+            # Fields in pinned ResponsesStreamEvent are typed even on terminals.
+            for key in ("item_id", "call_id", "delta", "text"):
+                if data.get(key) is not None and not isinstance(data[key], str):
+                    return
+            for key in ("summary_index", "content_index"):
+                if data.get(key) is not None and not _i64(data[key]):
+                    return
+        error = None
+        if self.api_type == "responses":
+            if kind == "response.completed" and _valid_responses_completed(response):
+                self.terminal = "completed"
+                self._usage(response.get("usage"), "input_tokens", "output_tokens", "input_tokens_details")
+            elif kind in ("response.failed", "response.incomplete"):
+                # Pinned Codex surfaces these discriminators as errors even when
+                # their optional error/reason details are absent or malformed.
+                self.terminal = kind.split(".")[1]
+                response = response if isinstance(response, dict) else {}
+                error = response.get("error")
+                details = response.get("incomplete_details")
+                self.neutral = (kind == "response.incomplete" and isinstance(details, dict)
+                                and details.get("reason") == "max_output_tokens")
+        elif self.api_type == "chat":
+            if done:
+                self.terminal = "completed"
+            elif data:
+                self._usage(data.get("usage"), "prompt_tokens", "completion_tokens", "prompt_tokens_details")
+        else:
+            if kind == "message_stop":
+                self.terminal = "completed"
+            elif kind == "message_start":
+                message = data.get("message")
+                self._usage(message.get("usage") if isinstance(message, dict) else None)
+            elif kind == "message_delta":
+                self._usage(data.get("usage"))
+        if data and (kind == "error" or self.api_type == "chat" and isinstance(data.get("error"), dict)):
+            self.terminal = "error"
+            error = data.get("error", data)
+        if isinstance(error, dict):
+            # Narrow request-local evidence only. Auth/quota/overload/server and
+            # unknown EOF/errors remain conservative endpoint failures.
+            self.neutral = self.neutral or error.get("code") in ("invalid_prompt", "context_length_exceeded", "max_output_tokens")
+
+    def _usage(self, usage, input_key="input_tokens", output_key="output_tokens", details_key="input_tokens_details"):
+        if not isinstance(usage, dict):
+            return
+        for source, target in ((input_key, "input_tokens"), (output_key, "output_tokens"),
+                               ("cache_read_input_tokens", "cache_read_tokens"),
+                               ("cache_creation_input_tokens", "cache_creation_tokens")):
+            value = usage.get(source)
+            if _i64(value):
+                setattr(self, target, value)
+        details = usage.get(details_key)
+        if isinstance(details, dict) and _i64(details.get("cached_tokens")):
+            self.cache_read_tokens = details["cached_tokens"]
 
 
 # ==================== 模型名称映射 ====================
@@ -1183,6 +1544,14 @@ COPILOT_AUTH_DIR = Path.home() / ".config" / "databricks-claude-lb"
 COPILOT_LEGACY_AUTH_FILE = Path.home() / ".config" / "copilot-lb" / "auth.json"
 
 
+def _validate_copilot_api_types(value):
+    if (not isinstance(value, (list, tuple)) or not value
+            or any(not isinstance(v, str) or v not in ("responses", "chat") for v in value)
+            or len(set(value)) != len(value)):
+        raise ValueError("Copilot api_types must be a nonempty unique list of responses/chat")
+    return tuple(value)
+
+
 @dataclass
 class CopilotEndpoint:
     name: str
@@ -1190,6 +1559,12 @@ class CopilotEndpoint:
     weight: int = 1
     # 可选限定模型；空列表 = 接受所有模型，遇到不支持的 400 再降级 Azure
     models: list = field(default_factory=list)
+
+    def __post_init__(self):
+        self.api_types = _validate_copilot_api_types(self.api_types)
+
+    def supports(self, model, api_type=None):
+        return (not self.models or model in self.models) and (api_type is None or api_type in self.api_types)
 
     # long-lived token 来源记录（用于运行时按需重读，支持 K8s Secret rotation）
     # 形如 {"type": "env", "key": "GITHUB_COPILOT_TOKEN_1"}
@@ -1232,6 +1607,9 @@ class CopilotEndpoint:
     total_response_time: float = field(default=0.0, repr=False)
     successful_requests: int = field(default=0, repr=False)
     model_stats: dict = field(default_factory=dict, repr=False)
+
+    # Append to preserve legacy positional construction of existing fields.
+    api_types: tuple = ("responses", "chat")
 
 
 @dataclass
@@ -2033,7 +2411,7 @@ class ClaudeProxy:
                 last_error = e
                 self.global_stats.total_errors += 1
                 # 429 rate limit 也应该触发熔断，因为表示服务端过载
-                is_client_error = 400 <= e.response.status_code < 500 and e.response.status_code != 429
+                is_client_error = 400 <= e.response.status_code < 500 and e.response.status_code not in (401, 403, 429)
                 await self.load_balancer.on_request_end(endpoint, success=False, is_client_error=is_client_error, lease=attempt_lease)
 
                 if _retry_rejected_response(e.response, attempt, max_retries):
@@ -2118,8 +2496,8 @@ class ClaudeProxy:
             sent_message_start = False
             sent_any_content = False
 
-            MESSAGE_STOP_EVENT = b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
             HEARTBEAT = b": keep-alive\n\n"
+            wire_output = _SSEWireOutput()
 
             for attempt in range(max_retries):
                 response = None
@@ -2132,14 +2510,14 @@ class ClaudeProxy:
                     )) as pending_headers:
                         async for kind, payload in pending_headers:
                             if kind == "heartbeat":
-                                yield payload
+                                yield wire_output.heartbeat(payload)
                             else:
                                 response = payload
 
                     if response.status_code >= 400:
                         error_body = await response.aread()
                         # 429 rate limit 也触发熔断
-                        is_client_error = 400 <= response.status_code < 500 and response.status_code != 429
+                        is_client_error = 400 <= response.status_code < 500 and response.status_code not in (401, 403, 429)
 
                         try:
                             error_json = json.loads(error_body)
@@ -2167,74 +2545,43 @@ class ClaudeProxy:
                                 logger.info(f"[{body.get('model')}] -> {current_endpoint.name} (stream attempt {attempt + 2})")
                                 continue
 
-                        if sent_message_start:
-                            yield MESSAGE_STOP_EVENT
                         yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': error_msg}})}\n\n".encode()
                         return
 
-                    # ---- 透传流 + 15s 心跳 + 后台 pump ----
-                    queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+                    def own_pump(task, owned_queue):
+                        nonlocal pump_task, queue
+                        pump_task, queue = task, owned_queue
+                    queue = None
+                    observation = _SSEObservation("messages")
+                    async with aclosing(_framed_sse(response, on_pump=own_pump)) as frames:
+                        async for frame in frames:
+                            if frame is None:
+                                yield wire_output.heartbeat(HEARTBEAT)
+                                continue
+                            sent_any_content = True
+                            observation.observe(frame)
+                            if observation.last_event == "message_start":
+                                sent_message_start = True
+                            if observation.terminal:
+                                success = observation.terminal == "completed"
+                                await end_current_request(success=success, is_client_error=observation.neutral)
+                                if success:
+                                    _record_usage_best_effort(
+                                        proxy_self, current_endpoint, model,
+                                        observation.input_tokens, observation.output_tokens, time.time() - start_time,
+                                        cache_creation_tokens=observation.cache_creation_tokens,
+                                        cache_read_tokens=observation.cache_read_tokens)
+                                yield wire_output.frame(frame)
+                                return
+                            yield wire_output.frame(frame)
+                    await end_current_request(success=False)
+                    yield b'event: error\ndata: {"type":"error","error":{"code":"upstream_truncated","message":"Upstream ended without message_stop; cause undetermined"}}\n\n'
+                    return
 
-                    async def _pump(resp):
-                        try:
-                            async for c in resp.aiter_bytes():
-                                await queue.put(("chunk", c))
-                            await queue.put(("eof", None))
-                        except asyncio.CancelledError:
-                            raise
-                        except BaseException as ex:  # noqa: BLE001
-                            await queue.put(("err", ex))
-
-                    pump_task = asyncio.create_task(_pump(response))
-
-                    buffer = ""
-                    stream_error: Optional[BaseException] = None
-
-                    while True:
-                        try:
-                            kind, payload = await asyncio.wait_for(queue.get(), timeout=STREAM_HEARTBEAT_INTERVAL)
-                        except asyncio.TimeoutError:
-                            # 长 thinking 静默期间发 SSE 注释作为心跳, 防止中间链路空闲超时
-                            yield HEARTBEAT
-                            continue
-
-                        if kind == "err":
-                            stream_error = payload
-                            break
-                        if kind == "eof":
-                            break
-
-                        chunk = payload
-                        sent_any_content = True
-                        yield chunk  # 立即透传, 零延迟
-                        try:
-                            buffer += chunk.decode("utf-8", errors="ignore")
-                            while "\n\n" in buffer:
-                                event_str, buffer = buffer.split("\n\n", 1)
-                                if '"message_start"' in event_str or '"message_delta"' in event_str:
-                                    for line in event_str.split("\n"):
-                                        if line.startswith("data: "):
-                                            data = json.loads(line[6:])
-                                            if data.get("type") == "message_start":
-                                                sent_message_start = True
-                                                msg_usage = data.get("message", {}).get("usage", {})
-                                                input_tokens = msg_usage.get("input_tokens", 0)
-                                                cache_creation_tokens = msg_usage.get("cache_creation_input_tokens", 0)
-                                                cache_read_tokens = msg_usage.get("cache_read_input_tokens", 0)
-                                            elif data.get("type") == "message_delta":
-                                                output_tokens = data.get("usage", {}).get("output_tokens", 0)
-                            if len(buffer) > 65536:
-                                buffer = ""  # 防止内存泄漏
-                        except Exception:
-                            pass  # 指标提取绝不能阻断流
-
-                    if stream_error is not None:
-                        raise stream_error
-
-                    await end_current_request(success=True)
-                    elapsed = time.time() - start_time
-                    _record_usage_best_effort(proxy_self, current_endpoint, model, input_tokens, output_tokens, elapsed,
-                                            cache_creation_tokens=cache_creation_tokens, cache_read_tokens=cache_read_tokens)
+                except (_LocalStreamLimit, _LocalObserverError) as e:
+                    await end_current_request(success=False, is_client_error=True)
+                    payload = {"type": "error", "error": {"code": e.code, "type": "local_resource_limit" if isinstance(e, _LocalStreamLimit) else "local_observer_error", "message": str(e)}}
+                    yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode()
                     return
 
                 except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
@@ -2245,13 +2592,7 @@ class ClaudeProxy:
                     logger.error(f"Stream network error on {current_endpoint.name}: {error_detail}")
                     await end_current_request(success=False, is_client_error=False)
 
-                    # 已向客户端 yield 过 message_start, 不能再切端点重放 (会产生两段消息), 只能优雅收尾
-                    if sent_message_start:
-                        yield MESSAGE_STOP_EVENT
-                        yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': error_detail}})}\n\n".encode()
-                        return
-
-                    if not sent_any_content and _replay_safe_transport_failure(e) and attempt < max_retries - 1:
+                    if response is None and not sent_any_content and _replay_safe_transport_failure(e) and attempt < max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         new_endpoint = proxy_self.load_balancer.select_endpoint()
                         if new_endpoint:
@@ -2273,8 +2614,6 @@ class ClaudeProxy:
                     error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
                     logger.error(f"Stream error: {error_detail}\n{traceback.format_exc()}")
                     await end_current_request(success=False, is_client_error=isinstance(e, httpx.PoolTimeout))
-                    if sent_message_start:
-                        yield MESSAGE_STOP_EVENT
                     yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': error_detail}})}\n\n".encode()
                     return
 
@@ -2434,7 +2773,7 @@ class AzureOpenAIProxy:
                 last_error = e
                 self.global_stats.total_errors += 1
                 status = e.response.status_code
-                is_client_error = 400 <= status < 500 and status != 429
+                is_client_error = 400 <= status < 500 and status not in (401, 403, 429)
                 await end_attempt(success=False, is_client_error=is_client_error)
                 if _retry_rejected_response(e.response, attempt, max_retries):
                     logger.warning(f"{endpoint.name} returned {status}, retrying...")
@@ -2521,21 +2860,8 @@ class AzureOpenAIProxy:
             output_tokens = 0
             cache_read_tokens = 0
             sent_any_chunk = False
-            # Track whether we ever saw the terminal event we expected:
-            #   - Responses API : an SSE event whose `type` is `response.completed`
-            #                     (also treat `response.failed`/`response.incomplete`
-            #                     as valid terminals — they are still upstream telling
-            #                     us the response ended deliberately). Accepted from
-            #                     either the SSE `event:` header or the payload `type`.
-            #   - Chat API      : `data: [DONE]` sentinel.
-            # If upstream closes the SSE without any of these, that is silent
-            # truncation and clients see "stream closed before response.completed".
-            saw_completion = False
-            chunks_yielded_count = 0
-            first_event_name: Optional[str] = None
-            last_event_name: Optional[str] = None
-
             HEARTBEAT = b": keep-alive\n\n"
+            wire_output = _SSEWireOutput()
 
             for attempt in range(max_retries):
                 response = None
@@ -2548,13 +2874,13 @@ class AzureOpenAIProxy:
                     )) as pending_headers:
                         async for kind, payload in pending_headers:
                             if kind == "heartbeat":
-                                yield payload
+                                yield wire_output.heartbeat(payload)
                             else:
                                 response = payload
 
                     if response.status_code >= 400:
                         error_body = await response.aread()
-                        is_client_error = 400 <= response.status_code < 500 and response.status_code != 429
+                        is_client_error = 400 <= response.status_code < 500 and response.status_code not in (401, 403, 429)
                         try:
                             error_text = error_body.decode("utf-8") if isinstance(error_body, bytes) else str(error_body)
                         except Exception:
@@ -2587,129 +2913,36 @@ class AzureOpenAIProxy:
                         yield _sse_terminal_from_upstream_detail(api_type, upstream_detail)
                         return
 
-                    # ---- 透传 + 心跳 + 后台 pump ----
-                    queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+                    def own_pump(task, owned_queue):
+                        nonlocal pump_task, queue
+                        pump_task, queue = task, owned_queue
+                    queue = None
+                    observation = _SSEObservation(api_type)
+                    async with aclosing(_framed_sse(response, on_pump=own_pump)) as frames:
+                        async for frame in frames:
+                            if frame is None:
+                                yield wire_output.heartbeat(HEARTBEAT)
+                                continue
+                            sent_any_chunk = True
+                            observation.observe(frame)
+                            if observation.terminal:
+                                success = observation.terminal == "completed"
+                                await end_current_request(success=success, is_client_error=observation.neutral)
+                                if success:
+                                    _record_usage_best_effort(
+                                        proxy_self, current_endpoint, model,
+                                        observation.input_tokens, observation.output_tokens, time.time() - start_time,
+                                        cache_read_tokens=observation.cache_read_tokens)
+                                yield wire_output.frame(frame)
+                                return
+                            yield wire_output.frame(frame)
+                    await end_current_request(success=False)
+                    yield _sse_terminal_error(api_type, "upstream_truncated", "Upstream ended without a valid terminal; cause undetermined")
+                    return
 
-                    async def _pump(resp):
-                        try:
-                            async for c in resp.aiter_bytes():
-                                await queue.put(("chunk", c))
-                            await queue.put(("eof", None))
-                        except asyncio.CancelledError:
-                            raise
-                        except BaseException as ex:  # noqa: BLE001
-                            await queue.put(("err", ex))
-
-                    pump_task = asyncio.create_task(_pump(response))
-
-                    buffer = ""
-                    stream_error: Optional[BaseException] = None
-
-                    while True:
-                        try:
-                            kind, payload = await asyncio.wait_for(queue.get(), timeout=STREAM_HEARTBEAT_INTERVAL)
-                        except asyncio.TimeoutError:
-                            yield HEARTBEAT
-                            continue
-
-                        if kind == "err":
-                            stream_error = payload
-                            break
-                        if kind == "eof":
-                            break
-
-                        chunk = payload
-                        yield chunk
-                        sent_any_chunk = True
-                        chunks_yielded_count += 1
-                        try:
-                            buffer += chunk.decode("utf-8", errors="ignore")
-                            while "\n\n" in buffer:
-                                event_str, buffer = buffer.split("\n\n", 1)
-                                event_name, data_json, is_chat_done = _parse_sse_event_block(event_str)
-                                if event_name:
-                                    if first_event_name is None:
-                                        first_event_name = event_name
-                                    last_event_name = event_name
-                                elif isinstance(data_json, dict) and data_json.get("type"):
-                                    payload_type = data_json.get("type")
-                                    if first_event_name is None:
-                                        first_event_name = payload_type
-                                    last_event_name = payload_type
-                                if is_chat_done and api_type != "responses":
-                                    saw_completion = True
-                                if api_type == "responses":
-                                    ev_type = (data_json or {}).get("type") if isinstance(data_json, dict) else None
-                                    terminal_name = event_name or ev_type
-                                    if terminal_name in _RESPONSES_TERMINAL_EVENTS:
-                                        saw_completion = True
-                                    if terminal_name == "response.completed" and isinstance(data_json, dict):
-                                        usage = (data_json.get("response") or {}).get("usage") or {}
-                                        input_tokens = usage.get("input_tokens", 0) or input_tokens
-                                        output_tokens = usage.get("output_tokens", 0) or output_tokens
-                                        cache_read_tokens = (
-                                            (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
-                                            or cache_read_tokens
-                                        )
-                                elif isinstance(data_json, dict):
-                                    usage = data_json.get("usage")
-                                    if usage:
-                                        input_tokens = usage.get("prompt_tokens", 0) or input_tokens
-                                        output_tokens = usage.get("completion_tokens", 0) or output_tokens
-                                        cache_read_tokens = (
-                                            (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
-                                            or cache_read_tokens
-                                        )
-                                if len(buffer) > 65536:
-                                    buffer = ""
-                        except Exception:
-                            pass
-
-                    if stream_error is not None:
-                        raise stream_error
-
-                    # Silent upstream truncation detector (mirrors CopilotProxy).
-                    if sent_any_chunk and not saw_completion:
-                        elapsed_trunc = time.time() - start_time
-                        logger.error(
-                            "[Azure] upstream closed stream on %s without terminal "
-                            "event: api_type=%s model=%s elapsed=%.1fs "
-                            "chunks_yielded=%d first_event=%s last_event=%s",
-                            current_endpoint.name, api_type, model, elapsed_trunc,
-                            chunks_yielded_count, first_event_name, last_event_name,
-                        )
-                        await end_current_request(success=False)
-                        if api_type == "responses":
-                            fail_event = {
-                                "type": "response.failed",
-                                "response": {
-                                    "error": {
-                                        "code": "upstream_truncated",
-                                        "message": (
-                                            "Azure upstream closed the SSE stream before "
-                                            "emitting response.completed. Cause undetermined."
-                                        ),
-                                    }
-                                },
-                            }
-                            yield f"data: {json.dumps(fail_event)}\n\n".encode()
-                        else:
-                            err_event = {
-                                "error": {
-                                    "code": "upstream_truncated",
-                                    "message": (
-                                        "Azure upstream closed the SSE stream before "
-                                        "emitting [DONE]. Cause undetermined."
-                                    ),
-                                }
-                            }
-                            yield f"data: {json.dumps(err_event)}\n\ndata: [DONE]\n\n".encode()
-                        return
-
-                    elapsed = time.time() - start_time
-                    _record_usage_best_effort(proxy_self, current_endpoint, model, input_tokens, output_tokens, elapsed,
-                                            cache_read_tokens=cache_read_tokens)
-                    await end_current_request(success=True)
+                except (_LocalStreamLimit, _LocalObserverError) as e:
+                    await end_current_request(success=False, is_client_error=True)
+                    yield _sse_terminal_error(api_type, e.code, str(e))
                     return
 
                 except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
@@ -2720,7 +2953,7 @@ class AzureOpenAIProxy:
                     await end_current_request(success=False)
 
                     # 已向客户端输出过 chunk 就不能再重放; 否则可以切端点重试
-                    if not sent_any_chunk and _replay_safe_transport_failure(e) and attempt < max_retries - 1:
+                    if response is None and not sent_any_chunk and _replay_safe_transport_failure(e) and attempt < max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         new_endpoint = proxy_self.load_balancer.select_endpoint_for_model(model)
                         if new_endpoint:
@@ -3547,10 +3780,10 @@ class CopilotProxy:
 
     # ---- Endpoint 选择 ----
 
-    def _select_endpoint(self, model: str) -> Optional[CopilotEndpoint]:
+    def _select_endpoint(self, model: str, api_type: Optional[str] = None) -> Optional[CopilotEndpoint]:
         """从可用端点中筛选支持指定模型的端点。空 models = 通配。"""
         available = self.load_balancer.get_available_endpoints()
-        matched = [ep for ep in available if not ep.models or model in ep.models]
+        matched = [ep for ep in available if ep.supports(model, api_type)]
         if not matched:
             return None
         if len(matched) == 1:
@@ -3579,14 +3812,14 @@ class CopilotProxy:
             weights = [ep.weight for ep in matched]
             return random.choices(matched, weights=weights, k=1)[0]
 
-    def can_handle(self, model: str) -> bool:
+    def can_handle(self, model: str, api_type: Optional[str] = None) -> bool:
         """是否有任何健康端点可服务该模型（路由层用来决定是否优先 Copilot）"""
-        return any((not ep.models or model in ep.models) and self.load_balancer.is_available(ep)
+        return any(ep.supports(model, api_type) and self.load_balancer.is_available(ep)
                    for ep in self.load_balancer.endpoints)
 
-    def supports_model(self, model: str) -> bool:
+    def supports_model(self, model: str, api_type: Optional[str] = None) -> bool:
         """Configured eligibility, independent of temporary admission state."""
-        return any(not ep.models or model in ep.models for ep in self.load_balancer.endpoints)
+        return any(ep.supports(model, api_type) for ep in self.load_balancer.endpoints)
 
     # ---- 用量记录（与 AzureOpenAIProxy._record_usage 对称）----
 
@@ -3622,12 +3855,14 @@ class CopilotProxy:
     def _has_image(body: dict) -> bool:
         msgs = body.get("messages")
         if not isinstance(msgs, list):
+            msgs = body.get("input")
+        if not isinstance(msgs, list):
             return False
         for m in msgs:
             content = m.get("content") if isinstance(m, dict) else None
             if isinstance(content, list):
                 for c in content:
-                    if isinstance(c, dict) and c.get("type") == "image_url":
+                    if isinstance(c, dict) and c.get("type") in ("image_url", "input_image"):
                         return True
         return False
 
@@ -3707,10 +3942,10 @@ class CopilotProxy:
             body["stream_options"] = {"include_usage": True}
 
         for attempt in range(max_retries):
-            endpoint = self._select_endpoint(model)
+            endpoint = self._select_endpoint(model, api_type)
             if not endpoint:
-                if self.supports_model(model):
-                    raise self.load_balancer.unavailable([ep for ep in self.load_balancer.endpoints if not ep.models or model in ep.models])
+                if self.supports_model(model, api_type):
+                    raise self.load_balancer.unavailable([ep for ep in self.load_balancer.endpoints if ep.supports(model, api_type)])
                 raise HTTPException(status_code=404, detail={"error": {"code": "unsupported_model", "message": "No configured Copilot route for this model"}})
 
             attempt_lease = await self.load_balancer.on_request_start(endpoint)
@@ -3788,16 +4023,16 @@ class CopilotProxy:
                     await end_attempt(success=False, is_client_error=True)
                     raise _UnsupportedModelError(f"{status}: {body_text[:200]}")
                 # 401 自愈：上游 session token 失效 → 强制刷新后重试一次
-                if status == 401 and attempt < max_retries - 1:
+                if status == 401 and attempt == 0:
                     logger.warning(f"[Copilot] 401 from upstream on {endpoint.name}, forcing session refresh and retrying")
-                    await end_attempt(success=False, is_client_error=True)
                     try:
                         await self.get_session_token(endpoint, force=True)
+                        await end_attempt(success=False, is_client_error=True)
                         continue
                     except Exception as refresh_err:
                         logger.error(f"[Copilot] forced refresh failed: {refresh_err}")
                         # fall through 到正常错误返回
-                is_client_error = 400 <= status < 500 and status != 429
+                is_client_error = 400 <= status < 500 and status not in (401, 403, 429)
                 await end_attempt(success=False, is_client_error=is_client_error)
                 if _retry_rejected_response(e.response, attempt, max_retries):
                     logger.warning(f"[Copilot] {endpoint.name} returned {status}, retrying...")
@@ -3921,11 +4156,9 @@ class CopilotProxy:
             "cache_read_tokens": 0,
             "terminal_emitted": False,   # set by _emit_stream_end so release_abandoned won't double-log
         }
-        # Compute once so retries and log lines share a single measurement.
-        try:
-            body_bytes_size = len(json.dumps(body, ensure_ascii=False, default=str))
-        except Exception:
-            body_bytes_size = -1
+        # Actual HTTPX serialization is measured after build_request, each attempt.
+        body_bytes_size = -1
+        protocol_metrics = {}
         has_image_cached = self._has_image(body)
 
         def _sse_error_metadata() -> dict:
@@ -3987,13 +4220,14 @@ class CopilotProxy:
                     "input_tokens": stream_state["input_tokens"],
                     "output_tokens": stream_state["output_tokens"],
                     "connection_id": connection_id,
+                    **protocol_metrics,
                 }
                 parts = " ".join(f"{k}={v}" for k, v in fields.items())
                 logger.info(f"[Copilot stream_end] {parts}",
                             extra={"kind": "copilot_stream_end", **fields})
 
         async def stream_generator():
-            nonlocal connection_id
+            nonlocal connection_id, body_bytes_size
             connection_id = proxy_self._register_stream(
                 endpoint, release_abandoned_request, disconnect_checker=disconnect_checker
             )
@@ -4004,18 +4238,13 @@ class CopilotProxy:
             output_tokens = 0
             cache_read_tokens = 0
             sent_any_chunk = False
-            # Track whether we ever saw the terminal event we expected. Mirrors the
-            # Azure proxy's `saw_completion`. Historically missing here, which caused
-            # `UnboundLocalError` at the truncation check below when a stream produced
-            # chunks but no parseable terminal marker — the crash then closed the
-            # response with no `response.failed` event, which is exactly the client-side
-            # symptom "stream closed before response.completed".
             saw_completion = False
             # Diagnostic context for the truncation / error branches.
             chunks_yielded_count = 0
             first_event_name: Optional[str] = None
             last_event_name: Optional[str] = None
             HEARTBEAT = b": keep-alive\n\n"
+            wire_output = _SSEWireOutput()
 
             def _emit_stream_end(outcome: str, level: int, **extra):
                 """Emit exactly one structured summary log line per stream terminal.
@@ -4054,6 +4283,7 @@ class CopilotProxy:
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "connection_id": connection_id,
+                    **protocol_metrics,
                 }
                 fields.update(extra)
                 parts = " ".join(f"{k}={v}" for k, v in fields.items())
@@ -4067,12 +4297,13 @@ class CopilotProxy:
 
                 try:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
+                    body_bytes_size = len(req.content)
                     async with aclosing(_await_with_heartbeat(
                         proxy_self.client.send(req, stream=True), HEARTBEAT
                     )) as pending_headers:
                         async for kind, payload in pending_headers:
                             if kind == "heartbeat":
-                                yield payload
+                                yield wire_output.heartbeat(payload)
                             else:
                                 response = payload
                                 proxy_self._touch_stream(connection_id)
@@ -4098,7 +4329,7 @@ class CopilotProxy:
                             await end_current_request(success=False, is_client_error=True)
                             raise _UnsupportedModelError(f"{response.status_code}: {error_text[:200]}")
 
-                        is_client_error = 400 <= response.status_code < 500 and response.status_code != 429
+                        is_client_error = 400 <= response.status_code < 500 and response.status_code not in (401, 403, 429)
                         # 规范化（HTML 不透传给客户端；JSON 直接用）
                         upstream_detail = _build_upstream_error_detail(
                             response.status_code, error_text, "Copilot", current_endpoint.name
@@ -4110,24 +4341,19 @@ class CopilotProxy:
                             f"[Copilot] stream failed ({response.status_code}, "
                             f"{'HTML error page' if is_html else 'JSON/text'}): {log_snippet}"
                         )
-                        await end_current_request(success=False, is_client_error=is_client_error)
-
-                        # 401 自愈：force 刷新 session token 后用同 endpoint 重试一次
-                        if response.status_code == 401 and attempt < max_retries - 1 and not sent_any_chunk:
-                            logger.warning(f"[Copilot] 401 from stream on {current_endpoint.name}, forcing session refresh and retrying")
+                        if response.status_code == 401 and attempt == 0 and not sent_any_chunk:
                             try:
                                 await proxy_self.get_session_token(current_endpoint, force=True)
-                                current_headers = await proxy_self._build_headers(current_endpoint, proxy_self._has_image(body))
-                                await start_current_request(current_endpoint)
+                                current_headers = await proxy_self._build_headers(current_endpoint, has_image_cached)
                                 continue
                             except Exception as he:
-                                logger.error(f"[Copilot] forced refresh during stream retry failed: {he}")
-                                # fall through 到错误返回
+                                logger.warning("Copilot stream auth repair failed: %s", type(he).__name__)
+                        await end_current_request(success=False, is_client_error=is_client_error)
 
                         if _retry_rejected_response(response, attempt, max_retries) and not sent_any_chunk:
                             logger.warning(f"[Copilot] {current_endpoint.name} returned {response.status_code}, retrying stream...")
                             await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
-                            new_endpoint = proxy_self._select_endpoint(model)
+                            new_endpoint = proxy_self._select_endpoint(model, api_type)
                             if new_endpoint:
                                 current_endpoint = new_endpoint
                                 try:
@@ -4150,135 +4376,65 @@ class CopilotProxy:
                         )
                         return
 
-                    # ---- 透传 + 心跳 + 后台 pump ----
-                    queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+                    def own_pump(task, owned_queue):
+                        nonlocal pump_task, queue
+                        pump_task, queue = task, owned_queue
+                    queue = None
+                    observation = _SSEObservation(api_type)
+                    def queue_full():
+                        proxy_self.stream_pump_queue_full_events_total += 1
+                    async with aclosing(_framed_sse(
+                        response, on_pump=own_pump, metrics=protocol_metrics, on_activity=lambda: proxy_self._touch_stream(connection_id),
+                        on_queue_full=queue_full,
+                    )) as frames:
+                        async for frame in frames:
+                            if frame is None:
+                                yield wire_output.heartbeat(HEARTBEAT)
+                                continue
+                            sent_any_chunk = True
+                            chunks_yielded_count += 1
+                            observation.observe(frame)
+                            first_event_name = observation.first_event
+                            last_event_name = observation.last_event
+                            saw_completion = observation.terminal is not None
+                            input_tokens = observation.input_tokens
+                            output_tokens = observation.output_tokens
+                            cache_read_tokens = observation.cache_read_tokens
+                            stream_state.update(
+                                chunks_yielded=chunks_yielded_count,
+                                first_event=first_event_name, last_event=last_event_name,
+                                saw_completion=saw_completion, sent_any_chunk=sent_any_chunk,
+                                input_tokens=input_tokens, output_tokens=output_tokens,
+                            )
+                            if observation.terminal:
+                                success = observation.terminal == "completed"
+                                # Settle before offering the terminal: clients may stop
+                                # immediately at it. Later transport close is cleanup,
+                                # not a second generation outcome or replay trigger.
+                                await end_current_request(success=success, is_client_error=observation.neutral)
+                                if success:
+                                    _record_usage_best_effort(
+                                        proxy_self, current_endpoint, model, input_tokens, output_tokens,
+                                        time.time() - start_time, cache_read_tokens=cache_read_tokens)
+                                _emit_stream_end(observation.terminal, logging.INFO if success else logging.WARNING,
+                                                 terminal_valid=True, account_neutral=observation.neutral)
+                                yield wire_output.frame(frame)
+                                return
+                            yield wire_output.frame(frame)
+                    proxy_self.stream_truncated_no_completion_total += 1
+                    proxy_self._record_truncation(model, api_type)
+                    await end_current_request(success=False)
+                    yield _sse_terminal_error(
+                        api_type, "upstream_truncated", "Upstream ended without a valid terminal; cause undetermined",
+                        metadata=_sse_error_metadata())
+                    _emit_stream_end("truncated", logging.ERROR, terminal_valid=False)
+                    return
 
-                    async def _pump(resp):
-                        try:
-                            async for c in resp.aiter_bytes():
-                                # Observe backpressure: a full queue means the consumer
-                                # (the yield loop, ultimately the downstream ASGI send)
-                                # cannot keep up with upstream. Counting the event is
-                                # cheap and lets `queue.maxsize` be tuned with data.
-                                if queue.full():
-                                    proxy_self.stream_pump_queue_full_events_total += 1
-                                await queue.put(("chunk", c))
-                            await queue.put(("eof", None))
-                        except asyncio.CancelledError:
-                            raise
-                        except BaseException as ex:  # noqa: BLE001
-                            await queue.put(("err", ex))
-
-                    pump_task = asyncio.create_task(_pump(response))
-
-                    buffer = ""
-                    stream_error: Optional[BaseException] = None
-
-                    while True:
-                        try:
-                            kind, payload = await asyncio.wait_for(queue.get(), timeout=STREAM_HEARTBEAT_INTERVAL)
-                        except asyncio.TimeoutError:
-                            # A downstream heartbeat is not upstream activity.
-                            yield HEARTBEAT
-                            continue
-
-                        if kind == "err":
-                            stream_error = payload
-                            break
-                        if kind == "eof":
-                            break
-
-                        chunk = payload
-                        proxy_self._touch_stream(connection_id)
-                        sent_any_chunk = True
-                        chunks_yielded_count += 1
-                        try:
-                            buffer += chunk.decode("utf-8", errors="ignore")
-                            while "\n\n" in buffer:
-                                event_str, buffer = buffer.split("\n\n", 1)
-                                event_name, data_json, is_chat_done = _parse_sse_event_block(event_str)
-                                # Track first/last named event for diagnostics on truncation.
-                                if event_name:
-                                    if first_event_name is None:
-                                        first_event_name = event_name
-                                    last_event_name = event_name
-                                elif isinstance(data_json, dict) and data_json.get("type"):
-                                    payload_type = data_json.get("type")
-                                    if first_event_name is None:
-                                        first_event_name = payload_type
-                                    last_event_name = payload_type
-                                if is_chat_done and api_type != "responses":
-                                    saw_completion = True
-                                if api_type == "responses":
-                                    # Accept the terminal signal in either shape:
-                                    # `event:` header or in-payload `type` field.
-                                    ev_type = (data_json or {}).get("type") if isinstance(data_json, dict) else None
-                                    terminal_name = event_name or ev_type
-                                    if terminal_name in _RESPONSES_TERMINAL_EVENTS:
-                                        saw_completion = True
-                                    if terminal_name == "response.completed" and isinstance(data_json, dict):
-                                        usage = (data_json.get("response") or {}).get("usage") or {}
-                                        input_tokens = usage.get("input_tokens", 0) or input_tokens
-                                        output_tokens = usage.get("output_tokens", 0) or output_tokens
-                                        cache_read_tokens = (
-                                            (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
-                                            or cache_read_tokens
-                                        )
-                                elif isinstance(data_json, dict):
-                                    usage = data_json.get("usage")
-                                    if usage:
-                                        input_tokens = usage.get("prompt_tokens", 0) or input_tokens
-                                        output_tokens = usage.get("completion_tokens", 0) or output_tokens
-                                        cache_read_tokens = (
-                                            (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
-                                            or cache_read_tokens
-                                        )
-                                if len(buffer) > 65536:
-                                    buffer = ""
-                        except Exception:
-                            pass
-                        # Offered to downstream, not proof of successful delivery.
-                        stream_state.update(
-                            chunks_yielded=chunks_yielded_count,
-                            first_event=first_event_name, last_event=last_event_name,
-                            saw_completion=saw_completion, sent_any_chunk=sent_any_chunk,
-                            input_tokens=input_tokens, output_tokens=output_tokens,
-                        )
-                        yield chunk
-
-                    if stream_error is not None:
-                        raise stream_error
-
-                    # Detect silent upstream truncation: aiter_bytes returned EOF but
-                    # we never saw the terminal event the client expects. Codex, the
-                    # OpenAI JS SDK, and Anthropic SDKs surface this as
-                    # "stream closed before response.completed" (or the equivalent),
-                    # which used to be indistinguishable from a clean end in this LB.
-                    upstream_truncated = sent_any_chunk and not saw_completion
-                    if upstream_truncated:
-                        proxy_self.stream_truncated_no_completion_total += 1
-                        proxy_self._record_truncation(model, api_type)
-                        await end_current_request(success=False)
-                        message_body = (
-                            "Copilot upstream closed the SSE stream before emitting "
-                            "response.completed. The cause is not established by this proxy."
-                            if api_type == "responses"
-                            else "Copilot upstream closed the SSE stream before emitting "
-                                 "[DONE]. The cause is not established by this proxy."
-                        )
-                        yield _sse_terminal_error(
-                            api_type, "upstream_truncated", message_body,
-                            metadata=_sse_error_metadata(),
-                        )
-                        _emit_stream_end("truncated", logging.ERROR)
-                        return
-
-                    await end_current_request(success=True)
-                    elapsed = time.time() - start_time
-                    _record_usage_best_effort(proxy_self, current_endpoint, model, input_tokens, output_tokens, elapsed,
-                                              cache_read_tokens=cache_read_tokens)
-                    _emit_stream_end("completed", logging.INFO,
-                                      cache_read_tokens=cache_read_tokens)
+                except (_LocalStreamLimit, _LocalObserverError) as e:
+                    await end_current_request(success=False, is_client_error=True)
+                    yield _sse_terminal_error(api_type, e.code, str(e), metadata=_sse_error_metadata())
+                    _emit_stream_end("local_resource_limit" if isinstance(e, _LocalStreamLimit) else "local_observer_error",
+                                     logging.WARNING, account_neutral=True, terminal_valid=False)
                     return
 
                 except _UnsupportedModelError as e:
@@ -4299,6 +4455,7 @@ class CopilotProxy:
                     )
                     logger.warning(log_msg, extra={"kind": "copilot_pool_timeout",
                                                     "connection_id": connection_id,
+                    **protocol_metrics,
                                                     **pt_fields})
                     error_detail = sse_msg
                     await end_current_request(success=False, is_client_error=True)
@@ -4306,12 +4463,12 @@ class CopilotProxy:
                     single_endpoint = len(proxy_self.load_balancer.endpoints) <= 1
 
                     if (
-                        not sent_any_chunk
+                        response is None and not sent_any_chunk
                         and attempt < max_retries - 1
                         and not single_endpoint
                     ):
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
-                        new_endpoint = proxy_self._select_endpoint(model)
+                        new_endpoint = proxy_self._select_endpoint(model, api_type)
                         if new_endpoint:
                             current_endpoint = new_endpoint
                             try:
@@ -4369,6 +4526,7 @@ class CopilotProxy:
                             "api_type": api_type,
                             "model": model,
                             "connection_id": connection_id,
+                    **protocol_metrics,
                             "exc_type": type(e).__name__,
                             "exc_message": str(e),
                             "chunks_yielded": chunks_yielded_count,
@@ -4381,9 +4539,9 @@ class CopilotProxy:
                     )
                     await end_current_request(success=False)
 
-                    if not sent_any_chunk and _replay_safe_transport_failure(e) and attempt < max_retries - 1:
+                    if response is None and not sent_any_chunk and _replay_safe_transport_failure(e) and attempt < max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
-                        new_endpoint = proxy_self._select_endpoint(model)
+                        new_endpoint = proxy_self._select_endpoint(model, api_type)
                         if new_endpoint:
                             current_endpoint = new_endpoint
                             try:
@@ -4631,6 +4789,10 @@ def load_config(config_path: str = "config.yaml") -> tuple:
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
+    for ep_cfg in (config.get("github_copilot") or {}).get("endpoints", []):
+        if "api_types" in ep_cfg:
+            _validate_copilot_api_types(ep_cfg["api_types"])
+
     lb_config = config.get("load_balancer", {})
     api_key = expand_env_vars(config.get("auth", {}).get("api_key", ""))
 
@@ -4683,18 +4845,23 @@ def load_config(config_path: str = "config.yaml") -> tuple:
     if copilot_config:
         copilot_lb_config = copilot_config.get("load_balancer", lb_config)
         copilot_endpoints = []
+        resolved_tokens = set()
         for ep_cfg in copilot_config.get("endpoints", []):
             try:
                 gh_token, token_source = resolve_github_token(ep_cfg)
             except RuntimeError as e:
                 logger.warning(f"[Copilot] skip endpoint '{ep_cfg.get('name')}': {e}")
                 continue
+            if gh_token in resolved_tokens:
+                raise ValueError("Duplicate Copilot credential resolution; refusing repeated account/legacy fallback")
+            resolved_tokens.add(gh_token)
             copilot_endpoints.append(CopilotEndpoint(
                 name=ep_cfg["name"],
                 github_token=gh_token,
                 token_source=token_source,
                 weight=ep_cfg.get("weight", 1),
                 models=ep_cfg.get("models", []) or [],
+                api_types=ep_cfg.get("api_types", ("responses", "chat")),
             ))
             logger.info(f"Loaded Copilot endpoint: {ep_cfg['name']} (models: {ep_cfg.get('models') or 'all'}, source: {token_source.get('type')})")
 
@@ -5342,7 +5509,7 @@ async def _route_chat_via_responses(body: dict, stream: bool, request_id: Option
     return JSONResponse(content=chat_payload, status_code=response.status_code)
 
 
-def _copilot_endpoint_diagnostics(model: str) -> list:
+def _copilot_endpoint_diagnostics(model: str, api_type: Optional[str] = None) -> list:
     if not copilot_proxy:
         return []
     now = int(time.time())
@@ -5354,6 +5521,9 @@ def _copilot_endpoint_diagnostics(model: str) -> list:
             "name": ep.name,
             "circuit_open": ep.circuit_open,
             "model_allowed": (not ep.models or model in ep.models),
+            "api_allowed": api_type is None or api_type in ep.api_types,
+            "api_types": list(ep.api_types),
+            "available": load_balancer.is_available(ep),
             "models_mode": "wildcard" if not ep.models else "allowlist",
             "has_session_token": bool(ep.session_token),
             "session_token_remaining_seconds": max(0, remaining),
@@ -5362,16 +5532,16 @@ def _copilot_endpoint_diagnostics(model: str) -> list:
     return diagnostics
 
 
-def _summarize_copilot_status(model: str) -> str:
-    diagnostics = _copilot_endpoint_diagnostics(model)
+def _summarize_copilot_status(model: str, api_type: Optional[str] = None) -> str:
+    diagnostics = _copilot_endpoint_diagnostics(model, api_type)
     if not copilot_proxy:
         return "Copilot not configured"
     if not diagnostics:
         return "Copilot configured with no endpoints"
-    allowed = [d for d in diagnostics if d["model_allowed"]]
-    selectable = [d for d in allowed if not d["circuit_open"]]
+    allowed = [d for d in diagnostics if d["model_allowed"] and d["api_allowed"]]
+    selectable = [d for d in allowed if d["available"]]
     if not allowed:
-        return f"Copilot has no endpoint allowing model '{model}'"
+        return f"Copilot has no endpoint allowing model '{model}' and API {api_type or 'any'}"
     if not selectable:
         names = ", ".join(d["name"] for d in allowed)
         return f"Copilot endpoints allowing model '{model}' are unavailable/circuit-open: {names}"
@@ -5416,9 +5586,9 @@ async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Opt
     _reject_anthropic_on_openai(model)
 
     azure_supports = _azure_supports_model(model)
-    copilot_can = copilot_proxy is not None and copilot_proxy.can_handle(model)
+    copilot_can = copilot_proxy is not None and copilot_proxy.can_handle(model, api_type)
     rid = request_id or "-"
-    copilot_status = _summarize_copilot_status(model)
+    copilot_status = _summarize_copilot_status(model, api_type)
 
     logger.info(
         f"[route][{rid}] api_type={api_type} model={model} stream={stream} "
@@ -5431,7 +5601,7 @@ async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Opt
             "stream": stream,
             "copilot_configured": copilot_proxy is not None,
             "copilot_can": copilot_can,
-            "copilot_endpoint_diagnostics": _copilot_endpoint_diagnostics(model),
+            "copilot_endpoint_diagnostics": _copilot_endpoint_diagnostics(model, api_type),
             "azure_configured": azure_proxy is not None,
             "azure_supports": azure_supports,
         },
@@ -5446,10 +5616,10 @@ async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Opt
 
     # 都不能处理 → 早返回，且消息明确说明每个 provider 状态
     if not copilot_can and not azure_supports:
-        if copilot_proxy and copilot_proxy.supports_model(model):
+        if copilot_proxy and copilot_proxy.supports_model(model, api_type):
             raise copilot_proxy.load_balancer.unavailable(
-                [ep for ep in copilot_proxy.load_balancer.endpoints if not ep.models or model in ep.models])
-        msg = _build_no_provider_message(model)
+                [ep for ep in copilot_proxy.load_balancer.endpoints if ep.supports(model, api_type)])
+        msg = _build_no_provider_message(model, api_type)
         raise HTTPException(status_code=404, detail={"error": {"message": msg}})
 
     copilot_failure: Optional[str] = None
@@ -5516,13 +5686,13 @@ async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Opt
             raise
 
     # 不应该走到这（前面早返回了）；保险起见
-    raise HTTPException(status_code=404, detail={"error": {"message": _build_no_provider_message(model)}})
+    raise HTTPException(status_code=404, detail={"error": {"message": _build_no_provider_message(model, api_type)}})
 
 
-def _build_no_provider_message(model: str) -> str:
+def _build_no_provider_message(model: str, api_type: Optional[str] = None) -> str:
     parts = []
     if copilot_proxy:
-        parts.append(_summarize_copilot_status(model))
+        parts.append(_summarize_copilot_status(model, api_type))
     else:
         parts.append("Copilot not configured")
     if azure_proxy:

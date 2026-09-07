@@ -96,6 +96,7 @@ endpoints:
 #       # github_token: ${GITHUB_COPILOT_TOKEN_1}  # 留空则自动从 device-flow 缓存读取
 #       weight: 1
 #       models: []                    # 空 = 接受所有模型；填了就只服务列表内模型
+#       # api_types: [responses]       # 可选；不填兼容 responses+chat；显式空/无效列表启动失败
 #     # - name: gh-account-2
 #     #   github_token: ${GITHUB_COPILOT_TOKEN_2}
 #     #   weight: 1
