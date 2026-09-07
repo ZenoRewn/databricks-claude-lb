@@ -193,8 +193,8 @@ class CopilotTokenExchangeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.endpoint.token_reload_total, 1)
         self.assertEqual(self.endpoint.token_refresh_failed_total, 1)
         self.assertEqual(self.endpoint.token_refresh_total, 1)
-        self.assertFalse(self.endpoint.circuit_open)
-        self.assertEqual(self.endpoint.total_errors, 0)
+        self.assertTrue(self.endpoint.circuit_open)  # Auth refresh is not inference recovery.
+        self.assertEqual(self.endpoint.total_errors, 4)  # Cumulative telemetry is retained.
         self.assertTrue(self.proxy.is_any_endpoint_healthy())
 
     async def test_reloaded_token_still_401_does_not_loop(self):

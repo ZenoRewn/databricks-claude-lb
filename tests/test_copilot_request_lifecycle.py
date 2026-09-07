@@ -236,14 +236,16 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         endpoint.active_requests = 1
 
         with patch.object(main.asyncio, "sleep", new=AsyncMock()):
-            response = await proxy.proxy_chat_completions(
-                {"model": "gpt-test", "messages": []}, stream=False
-            )
+            with self.assertRaises(HTTPException) as caught:
+                response = await proxy.proxy_chat_completions(
+                    {"model": "gpt-test", "messages": []}, stream=False
+                )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(caught.exception.status_code, 502)
+        self.assertEqual(client.post.await_count, 1)  # Never replay a successful/ambiguous POST.
         self.assertEqual(endpoint.active_requests, 1)
-        self.assertEqual(load_balancer.on_request_start.await_count, 2)
-        self.assertEqual(load_balancer.on_request_end.await_count, 2)
+        self.assertEqual(load_balancer.on_request_start.await_count, 1)
+        self.assertEqual(load_balancer.on_request_end.await_count, 1)
 
     async def test_non_stream_usage_record_failure_does_not_double_decrement(self):
         request = httpx.Request("POST", "https://example.test/responses")
@@ -265,9 +267,12 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(endpoint.usage_record_errors, 1)
+        self.assertEqual(endpoint.total_errors, 0)
+        self.assertEqual(client.post.await_count, 1)  # Never replay a successful/ambiguous POST.
         self.assertEqual(endpoint.active_requests, 1)
-        self.assertEqual(load_balancer.on_request_start.await_count, 2)
-        self.assertEqual(load_balancer.on_request_end.await_count, 2)
+        self.assertEqual(load_balancer.on_request_start.await_count, 1)
+        self.assertEqual(load_balancer.on_request_end.await_count, 1)
 
     async def test_non_stream_task_cancellation_releases_slot_without_circuit_error(self):
         client = _BlockingClient()
@@ -1012,16 +1017,19 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(chosen_pinned, endpoint_a)
 
     async def test_select_endpoint_pinned_returns_none_when_pin_unavailable(self):
-        # pinned endpoint 被熔断（不在 available）→ 返回 None，让调用方 fail-fast
+        # pinned endpoint 被熔断（circuit OPEN）→ 返回 None，让调用方 fail-fast。
+        # caa9b3e 后 circuit 状态由 monotonic 冷却窗口决定，需要显式把
+        # circuit_retry_at 设到未来才是 OPEN；仅设 circuit_open=True 会被
+        # is_available() 判为 HALF_OPEN 允许试探。
         proxy, load_balancer, endpoint_a = self._make_proxy(unittest.mock.Mock())
         endpoint_b = main.CopilotEndpoint(
             name="copilot-b", github_token="t2", models=["gpt-test"],
             session_token="s", session_token_expires_at=2**31,
         )
         load_balancer.endpoints.append(endpoint_b)
-        # 把 A 从可用池摘掉
+        # 把 A 从可用池摘掉：circuit OPEN + 冷却窗口未过
         endpoint_a.circuit_open = True
-        endpoint_a.circuit_opened_at = main.time.time()
+        endpoint_a.circuit_retry_at = main.time.monotonic() + 60
         chosen = proxy._select_endpoint("gpt-test", pinned=endpoint_a)
         self.assertIsNone(chosen)
 
@@ -1087,23 +1095,22 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b'"lb_request_id"', body)
         self.assertIn(b"lb-req-abcdef123456", body)
 
-    async def test_stream_stateful_5xx_pins_endpoint_and_fails_fast(self):
-        # 单个健康 endpoint，返 502；有状态请求。手动 mock 让 pinning 条件成立后
-        # 走到 "fail fast" 分支；stateful_pinned_events["http_5xx"] +=1。
-        # 用两个 endpoint 更能证明 "没换到 B"：A 返 502，B 是备胎。
+    async def test_stream_5xx_never_replays_regardless_of_stateful(self):
+        # caa9b3e 引入的 POST replay 禁令覆盖 pinning：无论 stateful 与否，5xx
+        # 一律不重试（RESILIENCE.md 契约）——保护点从 pinning-fail-fast 变成
+        # 更严格的"any 5xx = no replay"。这个 test 验证 stateful 5xx 到 SSE
+        # 错误终止且**不换到 B**（B 上 active_requests 保持 0）。
         error_upstream = _ErrorStreamResponse(
             502, b'{"error":{"message":"upstream busted"}}',
             headers={"content-type": "application/json"},
         )
-        # 只塞一个 outcome —— 若跨到 B 会 StopIteration，测试提前暴露
         proxy, load_balancer, endpoint_a = self._make_proxy(_StreamClient([error_upstream]))
         endpoint_b = main.CopilotEndpoint(
             name="copilot-b", github_token="t2", models=["gpt-test"],
             session_token="s", session_token_expires_at=2**31,
         )
         load_balancer.endpoints.append(endpoint_b)
-        # A 处于 HTML cooldown 且 total_requests 高 —— 无 pinning 时肯定会切 B
-        endpoint_a.active_requests = 0  # start_request 会自增
+        endpoint_a.active_requests = 0
         stateful_body = {
             "model": "gpt-test",
             "previous_response_id": "resp_prev_abc",
@@ -1121,24 +1128,19 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         )
         body = b"".join([chunk async for chunk in response.body_iterator])
 
-        # 上游 502 走 upstream_http_error 分支
         self.assertIn(b"upstream busted", body)
-        # pinning 计数生效
-        self.assertEqual(proxy.stateful_pinned_events.get("http_5xx"), 1)
-        # 没换到 B（否则 _StreamClient outcomes 耗尽会 StopIteration，或 B 的
-        # active_requests 会 +1；这里查 B 应该保持 0）
+        # 没换到 B —— POST replay 禁令即已挡下
         self.assertEqual(endpoint_b.active_requests, 0)
 
-    async def test_stream_stateless_5xx_still_failovers_to_second_endpoint(self):
-        # 无状态请求，A 返 502，第二次应切到 B。作为 pinning 的反向对照 —— 保证
-        # 状态亲和不会误伤普通 failover。
+    async def test_stream_stateless_5xx_also_never_replays(self):
+        # 无状态请求，A 返 502。caa9b3e 之后无论 stateful 与否 5xx 都不 replay。
+        # 保证 pinning 计数没触发（对照 test_stream_5xx_never_replays_regardless_of_stateful）。
         error_upstream = _ErrorStreamResponse(
             502, b'{"error":{"message":"upstream busted"}}',
             headers={"content-type": "application/json"},
         )
-        success_upstream = _StreamResponse([b"data: [DONE]\n\n"])
         proxy, load_balancer, endpoint_a = self._make_proxy(
-            _StreamClient([error_upstream, success_upstream]), threshold=10,
+            _StreamClient([error_upstream]), threshold=10,
         )
         endpoint_b = main.CopilotEndpoint(
             name="copilot-b", github_token="t2", models=["gpt-test"],
@@ -1156,14 +1158,15 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
             main.time.time(),
         )
         body = b"".join([chunk async for chunk in response.body_iterator])
-        # 成功切换后拿到 [DONE]
-        self.assertIn(b"data: [DONE]", body)
-        # pinning 计数没触发
+        # SSE error terminal 会补 data: [DONE]（chat 侧协议要求），
+        # 但那不是失败切换后的成功 [DONE]。
+        self.assertIn(b"upstream busted", body)
+        self.assertEqual(endpoint_b.active_requests, 0)
         self.assertNotIn("http_5xx", proxy.stateful_pinned_events)
 
     async def test_monitor_releases_confirmed_disconnect_only_after_sustained_high_water(self):
         proxy, load_balancer, endpoint = self._make_proxy(unittest.mock.Mock())
-        endpoint.active_requests = 1
+        await load_balancer.on_request_start(endpoint)
         second_endpoint = main.CopilotEndpoint(
             name="copilot-test-2", github_token="token", models=["gpt-test"]
         )
@@ -1299,14 +1302,16 @@ class AzureRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         endpoint.active_requests = 1
 
         with patch.object(main.asyncio, "sleep", new=AsyncMock()):
-            response = await proxy.proxy_responses(
-                {"model": "gpt-test", "input": "hello"}, stream=False
-            )
+            with self.assertRaises(HTTPException) as caught:
+                response = await proxy.proxy_responses(
+                    {"model": "gpt-test", "input": "hello"}, stream=False
+                )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(caught.exception.status_code, 502)
+        self.assertEqual(client.post.await_count, 1)  # Never replay a successful/ambiguous POST.
         self.assertEqual(endpoint.active_requests, 1)
-        self.assertEqual(load_balancer.on_request_start.await_count, 2)
-        self.assertEqual(load_balancer.on_request_end.await_count, 2)
+        self.assertEqual(load_balancer.on_request_start.await_count, 1)
+        self.assertEqual(load_balancer.on_request_end.await_count, 1)
 
     async def test_usage_record_failure_uses_exactly_once_accounting(self):
         request = httpx.Request("POST", "https://example.test/responses")
@@ -1327,9 +1332,12 @@ class AzureRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(endpoint.usage_record_errors, 1)
+        self.assertEqual(endpoint.total_errors, 0)
+        self.assertEqual(client.post.await_count, 1)  # Never replay a successful/ambiguous POST.
         self.assertEqual(endpoint.active_requests, 1)
-        self.assertEqual(load_balancer.on_request_start.await_count, 2)
-        self.assertEqual(load_balancer.on_request_end.await_count, 2)
+        self.assertEqual(load_balancer.on_request_start.await_count, 1)
+        self.assertEqual(load_balancer.on_request_end.await_count, 1)
 
     async def test_buffered_cancellation_releases_slot_without_circuit_error(self):
         client = _BlockingClient()
