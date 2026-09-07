@@ -2,6 +2,8 @@
 
 一个智能负载均衡代理，统一对接 **Databricks Claude**、**Azure OpenAI** 和 **GitHub Copilot** 三套上游，按模型自动路由。
 
+**运行契约：** [SSE framing、8 MiB/64 MiB 可配置资源策略、Copilot `api_types` 兼容性](docs/STREAM_PROTOCOL.md)。这些字节预算不是模型 token 上限或上游截断结论。
+
 ## 为什么需要这个项目？
 
 - **突破单一 workspace/区域限制**：通过多个端点分散请求，提高整体吞吐量
@@ -22,7 +24,7 @@
 - **上游错误规范化** - 自动把上游 HTML 错误页（CDN "Connection Closed" 之类）转成结构化 JSON，避免泄露给客户端
 - **负载均衡** - `least_requests`（默认）/ `round_robin` / `random`
 - **熔断器** - 自动检测故障端点并临时禁用，超时后自动恢复
-- **流式响应** - SSE 流式 + 等待上游响应头 / 响应期间 15s keep-alive 心跳 + `RemoteProtocolError` 等中断恢复 + 已发送 chunk 后正确 `message_stop` 终止
+- **流式响应** - UTF-8/BOM、CRLF/CR/LF 完整 SSE 帧转发；独立错误帧、有限内存、15s keep-alive；未完成帧丢弃，不伪造完成、不重放已执行 POST（见 [流协议与资源策略](docs/STREAM_PROTOCOL.md)）
 - **Extended Thinking** - 支持 Claude Opus/Sonnet 的 adaptive 思考模式（含旧模型自动降级 `enabled` + budget_tokens）
 - **Prompt Caching** - 自动清理 `cache_control` 额外字段（如 `scope`），兼容 Databricks
 - **用量持久化** - 按天存储 token 用量，JSON 文件 或 MySQL 8.x 后端，重启自动恢复

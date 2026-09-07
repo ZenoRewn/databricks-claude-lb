@@ -105,7 +105,7 @@ class RetryRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ep.active_requests, 0)
             self.assertEqual(lb.circuit_state(ep), 'OPEN')
             now += lb.circuit_breaker_timeout
-            p.client = fixtures._StreamClient([fixtures._StreamResponse([b'data: {"type":"response.completed","response":{"usage":{}}}\n\n'])])
+            p.client = fixtures._StreamClient([fixtures._StreamResponse([b'data: {"type":"response.completed","response":{"id":"synthetic"}}\n\n'])])
             response = await p.proxy_responses({'model':'gpt-test'}, stream=True)
             body = b''.join([chunk async for chunk in response.body_iterator])
         self.assertIn(b'response.completed', body)

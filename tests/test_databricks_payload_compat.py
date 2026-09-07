@@ -355,7 +355,7 @@ class OpenAICompatTests(unittest.TestCase):
 
         class FakeCopilot:
             def __init__(self, endpoints):
-                self.load_balancer = FakeLoadBalancer(endpoints)
+                self.load_balancer = main.LoadBalancer(endpoints)
 
         old_copilot = main.copilot_proxy
         try:
@@ -378,7 +378,7 @@ class OpenAICompatTests(unittest.TestCase):
 class OpenAICompatAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_preserves_copilot_unsupported_model_error_without_azure(self):
         class RejectingCopilot:
-            def can_handle(self, model):
+            def can_handle(self, model, api_type=None):
                 return True
 
             async def proxy_responses(self, body, stream=False, disconnect_checker=None,

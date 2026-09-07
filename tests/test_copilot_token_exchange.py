@@ -370,7 +370,7 @@ class CopilotTokenExchangeTests(unittest.IsolatedAsyncioTestCase):
                         response = httpx.Response(401, json={"error": {"message": "expired"}})
                     elif stream:
                         response = httpx.Response(200, content=(
-                            b'data: {"type":"response.completed","response":{"usage":{}}}\n\n'
+                            b'data: {"type":"response.completed","response":{"id":"synthetic"}}\n\n'
                         ))
                     else:
                         response = httpx.Response(200, json={"usage": {}})

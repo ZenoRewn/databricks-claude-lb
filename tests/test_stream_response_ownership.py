@@ -208,7 +208,10 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(peer.closed.is_set())
         self.assertEqual(len(proxy.client._transport._pool._requests), 1)
         data = b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
-        terminal = b'data: {"type":"response.completed"}\n\n'
+        terminal = b'data: {"type":"response.completed","response":{"id":"synthetic"}}\n\n'
+        if isinstance(proxy, main.ClaudeProxy):
+            data = b'event: message_start\ndata: {"type":"message_start","message":{"id":"synthetic","usage":{"input_tokens":1}}}\n\n'
+            terminal = b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
         await peer.chunk(data)
         await peer.chunk(terminal)
         await peer.finish()
@@ -216,6 +219,7 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(data, body)
         self.assertIn(terminal, body)
         self.assertNotIn(b'response.failed', body)
+        self.assertEqual(endpoint.completed_requests, 1)  # usage writer is stubbed in this fixture
         self.assertEqual(len(proxy.client._transport._pool._requests), 0)
         self.assertEqual(endpoint.active_requests, 0)
         self.assertEqual(proxy.load_balancer.on_request_end.await_count, ends)

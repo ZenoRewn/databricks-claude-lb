@@ -636,8 +636,8 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         # Case A: clean completion with event: header form (exercises new parser).
         clean_upstream = _StreamResponse([
             b"event: response.created\ndata: {\"id\":\"r_1\"}\n\n",
-            b"event: response.completed\ndata: {\"response\":{\"usage\":"
-            b"{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
+            b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"r_1","usage":'
+            b'{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}\n\n',
         ])
         proxy, load_balancer, endpoint = self._make_proxy(_StreamClient([clean_upstream]))
         await load_balancer.on_request_start(endpoint)
@@ -745,20 +745,19 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(endpoint.active_requests, 0)
 
     async def test_stream_responses_event_header_terminal_is_accepted(self):
-        """SSE per WHATWG allows the terminal signal to be carried on the
-        ``event:`` header line instead of inside the ``data:`` payload. Some
-        GHCP model releases emit ``event: response.completed\\ndata: {"id":...}``
-        with no ``type`` field in the payload. The LB must treat that as a
-        legitimate completion and NOT fire silent-truncation.
+        """A named event with a client-valid JSON discriminator is accepted.
+
+        Header-only success is intentionally rejected by separate protocol tests;
+        WHATWG framing does not define the Responses payload schema.
         """
         chunks = [
             b"event: response.created\ndata: {\"id\":\"resp_1\"}\n\n",
             b"event: response.output_text.delta\ndata: {\"delta\":\"ok\"}\n\n",
             # Real Responses API `response.completed` payload keeps usage nested
-            # under `response`; here we omit the payload `type` field on purpose
-            # so the terminal signal must be recognised via the `event:` header.
-            b"event: response.completed\ndata: {\"response\":{\"id\":\"resp_1\","
-            b"\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}}\n\n",
+            # under `response`; the pinned client requires a payload `type`
+            # even when the event header also names the terminal.
+            b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\","
+            b"\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"total_tokens\":12}}}\n\n",
         ]
         upstream = _StreamResponse(chunks)
         proxy, load_balancer, endpoint = self._make_proxy(_StreamClient([upstream]))
