@@ -221,14 +221,16 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         endpoint.active_requests = 1
 
         with patch.object(main.asyncio, "sleep", new=AsyncMock()):
-            response = await proxy.proxy_chat_completions(
-                {"model": "gpt-test", "messages": []}, stream=False
-            )
+            with self.assertRaises(HTTPException) as caught:
+                response = await proxy.proxy_chat_completions(
+                    {"model": "gpt-test", "messages": []}, stream=False
+                )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(caught.exception.status_code, 502)
+        self.assertEqual(client.post.await_count, 1)  # Never replay a successful/ambiguous POST.
         self.assertEqual(endpoint.active_requests, 1)
-        self.assertEqual(load_balancer.on_request_start.await_count, 2)
-        self.assertEqual(load_balancer.on_request_end.await_count, 2)
+        self.assertEqual(load_balancer.on_request_start.await_count, 1)
+        self.assertEqual(load_balancer.on_request_end.await_count, 1)
 
     async def test_non_stream_usage_record_failure_does_not_double_decrement(self):
         request = httpx.Request("POST", "https://example.test/responses")
@@ -250,9 +252,12 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(endpoint.usage_record_errors, 1)
+        self.assertEqual(endpoint.total_errors, 0)
+        self.assertEqual(client.post.await_count, 1)  # Never replay a successful/ambiguous POST.
         self.assertEqual(endpoint.active_requests, 1)
-        self.assertEqual(load_balancer.on_request_start.await_count, 2)
-        self.assertEqual(load_balancer.on_request_end.await_count, 2)
+        self.assertEqual(load_balancer.on_request_start.await_count, 1)
+        self.assertEqual(load_balancer.on_request_end.await_count, 1)
 
     async def test_non_stream_task_cancellation_releases_slot_without_circuit_error(self):
         client = _BlockingClient()
@@ -831,7 +836,7 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_monitor_releases_confirmed_disconnect_only_after_sustained_high_water(self):
         proxy, load_balancer, endpoint = self._make_proxy(unittest.mock.Mock())
-        endpoint.active_requests = 1
+        await load_balancer.on_request_start(endpoint)
         second_endpoint = main.CopilotEndpoint(
             name="copilot-test-2", github_token="token", models=["gpt-test"]
         )
@@ -967,14 +972,16 @@ class AzureRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         endpoint.active_requests = 1
 
         with patch.object(main.asyncio, "sleep", new=AsyncMock()):
-            response = await proxy.proxy_responses(
-                {"model": "gpt-test", "input": "hello"}, stream=False
-            )
+            with self.assertRaises(HTTPException) as caught:
+                response = await proxy.proxy_responses(
+                    {"model": "gpt-test", "input": "hello"}, stream=False
+                )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(caught.exception.status_code, 502)
+        self.assertEqual(client.post.await_count, 1)  # Never replay a successful/ambiguous POST.
         self.assertEqual(endpoint.active_requests, 1)
-        self.assertEqual(load_balancer.on_request_start.await_count, 2)
-        self.assertEqual(load_balancer.on_request_end.await_count, 2)
+        self.assertEqual(load_balancer.on_request_start.await_count, 1)
+        self.assertEqual(load_balancer.on_request_end.await_count, 1)
 
     async def test_usage_record_failure_uses_exactly_once_accounting(self):
         request = httpx.Request("POST", "https://example.test/responses")
@@ -995,9 +1002,12 @@ class AzureRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(endpoint.usage_record_errors, 1)
+        self.assertEqual(endpoint.total_errors, 0)
+        self.assertEqual(client.post.await_count, 1)  # Never replay a successful/ambiguous POST.
         self.assertEqual(endpoint.active_requests, 1)
-        self.assertEqual(load_balancer.on_request_start.await_count, 2)
-        self.assertEqual(load_balancer.on_request_end.await_count, 2)
+        self.assertEqual(load_balancer.on_request_start.await_count, 1)
+        self.assertEqual(load_balancer.on_request_end.await_count, 1)
 
     async def test_buffered_cancellation_releases_slot_without_circuit_error(self):
         client = _BlockingClient()

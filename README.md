@@ -438,9 +438,10 @@ GHCP 上游会返回 429 + `retry-after` 头。LB 的熔断器会临时摘掉该
 
 - 当某个端点连续发生 `circuit_breaker_threshold` 次服务端错误时，熔断器开启
 - 熔断器开启后，该端点在 `circuit_breaker_timeout` 秒内不会收到新请求
-- 超时后自动恢复，错误计数重置
+- 超时后进入 HALF_OPEN，仅允许一个真实请求探测恢复；成功才关闭熔断，累计错误数不清零
 - 客户端错误（4xx，除 429）不触发熔断器
-- 可通过 `/reset` 端点手动重置所有熔断器
+- `/reset` 保留原有 Databricks/Azure 显式重置行为；正常恢复不依赖重置或重启
+- 取消和客户端拒绝不证明上游恢复；详细状态、重试边界和兼容性见 [RESILIENCE.md](docs/RESILIENCE.md)
 
 ## 架构说明
 

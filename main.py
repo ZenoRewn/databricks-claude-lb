@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import asyncio
+import math
 import base64
 import json
 import time
@@ -1107,6 +1108,15 @@ class WorkspaceEndpoint:
     total_errors: int = field(default=0, repr=False)
     last_error_time: Optional[float] = field(default=None, repr=False)
     circuit_open: bool = field(default=False, repr=False)
+    consecutive_errors: int = field(default=0, repr=False)
+    circuit_generation: int = field(default=0, repr=False)
+    circuit_retry_at: float = field(default=0.0, repr=False)
+    half_open_in_flight: bool = field(default=False, repr=False)
+    cancelled_requests: int = field(default=0, repr=False)
+    neutral_requests: int = field(default=0, repr=False)
+    completed_requests: int = field(default=0, repr=False)
+    rejected_requests: int = field(default=0, repr=False)
+    usage_record_errors: int = field(default=0, repr=False)
 
     # Token 用量
     total_input_tokens: int = field(default=0, repr=False)
@@ -1136,6 +1146,15 @@ class AzureOpenAIEndpoint:
     total_errors: int = field(default=0, repr=False)
     last_error_time: Optional[float] = field(default=None, repr=False)
     circuit_open: bool = field(default=False, repr=False)
+    consecutive_errors: int = field(default=0, repr=False)
+    circuit_generation: int = field(default=0, repr=False)
+    circuit_retry_at: float = field(default=0.0, repr=False)
+    half_open_in_flight: bool = field(default=False, repr=False)
+    cancelled_requests: int = field(default=0, repr=False)
+    neutral_requests: int = field(default=0, repr=False)
+    completed_requests: int = field(default=0, repr=False)
+    rejected_requests: int = field(default=0, repr=False)
+    usage_record_errors: int = field(default=0, repr=False)
     total_input_tokens: int = field(default=0, repr=False)
     total_output_tokens: int = field(default=0, repr=False)
     total_cache_creation_tokens: int = field(default=0, repr=False)
@@ -1184,6 +1203,8 @@ class CopilotEndpoint:
     session_base_url: str = field(default=COPILOT_DEFAULT_BASE_URL, repr=False)
     last_token_refresh_at: int = field(default=0, repr=False)
 
+    auth_unhealthy: bool = field(default=False, repr=False)
+
     # Token refresh metrics（供 /metrics 暴露）
     token_refresh_total: int = field(default=0, repr=False)
     token_refresh_failed_total: int = field(default=0, repr=False)
@@ -1195,6 +1216,15 @@ class CopilotEndpoint:
     total_errors: int = field(default=0, repr=False)
     last_error_time: Optional[float] = field(default=None, repr=False)
     circuit_open: bool = field(default=False, repr=False)
+    consecutive_errors: int = field(default=0, repr=False)
+    circuit_generation: int = field(default=0, repr=False)
+    circuit_retry_at: float = field(default=0.0, repr=False)
+    half_open_in_flight: bool = field(default=False, repr=False)
+    cancelled_requests: int = field(default=0, repr=False)
+    neutral_requests: int = field(default=0, repr=False)
+    completed_requests: int = field(default=0, repr=False)
+    rejected_requests: int = field(default=0, repr=False)
+    usage_record_errors: int = field(default=0, repr=False)
     total_input_tokens: int = field(default=0, repr=False)
     total_output_tokens: int = field(default=0, repr=False)
     total_cache_creation_tokens: int = field(default=0, repr=False)
@@ -1529,6 +1559,37 @@ def create_usage_store(storage_config: dict) -> UsageDataStore:
     return JsonUsageStore(storage_config.get("path", "./usage_data"), retention)
 
 
+def _record_usage_best_effort(proxy_instance, endpoint, *args, **kwargs):
+    # Local telemetry failure cannot authorize replay of a successful inference.
+    try:
+        proxy_instance._record_usage(endpoint, *args, **kwargs)
+    except Exception as exc:
+        endpoint.usage_record_errors += 1
+        logger.error("Usage accounting failed: %s", type(exc).__name__)
+
+
+def _replay_safe_transport_failure(exc):
+    # POST is not idempotent. Read/write/EOF/protocol/internal failures can occur
+    # after execution, even when no response content has reached the client.
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+
+
+def _retry_rejected_response(response, attempt, max_attempts):
+    # Only explicit admission rejection is safe. If upstream supplies Retry-After,
+    # return it rather than holding a request or shortening its requested cooldown.
+    return (response.status_code == 429 and attempt < max_attempts - 1
+            and not getattr(response, "headers", {}).get("Retry-After"))
+
+
+@dataclass(eq=False)
+class RequestAttempt:
+    """Per-admission identity; endpoint reference is excluded from repr/logging."""
+    endpoint: object = field(repr=False)
+    generation: int
+    probe: bool = False
+    ended: bool = False
+
+
 class LoadBalancer:
     def __init__(
         self,
@@ -1542,22 +1603,55 @@ class LoadBalancer:
         self.circuit_breaker_threshold = circuit_breaker_threshold
         self.circuit_breaker_timeout = circuit_breaker_timeout
         self._rr_index = 0  # round_robin 计数器
+        self._attempts = {}
+
+    def circuit_state(self, ep) -> str:
+        if not ep.circuit_open:
+            return "CLOSED"
+        return "HALF_OPEN" if time.monotonic() >= ep.circuit_retry_at else "OPEN"
+
+    def is_available(self, ep, *, readiness=False) -> bool:
+        # Read-only eligibility: health/routing checks never consume the trial slot.
+        state = self.circuit_state(ep)
+        return state == "CLOSED" or (state == "HALF_OPEN" and
+                                     (readiness or not ep.half_open_in_flight))
 
     def get_available_endpoints(self) -> list[WorkspaceEndpoint]:
-        now = time.time()
-        available = []
+        return [ep for ep in self.endpoints if self.is_available(ep)]
 
-        for ep in self.endpoints:
-            if ep.circuit_open:
-                if ep.last_error_time and now - ep.last_error_time > self.circuit_breaker_timeout:
-                    ep.circuit_open = False
-                    ep.total_errors = 0
-                    logger.info(f"Circuit breaker reset for {ep.name}")
-                else:
-                    continue
-            available.append(ep)
+    def retry_after(self, endpoints=None) -> int:
+        candidates = self.endpoints if endpoints is None else endpoints
+        waits = [max(1, math.ceil(ep.circuit_retry_at - time.monotonic()))
+                 for ep in candidates if ep.circuit_open]
+        return min(waits, default=1)
 
-        return available
+    def unavailable(self, endpoints=None):
+        return HTTPException(status_code=503, headers={"Retry-After": str(self.retry_after(endpoints))},
+                             detail={"error": {"code": "endpoint_unavailable",
+                                               "message": "Configured upstream temporarily unavailable; retry after cooldown."}})
+
+    def _open(self, ep):
+        ep.circuit_open = True
+        ep.circuit_generation += 1
+        ep.circuit_retry_at = time.monotonic() + self.circuit_breaker_timeout
+        ep.half_open_in_flight = False
+        logger.warning("Circuit breaker opened for %s", ep.name)
+
+    def reset_circuit(self, ep):
+        # Administrative reset invalidates old admission generations, not their ownership.
+        ep.circuit_open = False
+        ep.consecutive_errors = 0
+        ep.circuit_generation += 1
+        ep.half_open_in_flight = False
+        ep.circuit_retry_at = 0.0
+
+    def current_attempt(self, ep):
+        # Compatibility for direct low-level callers with one outstanding admission.
+        # Production callers always pass the explicit identity across task transfer.
+        attempts = list(self._attempts.get(id(ep), {}).values())
+        if len(attempts) != 1:
+            raise RuntimeError("Explicit request attempt required for concurrent completion")
+        return attempts[0]
 
     def select_endpoint(self) -> Optional[WorkspaceEndpoint]:
         available = self.get_available_endpoints()
@@ -1632,21 +1726,73 @@ class LoadBalancer:
             return random.choices(matched, weights=weights, k=1)[0]
 
     async def on_request_start(self, endpoint: WorkspaceEndpoint):
+        # No await between check and claim: atomic within the application's event loop.
+        if not self.is_available(endpoint):
+            endpoint.rejected_requests += 1
+            raise self.unavailable([endpoint])
+        probe = endpoint.circuit_open
+        if probe:
+            endpoint.half_open_in_flight = True
+        lease = RequestAttempt(endpoint, endpoint.circuit_generation, probe)
+        self._attempts.setdefault(id(endpoint), {})[id(lease)] = lease
         endpoint.active_requests += 1
         endpoint.total_requests += 1
-    
-    async def on_request_end(self, endpoint: WorkspaceEndpoint, success: bool, is_client_error: bool = False):
-        endpoint.active_requests = max(0, endpoint.active_requests - 1)
+        return lease
 
-        if not success and not is_client_error:
-            # 只有服务端错误才计入错误数，客户端错误（4xx）不触发熔断器
+    async def on_request_end(self, endpoint: WorkspaceEndpoint, success: bool,
+                             is_client_error: bool = False, *, lease=None, cancelled=False):
+        lease = lease if lease is not None else self.current_attempt(endpoint)
+        if lease.endpoint is not endpoint:
+            raise RuntimeError("Request attempt endpoint mismatch")
+        if lease.ended:
+            return
+        lease.ended = True
+        self._attempts.get(id(endpoint), {}).pop(id(lease), None)
+        endpoint.active_requests = max(0, endpoint.active_requests - 1)
+        failed = not success and not is_client_error and not cancelled
+        if cancelled:
+            endpoint.cancelled_requests += 1
+        elif success:
+            endpoint.completed_requests += 1
+        elif failed:
             endpoint.total_errors += 1
             endpoint.last_error_time = time.time()
+        else:
+            endpoint.neutral_requests += 1
+        # Old in-flight results still count in telemetry, never override a newer trip/trial.
+        if lease.generation != endpoint.circuit_generation:
+            return
+        if lease.probe:
+            endpoint.half_open_in_flight = False
+            if success:
+                endpoint.circuit_open = False
+                endpoint.consecutive_errors = 0
+                endpoint.circuit_generation += 1
+                logger.info("Circuit breaker recovered for %s", endpoint.name)
+            else:
+                # A cancelled/client-rejected trial is inconclusive, not recovery.
+                # Delay the next real trial to prevent repeated cancellation storms.
+                if failed:
+                    endpoint.consecutive_errors += 1
+                self._open(endpoint)
+        elif success:
+            endpoint.consecutive_errors = 0
+        elif failed:
+            endpoint.consecutive_errors += 1
+            if endpoint.consecutive_errors >= self.circuit_breaker_threshold:
+                self._open(endpoint)
 
-            if endpoint.total_errors >= self.circuit_breaker_threshold:
-                endpoint.circuit_open = True
-                logger.warning(f"Circuit breaker opened for {endpoint.name}")
-    
+    def resilience_stats(self, ep):
+        return {"circuit_state": self.circuit_state(ep),
+                "consecutive_errors": ep.consecutive_errors,
+                "half_open_in_flight": ep.half_open_in_flight,
+                "retry_after_seconds": self.retry_after([ep]) if ep.circuit_open else 0,
+                "cancelled_requests": ep.cancelled_requests,
+                "neutral_requests": ep.neutral_requests,
+                "completed_requests": ep.completed_requests,
+                "rejected_requests": ep.rejected_requests,
+                "usage_record_errors": ep.usage_record_errors}
+
     def get_stats(self) -> dict:
         endpoints_stats = []
         for ep in self.endpoints:
@@ -1658,6 +1804,7 @@ class LoadBalancer:
                 "successful_requests": ep.successful_requests,
                 "error_rate": round(ep.total_errors / ep.total_requests * 100, 2) if ep.total_requests > 0 else 0,
                 "circuit_open": ep.circuit_open,
+                **self.resilience_stats(ep),
                 "total_input_tokens": ep.total_input_tokens,
                 "total_output_tokens": ep.total_output_tokens,
                 "total_cache_creation_tokens": ep.total_cache_creation_tokens,
@@ -1856,9 +2003,9 @@ class ClaudeProxy:
         for attempt in range(max_retries):
             endpoint = self.load_balancer.select_endpoint()
             if not endpoint:
-                raise HTTPException(status_code=503, detail={"error": {"message": "No available endpoints"}})
+                raise self.load_balancer.unavailable()
 
-            await self.load_balancer.on_request_start(endpoint)
+            attempt_lease = await self.load_balancer.on_request_start(endpoint)
 
             # 使用原生 Anthropic 端点
             url = f"{endpoint.api_base}/anthropic/v1/messages"
@@ -1872,20 +2019,26 @@ class ClaudeProxy:
                 }
 
                 if stream:
-                    return await self._stream_request(endpoint, url, body, headers, model=model, start_time=start_time)
+                    return await self._stream_request(endpoint, url, body, headers, model=model, start_time=start_time, attempt_lease=attempt_lease)
                 else:
-                    return await self._normal_request(endpoint, url, body, headers, model=model, start_time=start_time)
+                    result = await self._normal_request(endpoint, url, body, headers, model=model, start_time=start_time)
+                    await self.load_balancer.on_request_end(endpoint, success=True, lease=attempt_lease)
+                    return result
                     
+            except asyncio.CancelledError:
+                await _finish_cleanup(self.load_balancer.on_request_end(
+                    endpoint, success=False, lease=attempt_lease, cancelled=True))
+                raise
             except httpx.HTTPStatusError as e:
                 last_error = e
                 self.global_stats.total_errors += 1
                 # 429 rate limit 也应该触发熔断，因为表示服务端过载
                 is_client_error = 400 <= e.response.status_code < 500 and e.response.status_code != 429
-                await self.load_balancer.on_request_end(endpoint, success=False, is_client_error=is_client_error)
+                await self.load_balancer.on_request_end(endpoint, success=False, is_client_error=is_client_error, lease=attempt_lease)
 
-                if e.response.status_code in (429, 500, 502, 503, 504):
+                if _retry_rejected_response(e.response, attempt, max_retries):
                     logger.warning(f"{endpoint.name} returned {e.response.status_code}, retrying...")
-                    await asyncio.sleep(min(2 ** attempt, 8))
+                    await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                     continue
                 else:
                     try:
@@ -1894,24 +2047,26 @@ class ClaudeProxy:
                         body_text = ""
                     error_body = _build_upstream_error_detail(e.response.status_code, body_text, "Databricks", endpoint.name)
                     logger.error(f"Request failed with {e.response.status_code}: {json.dumps(error_body, ensure_ascii=False)[:500]}")
-                    raise HTTPException(status_code=e.response.status_code, detail=error_body)
+                    raise HTTPException(status_code=e.response.status_code, detail=error_body,
+                                        headers={"Retry-After": e.response.headers["Retry-After"]} if "Retry-After" in e.response.headers else None)
 
             except Exception as e:
                 last_error = e
                 self.global_stats.total_errors += 1
                 logger.error(f"{endpoint.name} failed: {e}")
-                await self.load_balancer.on_request_end(endpoint, success=False)
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(min(2 ** attempt, 8))
+                await self.load_balancer.on_request_end(endpoint, success=False, lease=attempt_lease,
+                                                        is_client_error=isinstance(e, httpx.PoolTimeout))
+                if _replay_safe_transport_failure(e) and attempt < max_retries - 1:
+                    await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                     continue
+                break
         
-        raise HTTPException(status_code=503, detail={"error": {"message": f"All retries failed: {last_error}"}})
+        raise HTTPException(status_code=502, detail={"error": {"code": "upstream_request_failed", "message": "Upstream request failed; execution may have occurred. Not replayed after ambiguous failure."}})
     
     async def _normal_request(self, endpoint, url, body, headers, model: str = "unknown", start_time: float = 0) -> JSONResponse:
         """非流式请求 - 直接透传"""
         response = await self.client.post(url, json=body, headers=headers)
         response.raise_for_status()
-        await self.load_balancer.on_request_end(endpoint, success=True)
 
         elapsed = time.time() - start_time
         resp_json = response.json()
@@ -1920,23 +2075,25 @@ class ClaudeProxy:
         output_tokens = usage.get("output_tokens", 0)
         cache_creation_tokens = usage.get("cache_creation_input_tokens", 0)
         cache_read_tokens = usage.get("cache_read_input_tokens", 0)
-        self._record_usage(endpoint, model, input_tokens, output_tokens, elapsed,
+        _record_usage_best_effort(self, endpoint, model, input_tokens, output_tokens, elapsed,
                           cache_creation_tokens=cache_creation_tokens, cache_read_tokens=cache_read_tokens)
 
         return JSONResponse(content=resp_json, status_code=response.status_code)
 
-    async def _stream_request(self, endpoint, url, body, headers, max_retries: int = 3, model: str = "unknown", start_time: float = 0) -> StreamingResponse:
+    async def _stream_request(self, endpoint, url, body, headers, max_retries: int = 3, model: str = "unknown", start_time: float = 0, attempt_lease=None) -> StreamingResponse:
         """流式请求 - 直接透传 Databricks 的 Anthropic 格式响应，支持重试"""
 
         proxy_self = self
 
-        request_lease = {"endpoint": endpoint, "active": True}
+        request_lease = {"endpoint": endpoint, "active": True,
+                         "lease": attempt_lease if attempt_lease is not None else self.load_balancer.current_attempt(endpoint)}
 
-        async def end_current_request(success: bool, is_client_error: bool = False):
+        async def end_current_request(success: bool, is_client_error: bool = False, *, cancelled=False):
             if not request_lease["active"]:
                 return
             await proxy_self.load_balancer.on_request_end(
-                request_lease["endpoint"], success=success, is_client_error=is_client_error
+                request_lease["endpoint"], success=success, is_client_error=is_client_error,
+                lease=request_lease["lease"], cancelled=cancelled
             )
             request_lease["active"] = False
 
@@ -1944,11 +2101,11 @@ class ClaudeProxy:
             if request_lease["active"]:
                 raise RuntimeError("Databricks stream request lease already active")
             request_lease["endpoint"] = current
-            await proxy_self.load_balancer.on_request_start(current)
+            request_lease["lease"] = await proxy_self.load_balancer.on_request_start(current)
             request_lease["active"] = True
 
         async def release_abandoned_request():
-            await end_current_request(success=False, is_client_error=True)
+            await end_current_request(success=False, is_client_error=True, cancelled=True)
 
         async def stream_generator():
             current_endpoint = endpoint
@@ -1959,6 +2116,7 @@ class ClaudeProxy:
             cache_creation_tokens = 0
             cache_read_tokens = 0
             sent_message_start = False
+            sent_any_content = False
 
             MESSAGE_STOP_EVENT = b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
             HEARTBEAT = b": keep-alive\n\n"
@@ -1994,9 +2152,9 @@ class ClaudeProxy:
                         await end_current_request(success=False, is_client_error=is_client_error)
 
                         # 可重试的状态码
-                        if response.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                        if _retry_rejected_response(response, attempt, max_retries):
                             logger.warning(f"{current_endpoint.name} returned {response.status_code}, retrying stream...")
-                            await asyncio.sleep(min(2 ** attempt, 8))
+                            await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                             new_endpoint = proxy_self.load_balancer.select_endpoint()
                             if new_endpoint:
                                 current_endpoint = new_endpoint
@@ -2047,6 +2205,7 @@ class ClaudeProxy:
                             break
 
                         chunk = payload
+                        sent_any_content = True
                         yield chunk  # 立即透传, 零延迟
                         try:
                             buffer += chunk.decode("utf-8", errors="ignore")
@@ -2074,7 +2233,7 @@ class ClaudeProxy:
 
                     await end_current_request(success=True)
                     elapsed = time.time() - start_time
-                    proxy_self._record_usage(current_endpoint, model, input_tokens, output_tokens, elapsed,
+                    _record_usage_best_effort(proxy_self, current_endpoint, model, input_tokens, output_tokens, elapsed,
                                             cache_creation_tokens=cache_creation_tokens, cache_read_tokens=cache_read_tokens)
                     return
 
@@ -2092,8 +2251,8 @@ class ClaudeProxy:
                         yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': error_detail}})}\n\n".encode()
                         return
 
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(min(2 ** attempt, 8))
+                    if not sent_any_content and _replay_safe_transport_failure(e) and attempt < max_retries - 1:
+                        await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         new_endpoint = proxy_self.load_balancer.select_endpoint()
                         if new_endpoint:
                             current_endpoint = new_endpoint
@@ -2113,7 +2272,7 @@ class ClaudeProxy:
                     import traceback
                     error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
                     logger.error(f"Stream error: {error_detail}\n{traceback.format_exc()}")
-                    await end_current_request(success=False, is_client_error=False)
+                    await end_current_request(success=False, is_client_error=isinstance(e, httpx.PoolTimeout))
                     if sent_message_start:
                         yield MESSAGE_STOP_EVENT
                     yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': error_detail}})}\n\n".encode()
@@ -2222,20 +2381,23 @@ class AzureOpenAIProxy:
         for attempt in range(max_retries):
             endpoint = self.load_balancer.select_endpoint_for_model(model)
             if not endpoint:
+                if any(model in ep.deployments for ep in self.load_balancer.endpoints):
+                    raise self.load_balancer.unavailable([ep for ep in self.load_balancer.endpoints if model in ep.deployments])
                 raise HTTPException(
                     status_code=404,
                     detail={"error": {"message": f"No endpoint available for model '{model}'"}},
                 )
 
-            await self.load_balancer.on_request_start(endpoint)
+            attempt_lease = await self.load_balancer.on_request_start(endpoint)
             attempt_ended = False
 
-            async def end_attempt(success: bool, is_client_error: bool = False):
+            async def end_attempt(success: bool, is_client_error: bool = False, *, cancelled=False):
                 nonlocal attempt_ended
                 if attempt_ended:
                     return
                 await self.load_balancer.on_request_end(
-                    endpoint, success=success, is_client_error=is_client_error
+                    endpoint, success=success, is_client_error=is_client_error,
+                    lease=attempt_lease, cancelled=cancelled
                 )
                 attempt_ended = True
 
@@ -2255,7 +2417,7 @@ class AzureOpenAIProxy:
                 if stream:
                     # StreamingResponse takes ownership of the active request lease.
                     return await self._stream_response(
-                        endpoint, url, body, headers, model, api_type, start_time
+                        endpoint, url, body, headers, model, api_type, start_time, attempt_lease=attempt_lease
                     )
                 result = await self._normal_request(
                     endpoint, url, body, headers, model, api_type, start_time
@@ -2264,7 +2426,7 @@ class AzureOpenAIProxy:
                 return result
             except asyncio.CancelledError:
                 cleanup_task = asyncio.create_task(
-                    end_attempt(success=False, is_client_error=True)
+                    end_attempt(success=False, is_client_error=True, cancelled=True)
                 )
                 await asyncio.shield(cleanup_task)
                 raise
@@ -2274,9 +2436,9 @@ class AzureOpenAIProxy:
                 status = e.response.status_code
                 is_client_error = 400 <= status < 500 and status != 429
                 await end_attempt(success=False, is_client_error=is_client_error)
-                if status in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                if _retry_rejected_response(e.response, attempt, max_retries):
                     logger.warning(f"{endpoint.name} returned {status}, retrying...")
-                    await asyncio.sleep(min(2 ** attempt, 8))
+                    await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                     continue
                 try:
                     body_text = e.response.text
@@ -2285,19 +2447,21 @@ class AzureOpenAIProxy:
                 error_body = _build_upstream_error_detail(
                     status, body_text, "Azure OpenAI", endpoint.name
                 )
-                raise HTTPException(status_code=status, detail=error_body)
+                raise HTTPException(status_code=status, detail=error_body,
+                                    headers={"Retry-After": e.response.headers["Retry-After"]} if "Retry-After" in e.response.headers else None)
             except Exception as e:
                 last_error = e
                 self.global_stats.total_errors += 1
                 logger.error(f"{endpoint.name} failed: {e}")
-                await end_attempt(success=False)
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(min(2 ** attempt, 8))
+                await end_attempt(success=False, is_client_error=isinstance(e, httpx.PoolTimeout))
+                if _replay_safe_transport_failure(e) and attempt < max_retries - 1:
+                    await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                     continue
+                break
 
         raise HTTPException(
-            status_code=503,
-            detail={"error": {"message": f"All retries failed: {last_error}"}},
+            status_code=502,
+            detail={"error": {"code": "upstream_request_failed", "message": "Upstream request failed; execution may have occurred. Not replayed after ambiguous failure."}},
         )
 
     async def _normal_request(self, endpoint, url, body, headers, model: str, api_type: str, start_time: float) -> JSONResponse:
@@ -2316,24 +2480,26 @@ class AzureOpenAIProxy:
             input_tokens = usage.get("input_tokens", 0)
             output_tokens = usage.get("output_tokens", 0)
             cache_read_tokens = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
-        self._record_usage(endpoint, model, input_tokens, output_tokens, elapsed,
+        _record_usage_best_effort(self, endpoint, model, input_tokens, output_tokens, elapsed,
                           cache_read_tokens=cache_read_tokens)
 
         return JSONResponse(content=resp_json, status_code=response.status_code)
 
-    async def _stream_response(self, endpoint, url, body, headers, model: str, api_type: str, start_time: float) -> StreamingResponse:
+    async def _stream_response(self, endpoint, url, body, headers, model: str, api_type: str, start_time: float, attempt_lease=None) -> StreamingResponse:
         """流式请求 - 透传 SSE，支持流内重试"""
 
         proxy_self = self
         max_retries = 3
-        request_lease = {"endpoint": endpoint, "active": True}
+        request_lease = {"endpoint": endpoint, "active": True,
+                         "lease": attempt_lease if attempt_lease is not None else self.load_balancer.current_attempt(endpoint)}
 
-        async def end_current_request(success: bool, is_client_error: bool = False):
+        async def end_current_request(success: bool, is_client_error: bool = False, *, cancelled=False):
             if not request_lease["active"]:
                 return
             current = request_lease["endpoint"]
             await proxy_self.load_balancer.on_request_end(
-                current, success=success, is_client_error=is_client_error
+                current, success=success, is_client_error=is_client_error,
+                lease=request_lease["lease"], cancelled=cancelled
             )
             request_lease["active"] = False
 
@@ -2341,11 +2507,11 @@ class AzureOpenAIProxy:
             if request_lease["active"]:
                 raise RuntimeError("Azure stream request lease already active")
             request_lease["endpoint"] = current
-            await proxy_self.load_balancer.on_request_start(current)
+            request_lease["lease"] = await proxy_self.load_balancer.on_request_start(current)
             request_lease["active"] = True
 
         async def release_abandoned_request():
-            await end_current_request(success=False, is_client_error=True)
+            await end_current_request(success=False, is_client_error=True, cancelled=True)
 
         async def stream_generator():
             current_endpoint = endpoint
@@ -2404,9 +2570,9 @@ class AzureOpenAIProxy:
                         )
                         await end_current_request(success=False, is_client_error=is_client_error)
 
-                        if response.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                        if _retry_rejected_response(response, attempt, max_retries):
                             logger.warning(f"{current_endpoint.name} returned {response.status_code}, retrying stream...")
-                            await asyncio.sleep(min(2 ** attempt, 8))
+                            await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                             new_endpoint = proxy_self.load_balancer.select_endpoint_for_model(model)
                             if new_endpoint:
                                 current_endpoint = new_endpoint
@@ -2521,8 +2687,7 @@ class AzureOpenAIProxy:
                                         "code": "upstream_truncated",
                                         "message": (
                                             "Azure upstream closed the SSE stream before "
-                                            "emitting response.completed. Likely upstream "
-                                            "timeout or size limit."
+                                            "emitting response.completed. Cause undetermined."
                                         ),
                                     }
                                 },
@@ -2534,8 +2699,7 @@ class AzureOpenAIProxy:
                                     "code": "upstream_truncated",
                                     "message": (
                                         "Azure upstream closed the SSE stream before "
-                                        "emitting [DONE]. Likely upstream timeout or "
-                                        "size limit."
+                                        "emitting [DONE]. Cause undetermined."
                                     ),
                                 }
                             }
@@ -2543,7 +2707,7 @@ class AzureOpenAIProxy:
                         return
 
                     elapsed = time.time() - start_time
-                    proxy_self._record_usage(current_endpoint, model, input_tokens, output_tokens, elapsed,
+                    _record_usage_best_effort(proxy_self, current_endpoint, model, input_tokens, output_tokens, elapsed,
                                             cache_read_tokens=cache_read_tokens)
                     await end_current_request(success=True)
                     return
@@ -2556,8 +2720,8 @@ class AzureOpenAIProxy:
                     await end_current_request(success=False)
 
                     # 已向客户端输出过 chunk 就不能再重放; 否则可以切端点重试
-                    if not sent_any_chunk and attempt < max_retries - 1:
-                        await asyncio.sleep(min(2 ** attempt, 8))
+                    if not sent_any_chunk and _replay_safe_transport_failure(e) and attempt < max_retries - 1:
+                        await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         new_endpoint = proxy_self.load_balancer.select_endpoint_for_model(model)
                         if new_endpoint:
                             current_endpoint = new_endpoint
@@ -2575,7 +2739,7 @@ class AzureOpenAIProxy:
                 except Exception as e:
                     error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
                     logger.error(f"Azure stream error: {error_detail}")
-                    await end_current_request(success=False)
+                    await end_current_request(success=False, is_client_error=isinstance(e, httpx.PoolTimeout))
                     yield _sse_terminal_error(api_type, "upstream_error", error_detail)
                     return
 
@@ -3042,6 +3206,7 @@ class CopilotProxy:
             ep.name: {
                 "active_requests": ep.active_requests,
                 "circuit_open": ep.circuit_open,
+                **self.load_balancer.resilience_stats(ep),
                 "total_errors": ep.total_errors,
             }
             for ep in self.load_balancer.endpoints
@@ -3257,11 +3422,8 @@ class CopilotProxy:
         endpoint.session_base_url = base.rstrip("/")
         endpoint.last_token_refresh_at = now
         endpoint.token_refresh_total += 1
-        # 交换成功视为该 endpoint 健康，重置熔断
-        if endpoint.circuit_open:
-            logger.info(f"[Copilot] endpoint '{endpoint.name}' recovered, resetting circuit breaker")
-            endpoint.circuit_open = False
-            endpoint.total_errors = 0
+        endpoint.auth_unhealthy = False
+        # Successful credential exchange does not prove inference recovery.
         expires_in = endpoint.session_token_expires_at - now
         logger.info(f"[Copilot] session token cached for {endpoint.name}: base={endpoint.session_base_url}, expires in {expires_in}s")
         return endpoint.session_token
@@ -3298,7 +3460,8 @@ class CopilotProxy:
                 ) from first_err
 
     def _mark_endpoint_unhealthy(self, endpoint: CopilotEndpoint, reason: str):
-        endpoint.circuit_open = True
+        endpoint.auth_unhealthy = True
+        self.load_balancer._open(endpoint)
         endpoint.last_error_time = time.time()
         endpoint.total_errors += 1
         logger.error(f"[Copilot] endpoint '{endpoint.name}' marked unhealthy: {reason}")
@@ -3373,10 +3536,10 @@ class CopilotProxy:
         logger.info("[Copilot] background refresh stopped")
 
     def is_any_endpoint_healthy(self) -> bool:
-        """有任一端点 token 有效且未熔断 → readiness 可通过"""
+        """Valid cached auth plus CLOSED/recovery-eligible state; no synthetic probe."""
         now = int(time.time())
         for ep in self.load_balancer.endpoints:
-            if ep.circuit_open:
+            if not self.load_balancer.is_available(ep, readiness=True) or ep.auth_unhealthy:
                 continue
             if ep.session_token and ep.session_token_expires_at > now:
                 return True
@@ -3418,7 +3581,12 @@ class CopilotProxy:
 
     def can_handle(self, model: str) -> bool:
         """是否有任何健康端点可服务该模型（路由层用来决定是否优先 Copilot）"""
-        return self._select_endpoint(model) is not None
+        return any((not ep.models or model in ep.models) and self.load_balancer.is_available(ep)
+                   for ep in self.load_balancer.endpoints)
+
+    def supports_model(self, model: str) -> bool:
+        """Configured eligibility, independent of temporary admission state."""
+        return any(not ep.models or model in ep.models for ep in self.load_balancer.endpoints)
 
     # ---- 用量记录（与 AzureOpenAIProxy._record_usage 对称）----
 
@@ -3541,17 +3709,20 @@ class CopilotProxy:
         for attempt in range(max_retries):
             endpoint = self._select_endpoint(model)
             if not endpoint:
-                raise HTTPException(status_code=404, detail={"error": {"message": f"No Copilot endpoint available for model '{model}'"}})
+                if self.supports_model(model):
+                    raise self.load_balancer.unavailable([ep for ep in self.load_balancer.endpoints if not ep.models or model in ep.models])
+                raise HTTPException(status_code=404, detail={"error": {"code": "unsupported_model", "message": "No configured Copilot route for this model"}})
 
-            await self.load_balancer.on_request_start(endpoint)
+            attempt_lease = await self.load_balancer.on_request_start(endpoint)
             attempt_ended = False
 
-            async def end_attempt(success: bool, is_client_error: bool = False):
+            async def end_attempt(success: bool, is_client_error: bool = False, *, cancelled=False):
                 nonlocal attempt_ended
                 if attempt_ended:
                     return
                 await self.load_balancer.on_request_end(
-                    endpoint, success=success, is_client_error=is_client_error
+                    endpoint, success=success, is_client_error=is_client_error,
+                    lease=attempt_lease, cancelled=cancelled
                 )
                 attempt_ended = True
 
@@ -3559,19 +3730,19 @@ class CopilotProxy:
                 headers = await self._build_headers(endpoint, has_image)
             except asyncio.CancelledError:
                 cleanup_task = asyncio.create_task(
-                    end_attempt(success=False, is_client_error=True)
+                    end_attempt(success=False, is_client_error=True, cancelled=True)
                 )
                 await asyncio.shield(cleanup_task)
                 raise
             except HTTPException:
-                await end_attempt(success=False)
+                await end_attempt(success=False, is_client_error=endpoint.auth_unhealthy)
                 raise
             except Exception as e:
                 logger.error(f"[Copilot {api_type}][{model}] header build failed on {endpoint.name}: {type(e).__name__}")
                 await end_attempt(success=False)
                 last_error = e
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(min(2 ** attempt, 8))
+                    await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                     continue
                 raise HTTPException(status_code=503, detail={"error": {"message": f"Copilot token exchange failed: {type(e).__name__}"}})
 
@@ -3583,7 +3754,7 @@ class CopilotProxy:
                     return await self._stream_response(
                         endpoint, url, body, headers, model, api_type, start_time,
                         disconnect_checker=disconnect_checker,
-                        request_id=request_id,
+                        request_id=request_id, attempt_lease=attempt_lease,
                     )
                 else:
                     result = await self._normal_request(
@@ -3595,7 +3766,7 @@ class CopilotProxy:
             except asyncio.CancelledError:
                 # Handler/client cancellation is local evidence, never endpoint failure.
                 cleanup_task = asyncio.create_task(
-                    end_attempt(success=False, is_client_error=True)
+                    end_attempt(success=False, is_client_error=True, cancelled=True)
                 )
                 await asyncio.shield(cleanup_task)
                 raise
@@ -3619,7 +3790,7 @@ class CopilotProxy:
                 # 401 自愈：上游 session token 失效 → 强制刷新后重试一次
                 if status == 401 and attempt < max_retries - 1:
                     logger.warning(f"[Copilot] 401 from upstream on {endpoint.name}, forcing session refresh and retrying")
-                    await end_attempt(success=False)
+                    await end_attempt(success=False, is_client_error=True)
                     try:
                         await self.get_session_token(endpoint, force=True)
                         continue
@@ -3628,12 +3799,13 @@ class CopilotProxy:
                         # fall through 到正常错误返回
                 is_client_error = 400 <= status < 500 and status != 429
                 await end_attempt(success=False, is_client_error=is_client_error)
-                if status in (429, 500, 502, 503, 504):
+                if _retry_rejected_response(e.response, attempt, max_retries):
                     logger.warning(f"[Copilot] {endpoint.name} returned {status}, retrying...")
-                    await asyncio.sleep(min(2 ** attempt, 8))
+                    await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                     continue
                 error_body = _build_upstream_error_detail(status, body_text, "Copilot", endpoint.name)
-                raise HTTPException(status_code=status, detail=error_body)
+                raise HTTPException(status_code=status, detail=error_body,
+                                    headers={"Retry-After": e.response.headers["Retry-After"]} if "Retry-After" in e.response.headers else None)
             except httpx.PoolTimeout as e:
                 # Local client saturation is not an upstream endpoint failure.
                 last_error = e
@@ -3654,16 +3826,17 @@ class CopilotProxy:
                     )
                     break
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(min(2 ** attempt, 8))
+                    await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                     continue
             except Exception as e:
                 last_error = e
                 self.global_stats.total_errors += 1
                 logger.error(f"[Copilot] {endpoint.name} failed: {e}")
-                await end_attempt(success=False)
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(min(2 ** attempt, 8))
+                await end_attempt(success=False, is_client_error=isinstance(e, httpx.PoolTimeout))
+                if _replay_safe_transport_failure(e) and attempt < max_retries - 1:
+                    await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                     continue
+                break
 
         # 重试都失败：尽量用 helper 包装上游错误，避免 HTML / 异常字符串泄露
         if isinstance(last_error, httpx.HTTPStatusError):
@@ -3676,7 +3849,10 @@ class CopilotProxy:
             )
             detail["error"]["message"] = "All Copilot retries exhausted. " + detail["error"].get("message", "")
             raise HTTPException(status_code=503, detail=detail)
-        raise HTTPException(status_code=503, detail={"error": {"message": f"All Copilot retries failed: {type(last_error).__name__ if last_error else 'unknown'}: {str(last_error)[:300] if last_error else ''}"}})
+        raise HTTPException(status_code=503 if _replay_safe_transport_failure(last_error) else 502,
+                            detail={"error": {"code": "upstream_request_failed",
+                                              "message": "Copilot request failed. Ambiguous execution failures are not replayed.",
+                                              "failure_type": type(last_error).__name__}})
 
     async def _normal_request(self, endpoint: CopilotEndpoint, url: str, body: dict, headers: dict,
                                model: str, api_type: str, start_time: float,
@@ -3702,7 +3878,7 @@ class CopilotProxy:
             input_tokens = usage.get("prompt_tokens", 0)
             output_tokens = usage.get("completion_tokens", 0)
             cache_read_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
-        self._record_usage(endpoint, model, input_tokens, output_tokens, elapsed,
+        _record_usage_best_effort(self, endpoint, model, input_tokens, output_tokens, elapsed,
                            cache_read_tokens=cache_read_tokens)
         # Same shape as the streaming `[Copilot stream_end]`: one row per request.
         _log_copilot_request_end(
@@ -3723,11 +3899,12 @@ class CopilotProxy:
     async def _stream_response(self, endpoint: CopilotEndpoint, url: str, body: dict, headers: dict,
                                 model: str, api_type: str, start_time: float,
                                 disconnect_checker=None,
-                                request_id: Optional[str] = None) -> StreamingResponse:
+                                request_id: Optional[str] = None, attempt_lease=None) -> StreamingResponse:
         """流式请求，复用 AzureOpenAIProxy._stream_response 同款 pump + heartbeat + sent_any_chunk 守卫架构"""
         proxy_self = self
         max_retries = 3
-        request_lease = {"endpoint": endpoint, "active": True}
+        request_lease = {"endpoint": endpoint, "active": True,
+                         "lease": attempt_lease if attempt_lease is not None else self.load_balancer.current_attempt(endpoint)}
         connection_id: Optional[str] = None
         # State shared with `release_abandoned_request` so client-disconnect logs
         # can quote the same fields as inline terminal branches. Mutated by
@@ -3764,12 +3941,13 @@ class CopilotProxy:
                 md["request_id"] = request_id
             return md
 
-        async def end_current_request(success: bool, is_client_error: bool = False):
+        async def end_current_request(success: bool, is_client_error: bool = False, *, cancelled=False):
             if not request_lease["active"]:
                 return
             current = request_lease["endpoint"]
             await proxy_self.load_balancer.on_request_end(
-                current, success=success, is_client_error=is_client_error
+                current, success=success, is_client_error=is_client_error,
+                lease=request_lease["lease"], cancelled=cancelled
             )
             request_lease["active"] = False
 
@@ -3777,14 +3955,14 @@ class CopilotProxy:
             if request_lease["active"]:
                 raise RuntimeError("Copilot stream request lease already active")
             request_lease["endpoint"] = current
-            await proxy_self.load_balancer.on_request_start(current)
+            request_lease["lease"] = await proxy_self.load_balancer.on_request_start(current)
             request_lease["active"] = True
             if connection_id and connection_id in proxy_self._stream_connections:
                 proxy_self._stream_connections[connection_id]["endpoint"] = current.name
 
         async def release_abandoned_request():
             # Client disconnect / generator close is local, not endpoint health evidence.
-            await end_current_request(success=False, is_client_error=True)
+            await end_current_request(success=False, is_client_error=True, cancelled=True)
             proxy_self._unregister_stream(connection_id)
             # Log the disconnect with the same shape as `_emit_stream_end` (so
             # `grep 'kind=copilot_stream_end'` covers every Codex request), unless
@@ -3946,9 +4124,9 @@ class CopilotProxy:
                                 logger.error(f"[Copilot] forced refresh during stream retry failed: {he}")
                                 # fall through 到错误返回
 
-                        if response.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1 and not sent_any_chunk:
+                        if _retry_rejected_response(response, attempt, max_retries) and not sent_any_chunk:
                             logger.warning(f"[Copilot] {current_endpoint.name} returned {response.status_code}, retrying stream...")
-                            await asyncio.sleep(min(2 ** attempt, 8))
+                            await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                             new_endpoint = proxy_self._select_endpoint(model)
                             if new_endpoint:
                                 current_endpoint = new_endpoint
@@ -4083,12 +4261,10 @@ class CopilotProxy:
                         await end_current_request(success=False)
                         message_body = (
                             "Copilot upstream closed the SSE stream before emitting "
-                            "response.completed. This usually means the upstream hit "
-                            "a timeout or size limit."
+                            "response.completed. The cause is not established by this proxy."
                             if api_type == "responses"
                             else "Copilot upstream closed the SSE stream before emitting "
-                                 "[DONE]. This usually means the upstream hit a timeout "
-                                 "or size limit."
+                                 "[DONE]. The cause is not established by this proxy."
                         )
                         yield _sse_terminal_error(
                             api_type, "upstream_truncated", message_body,
@@ -4099,7 +4275,7 @@ class CopilotProxy:
 
                     await end_current_request(success=True)
                     elapsed = time.time() - start_time
-                    proxy_self._record_usage(current_endpoint, model, input_tokens, output_tokens, elapsed,
+                    _record_usage_best_effort(proxy_self, current_endpoint, model, input_tokens, output_tokens, elapsed,
                                               cache_read_tokens=cache_read_tokens)
                     _emit_stream_end("completed", logging.INFO,
                                       cache_read_tokens=cache_read_tokens)
@@ -4134,7 +4310,7 @@ class CopilotProxy:
                         and attempt < max_retries - 1
                         and not single_endpoint
                     ):
-                        await asyncio.sleep(min(2 ** attempt, 8))
+                        await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         new_endpoint = proxy_self._select_endpoint(model)
                         if new_endpoint:
                             current_endpoint = new_endpoint
@@ -4205,8 +4381,8 @@ class CopilotProxy:
                     )
                     await end_current_request(success=False)
 
-                    if not sent_any_chunk and attempt < max_retries - 1:
-                        await asyncio.sleep(min(2 ** attempt, 8))
+                    if not sent_any_chunk and _replay_safe_transport_failure(e) and attempt < max_retries - 1:
+                        await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         new_endpoint = proxy_self._select_endpoint(model)
                         if new_endpoint:
                             current_endpoint = new_endpoint
@@ -4272,6 +4448,7 @@ class CopilotProxy:
                 "successful_requests": ep.successful_requests,
                 "error_rate": round(ep.total_errors / ep.total_requests * 100, 2) if ep.total_requests > 0 else 0,
                 "circuit_open": ep.circuit_open,
+                **self.load_balancer.resilience_stats(ep),
                 "total_input_tokens": ep.total_input_tokens,
                 "total_output_tokens": ep.total_output_tokens,
                 "total_cache_creation_tokens": ep.total_cache_creation_tokens,
@@ -5269,6 +5446,9 @@ async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Opt
 
     # 都不能处理 → 早返回，且消息明确说明每个 provider 状态
     if not copilot_can and not azure_supports:
+        if copilot_proxy and copilot_proxy.supports_model(model):
+            raise copilot_proxy.load_balancer.unavailable(
+                [ep for ep in copilot_proxy.load_balancer.endpoints if not ep.models or model in ep.models])
         msg = _build_no_provider_message(model)
         raise HTTPException(status_code=404, detail={"error": {"message": msg}})
 
@@ -5302,7 +5482,8 @@ async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Opt
                 ) from e
         except HTTPException as e:
             # Copilot 内部 503（全熔断 / token 失效）→ 看 Azure 能不能接
-            if e.status_code in (404, 503):
+            if (e.status_code == 503 and isinstance(e.detail, dict)
+                    and e.detail.get("error", {}).get("code") == "endpoint_unavailable"):
                 copilot_failure = f"Copilot transient error {e.status_code}: {e.detail.get('error',{}).get('message','')}"
                 if azure_supports:
                     logger.info(f"[route][{rid}] Copilot unavailable for '{model}' ({e.status_code}), trying Azure")
@@ -5310,8 +5491,8 @@ async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Opt
                     # Copilot 暂时不可用 + Azure 没这个模型 → 不能 fallback；返回明确 503
                     logger.warning(f"[route][{rid}] Copilot unavailable and no Azure fallback for '{model}': {e.detail}")
                     raise HTTPException(
-                        status_code=503,
-                        detail={"error": {"message":
+                        status_code=503, headers=e.headers,
+                        detail={"error": {"code": "endpoint_unavailable", "message":
                             f"Copilot temporarily unavailable for model '{model}' ({e.status_code}); "
                             f"Azure has no deployment to fall back to. "
                             f"Original Copilot error: {e.detail.get('error',{}).get('message','')}",
@@ -5331,7 +5512,7 @@ async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Opt
                 detail = e.detail
                 if isinstance(detail, dict) and "error" in detail:
                     detail["error"]["copilot_attempt"] = copilot_failure
-                raise HTTPException(status_code=e.status_code, detail=detail) from e
+                raise HTTPException(status_code=e.status_code, detail=detail, headers=e.headers) from e
             raise
 
     # 不应该走到这（前面早返回了）；保险起见
@@ -5616,18 +5797,18 @@ async def health_live():
 async def health_ready():
     """Readiness probe：检查依赖是否就绪。
     任一关键依赖失败 → 503，K8s 把 Pod 移出 Service endpoints。
-    - Databricks：至少 1 个端点未熔断
-    - Copilot（如果配置）：至少 1 个端点 token 有效且未熔断
-    - Azure（如果配置）：至少 1 个端点未熔断
+    - Each configured provider needs a CLOSED or recovery-eligible endpoint.
+    - Copilot additionally needs valid cached auth, without known auth failure.
+    - HALF_OPEN eligibility does not claim or certify successful inference.
     """
     issues = []
 
     if proxy:
-        if not proxy.load_balancer.get_available_endpoints():
+        if not any(proxy.load_balancer.is_available(ep, readiness=True) for ep in proxy.load_balancer.endpoints):
             issues.append("databricks: no available endpoints (all circuits open)")
 
     if azure_proxy and azure_proxy.load_balancer.endpoints:
-        if not azure_proxy.load_balancer.get_available_endpoints():
+        if not any(azure_proxy.load_balancer.is_available(ep, readiness=True) for ep in azure_proxy.load_balancer.endpoints):
             issues.append("azure_openai: no available endpoints (all circuits open)")
 
     if copilot_proxy and copilot_proxy.load_balancer.endpoints:
@@ -5797,6 +5978,21 @@ async def metrics():
         emit("azure_openai_endpoint_active_requests", "In-flight requests", "gauge", az_active)
         emit("azure_openai_endpoint_requests_total", "Total requests", "counter", az_req)
         emit("azure_openai_endpoint_errors_total", "Total errors", "counter", az_err)
+
+    for provider, instance in (("copilot", copilot_proxy), ("azure_openai", azure_proxy), ("databricks", proxy)):
+        if not instance:
+            continue
+        for field_name, kind in (("consecutive_errors", "gauge"), ("usage_record_errors", "counter"), ("cancelled_requests", "counter"),
+                                 ("neutral_requests", "counter"), ("completed_requests", "counter"),
+                                 ("rejected_requests", "counter"), ("half_open_in_flight", "gauge"),
+                                 ("retry_after_seconds", "gauge")):
+            metric = f"{provider}_endpoint_{field_name}" + ("_total" if kind == "counter" else "")
+            samples = []
+            for ep in instance.load_balancer.endpoints:
+                label = json.dumps(ep.name, ensure_ascii=True)
+                value = int(instance.load_balancer.resilience_stats(ep)[field_name])
+                samples.append(f'{metric}{{endpoint={label}}} {value}')
+            emit(metric, "Local admission/accounting state; not a synthetic upstream health probe", kind, samples)
 
     body = "\n".join(lines) + "\n" if lines else "# no providers configured\n"
     return Response(content=body, media_type="text/plain; version=0.0.4")
@@ -5987,7 +6183,7 @@ async def delete_history(keep_days: int = 30):
 @app.post("/reset")
 async def reset():
     for ep in proxy.load_balancer.endpoints:
-        ep.circuit_open = False
+        proxy.load_balancer.reset_circuit(ep)
         ep.total_errors = 0
         ep.total_input_tokens = 0
         ep.total_output_tokens = 0
@@ -6001,7 +6197,7 @@ async def reset():
     proxy.today_date = date.today().isoformat()
     if azure_proxy:
         for ep in azure_proxy.load_balancer.endpoints:
-            ep.circuit_open = False
+            azure_proxy.load_balancer.reset_circuit(ep)
             ep.total_errors = 0
             ep.total_input_tokens = 0
             ep.total_output_tokens = 0
