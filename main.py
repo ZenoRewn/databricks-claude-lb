@@ -758,7 +758,40 @@ async def _framed_sse(response, *, on_activity=None, on_queue_full=None, on_pump
                 queue.get_nowait()
 
 
-def _parse_sse_event_block(event_block: str) -> tuple[Optional[str], Optional[dict], bool]:
+_RESPONSES_EVENT_FIELDS = frozenset((
+    "type", "headers", "metadata", "response", "item", "item_id", "call_id",
+    "delta", "text", "summary_index", "content_index", "safety_buffering",
+))
+
+
+def _finite_json_float(value):
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("nonfinite JSON number")
+    return number
+
+
+class _SSEJSONObject(dict):
+    """Keep root typed-field duplicates visible; nested Value remains last-wins."""
+    def __init__(self, pairs):
+        super().__init__()
+        self.duplicate_typed_field = False
+        for key, value in pairs:
+            # Check before overwriting: even discarded provider values must be
+            # valid Unicode scalars. Nested objects have already been checked.
+            pending = [key, value]
+            while pending:
+                item = pending.pop()
+                if isinstance(item, str):
+                    item.encode("utf-8")  # Reject lone surrogates, not valid pairs.
+                elif isinstance(item, list):
+                    pending.extend(item)
+            if key in self and key in _RESPONSES_EVENT_FIELDS:
+                self.duplicate_typed_field = True
+            self[key] = value
+
+
+def _parse_sse_event_block(event_block: str, *, responses=False) -> tuple[Optional[str], Optional[dict], bool]:
     """WHATWG fields; JSON discriminator, not event header, determines API type."""
     event_name = None
     data_lines = []
@@ -774,7 +807,15 @@ def _parse_sse_event_block(event_block: str) -> tuple[Optional[str], Optional[di
             data_lines.append(value)
     data = "\n".join(data_lines)
     try:
-        parsed = json.loads(data, parse_constant=lambda value: (_ for _ in ()).throw(ValueError("nonfinite JSON"))) if data_lines else None
+        parsed = json.loads(
+            data, object_pairs_hook=_SSEJSONObject, parse_float=_finite_json_float,
+            parse_constant=lambda value: (_ for _ in ()).throw(ValueError("nonfinite JSON")),
+        ) if data_lines else None
+        # Codex first deserializes ResponsesStreamEvent, whose root fields are
+        # typed. Nested response/item/metadata are serde_json::Value; their
+        # duplicates remain last-wins, including later-deserialized usage.
+        if responses and isinstance(parsed, _SSEJSONObject) and parsed.duplicate_typed_field:
+            parsed = None
     except (ValueError, RecursionError):
         parsed = None
     return event_name, parsed if isinstance(parsed, dict) else None, data == "[DONE]"
@@ -833,7 +874,7 @@ class _SSEObservation:
     def _observe(self, frame):
         text = frame.decode("utf-8-sig" if self.first else "utf-8", errors="replace")
         self.first = False
-        header, data, done = _parse_sse_event_block(text)
+        header, data, done = _parse_sse_event_block(text, responses=self.api_type == "responses")
         kind = data.get("type") if data else None
         if not isinstance(kind, str):
             kind = None
@@ -3942,6 +3983,8 @@ class CopilotProxy:
             body["stream_options"] = {"include_usage": True}
 
         for attempt in range(max_retries):
+            if attempt >= max_retries:
+                break  # The in-lease auth retry consumes the same total retry budget.
             endpoint = self._select_endpoint(model, api_type)
             if not endpoint:
                 if self.supports_model(model, api_type):
@@ -3950,128 +3993,140 @@ class CopilotProxy:
 
             attempt_lease = await self.load_balancer.on_request_start(endpoint)
             attempt_ended = False
+            attempt_transferred = False
+            attempt_cancelled = False
 
             async def end_attempt(success: bool, is_client_error: bool = False, *, cancelled=False):
                 nonlocal attempt_ended
                 if attempt_ended:
                     return
-                await self.load_balancer.on_request_end(
-                    endpoint, success=success, is_client_error=is_client_error,
-                    lease=attempt_lease, cancelled=cancelled
-                )
-                attempt_ended = True
-
-            try:
-                headers = await self._build_headers(endpoint, has_image)
-            except asyncio.CancelledError:
-                cleanup_task = asyncio.create_task(
-                    end_attempt(success=False, is_client_error=True, cancelled=True)
-                )
-                await asyncio.shield(cleanup_task)
-                raise
-            except HTTPException:
-                await end_attempt(success=False, is_client_error=endpoint.auth_unhealthy)
-                raise
-            except Exception as e:
-                logger.error(f"[Copilot {api_type}][{model}] header build failed on {endpoint.name}: {type(e).__name__}")
-                await end_attempt(success=False)
-                last_error = e
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
-                    continue
-                raise HTTPException(status_code=503, detail={"error": {"message": f"Copilot token exchange failed: {type(e).__name__}"}})
-
-            url = f"{endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
-            logger.info(f"[Copilot {api_type}][{model}] -> {endpoint.name} (attempt {attempt + 1})")
-
-            try:
-                if stream:
-                    return await self._stream_response(
-                        endpoint, url, body, headers, model, api_type, start_time,
-                        disconnect_checker=disconnect_checker,
-                        request_id=request_id, attempt_lease=attempt_lease,
-                    )
-                else:
-                    result = await self._normal_request(
-                        endpoint, url, body, headers, model, api_type, start_time,
-                        request_id=request_id,
-                    )
-                    await end_attempt(success=True)
-                    return result
-            except asyncio.CancelledError:
-                # Handler/client cancellation is local evidence, never endpoint failure.
-                cleanup_task = asyncio.create_task(
-                    end_attempt(success=False, is_client_error=True, cancelled=True)
-                )
-                await asyncio.shield(cleanup_task)
-                raise
-            except _UnsupportedModelError:
-                # 模型不被 Copilot 支持，向上层抛，由路由 fallback 到 Azure
-                self.global_stats.total_errors += 1
-                await end_attempt(success=False, is_client_error=True)
-                raise
-            except httpx.HTTPStatusError as e:
-                last_error = e
-                self.global_stats.total_errors += 1
-                status = e.response.status_code
-                body_text = ""
                 try:
-                    body_text = e.response.text
-                except Exception:
-                    pass
-                if self._is_unsupported_model_error(status, body_text):
-                    await end_attempt(success=False, is_client_error=True)
-                    raise _UnsupportedModelError(f"{status}: {body_text[:200]}")
-                # 401 自愈：上游 session token 失效 → 强制刷新后重试一次
-                if status == 401 and attempt == 0:
-                    logger.warning(f"[Copilot] 401 from upstream on {endpoint.name}, forcing session refresh and retrying")
-                    try:
-                        await self.get_session_token(endpoint, force=True)
-                        await end_attempt(success=False, is_client_error=True)
+                    await _finish_cleanup(self.load_balancer.on_request_end(
+                        endpoint, success=success, is_client_error=is_client_error,
+                        lease=attempt_lease, cancelled=cancelled
+                    ))
+                finally:
+                    attempt_ended = attempt_lease.ended
+
+            # This boundary also covers awaits inside the handlers below (not
+            # catchable by sibling except clauses), including the real token lock.
+            try:
+                try:
+                    headers = await self._build_headers(endpoint, has_image)
+                except HTTPException:
+                    await end_attempt(success=False, is_client_error=endpoint.auth_unhealthy)
+                    raise
+                except Exception as e:
+                    logger.error(f"[Copilot {api_type}][{model}] header build failed on {endpoint.name}: {type(e).__name__}")
+                    await end_attempt(success=False)
+                    last_error = e
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         continue
-                    except Exception as refresh_err:
-                        logger.error(f"[Copilot] forced refresh failed: {refresh_err}")
-                        # fall through 到正常错误返回
-                is_client_error = 400 <= status < 500 and status not in (401, 403, 429)
-                await end_attempt(success=False, is_client_error=is_client_error)
-                if _retry_rejected_response(e.response, attempt, max_retries):
-                    logger.warning(f"[Copilot] {endpoint.name} returned {status}, retrying...")
-                    await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
-                    continue
-                error_body = _build_upstream_error_detail(status, body_text, "Copilot", endpoint.name)
-                raise HTTPException(status_code=status, detail=error_body,
-                                    headers={"Retry-After": e.response.headers["Retry-After"]} if "Retry-After" in e.response.headers else None)
-            except httpx.PoolTimeout as e:
-                # Local client saturation is not an upstream endpoint failure.
-                last_error = e
-                self.global_stats.total_errors += 1
-                self.pool_timeout_total += 1
-                log_msg, sse_msg, fields = await self._describe_pool_timeout(
-                    endpoint.name, e,
-                    endpoint=endpoint, request_id=request_id,
-                    attempt=attempt, api_type=api_type, model=model,
-                )
-                logger.warning(log_msg, extra={"kind": "copilot_pool_timeout", **fields})
-                await end_attempt(success=False, is_client_error=True)
-                # Retrying the only endpoint waits on the same shared pool.
-                if len(self.load_balancer.endpoints) <= 1:
-                    logger.info(
-                        "[Copilot] skipping retry for %s: only one endpoint and pool acquisition timeout",
-                        endpoint.name,
+                    raise HTTPException(status_code=503, detail={"error": {"message": f"Copilot token exchange failed: {type(e).__name__}"}})
+
+                url = f"{endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
+                logger.info(f"[Copilot {api_type}][{model}] -> {endpoint.name} (attempt {attempt + 1})")
+
+                try:
+                    if stream:
+                        result = await self._stream_response(
+                            endpoint, url, body, headers, model, api_type, start_time,
+                            disconnect_checker=disconnect_checker,
+                            request_id=request_id, attempt_lease=attempt_lease,
+                        )
+                        attempt_transferred = True  # Streaming lifecycle now owns this lease.
+                        return result
+                    else:
+                        for auth_attempt in range(2):
+                            try:
+                                result = await self._normal_request(
+                                    endpoint, url, body, headers, model, api_type, start_time,
+                                    request_id=request_id,
+                                )
+                                break
+                            except httpx.HTTPStatusError as auth_error:
+                                if auth_error.response.status_code != 401 or attempt != 0 or auth_attempt != 0:
+                                    raise
+                                # Only an explicit 401 rejection permits this one body replay.
+                                # Hold the original admission: refreshed auth is not inference recovery.
+                                logger.warning("[Copilot] 401 on %s; refreshing within the admitted request", endpoint.name)
+                                try:
+                                    await self.get_session_token(endpoint, force=True)
+                                    headers = await self._build_headers(endpoint, has_image)
+                                    url = f"{endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
+                                except Exception as refresh_err:
+                                    logger.error("[Copilot] forced refresh failed: %s", type(refresh_err).__name__)
+                                    raise auth_error
+                                self.global_stats.total_errors += 1
+                                max_retries -= 1  # Count the explicit 401 replay, not a new admission.
+                        await end_attempt(success=True)
+                        return result
+                except _UnsupportedModelError:
+                    # 模型不被 Copilot 支持，向上层抛，由路由 fallback 到 Azure
+                    self.global_stats.total_errors += 1
+                    await end_attempt(success=False, is_client_error=True)
+                    raise
+                except httpx.HTTPStatusError as e:
+                    last_error = e
+                    self.global_stats.total_errors += 1
+                    status = e.response.status_code
+                    body_text = ""
+                    try:
+                        body_text = e.response.text
+                    except Exception:
+                        pass
+                    if self._is_unsupported_model_error(status, body_text):
+                        await end_attempt(success=False, is_client_error=True)
+                        raise _UnsupportedModelError(f"{status}: {body_text[:200]}")
+                    is_client_error = 400 <= status < 500 and status not in (401, 403, 429)
+                    await end_attempt(success=False, is_client_error=is_client_error)
+                    if _retry_rejected_response(e.response, attempt, max_retries):
+                        logger.warning(f"[Copilot] {endpoint.name} returned {status}, retrying...")
+                        await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
+                        continue
+                    error_body = _build_upstream_error_detail(status, body_text, "Copilot", endpoint.name)
+                    raise HTTPException(status_code=status, detail=error_body,
+                                        headers={"Retry-After": e.response.headers["Retry-After"]} if "Retry-After" in e.response.headers else None)
+                except httpx.PoolTimeout as e:
+                    # Local client saturation is not an upstream endpoint failure.
+                    last_error = e
+                    self.global_stats.total_errors += 1
+                    self.pool_timeout_total += 1
+                    log_msg, sse_msg, fields = await self._describe_pool_timeout(
+                        endpoint.name, e,
+                        endpoint=endpoint, request_id=request_id,
+                        attempt=attempt, api_type=api_type, model=model,
                     )
+                    logger.warning(log_msg, extra={"kind": "copilot_pool_timeout", **fields})
+                    await end_attempt(success=False, is_client_error=True)
+                    # Retrying the only endpoint waits on the same shared pool.
+                    if len(self.load_balancer.endpoints) <= 1:
+                        logger.info(
+                            "[Copilot] skipping retry for %s: only one endpoint and pool acquisition timeout",
+                            endpoint.name,
+                        )
+                        break
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
+                        continue
+                except Exception as e:
+                    last_error = e
+                    self.global_stats.total_errors += 1
+                    logger.error(f"[Copilot] {endpoint.name} failed: {e}")
+                    await end_attempt(success=False, is_client_error=isinstance(e, httpx.PoolTimeout))
+                    if _replay_safe_transport_failure(e) and attempt < max_retries - 1:
+                        await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
+                        continue
                     break
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
-                    continue
-            except Exception as e:
-                last_error = e
-                self.global_stats.total_errors += 1
-                logger.error(f"[Copilot] {endpoint.name} failed: {e}")
-                await end_attempt(success=False, is_client_error=isinstance(e, httpx.PoolTimeout))
-                if _replay_safe_transport_failure(e) and attempt < max_retries - 1:
-                    await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
-                    continue
-                break
+            except asyncio.CancelledError:
+                attempt_cancelled = True
+                raise
+            finally:
+                if not attempt_transferred and not attempt_ended:
+                    await _finish_cleanup(end_attempt(
+                        success=False, is_client_error=True, cancelled=attempt_cancelled
+                    ))
 
         # 重试都失败：尽量用 helper 包装上游错误，避免 HTML / 异常字符串泄露
         if isinstance(last_error, httpx.HTTPStatusError):
