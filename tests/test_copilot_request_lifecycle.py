@@ -121,8 +121,8 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_non_stream_pool_timeout_is_local_and_retry_ends_once_per_attempt(self):
         # PoolTimeout with a second endpoint present exercises the retry path.
-        # (With only one endpoint, the upstream_stall classification now fails
-        # fast — see test_non_stream_pool_timeout_single_endpoint_upstream_stall_fails_fast.)
+        # (With only one endpoint, the pool timeout now fails
+        # fast — see test_non_stream_pool_timeout_single_endpoint_fails_fast.)
         request = httpx.Request("POST", "https://example.test/chat/completions")
         success = httpx.Response(
             200,
@@ -158,8 +158,8 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(load_balancer.on_request_start.await_count, 2)
         self.assertEqual(load_balancer.on_request_end.await_count, 2)
 
-    async def test_non_stream_pool_timeout_single_endpoint_upstream_stall_fails_fast(self):
-        """Single endpoint + upstream_connect_stalled must bail out immediately.
+    async def test_non_stream_pool_timeout_single_endpoint_fails_fast(self):
+        """Single endpoint + pool_acquire_timeout must bail out immediately.
 
         Retrying against the only endpoint would just replay the same httpx pool
         wait — up to POOL_ACQUIRE_TIMEOUT * max_retries seconds of pain the user
@@ -221,14 +221,16 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         endpoint.active_requests = 1
 
         with patch.object(main.asyncio, "sleep", new=AsyncMock()):
-            response = await proxy.proxy_chat_completions(
-                {"model": "gpt-test", "messages": []}, stream=False
-            )
+            with self.assertRaises(HTTPException) as caught:
+                response = await proxy.proxy_chat_completions(
+                    {"model": "gpt-test", "messages": []}, stream=False
+                )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(caught.exception.status_code, 502)
+        self.assertEqual(client.post.await_count, 1)  # Never replay a successful/ambiguous POST.
         self.assertEqual(endpoint.active_requests, 1)
-        self.assertEqual(load_balancer.on_request_start.await_count, 2)
-        self.assertEqual(load_balancer.on_request_end.await_count, 2)
+        self.assertEqual(load_balancer.on_request_start.await_count, 1)
+        self.assertEqual(load_balancer.on_request_end.await_count, 1)
 
     async def test_non_stream_usage_record_failure_does_not_double_decrement(self):
         request = httpx.Request("POST", "https://example.test/responses")
@@ -250,9 +252,12 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(endpoint.usage_record_errors, 1)
+        self.assertEqual(endpoint.total_errors, 0)
+        self.assertEqual(client.post.await_count, 1)  # Never replay a successful/ambiguous POST.
         self.assertEqual(endpoint.active_requests, 1)
-        self.assertEqual(load_balancer.on_request_start.await_count, 2)
-        self.assertEqual(load_balancer.on_request_end.await_count, 2)
+        self.assertEqual(load_balancer.on_request_start.await_count, 1)
+        self.assertEqual(load_balancer.on_request_end.await_count, 1)
 
     async def test_non_stream_task_cancellation_releases_slot_without_circuit_error(self):
         client = _BlockingClient()
@@ -436,9 +441,9 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(load_balancer.on_request_end.await_count, 2)
 
     async def test_stream_pool_timeout_single_endpoint_fails_fast(self):
-        """Streaming with a single endpoint bails out on upstream_stall PoolTimeout.
+        """Streaming with a single endpoint bails out on PoolTimeout.
 
-        Symmetric to test_non_stream_pool_timeout_single_endpoint_upstream_stall_fails_fast:
+        Symmetric to test_non_stream_pool_timeout_single_endpoint_fails_fast:
         the retry loop would just replay the same shared httpx pool wait, so we
         surface an explicit SSE error immediately and let Codex decide.
         """
@@ -464,7 +469,7 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         # Exactly one SSE error frame followed by [DONE] for chat api_type.
         self.assertEqual(len(chunks), 1)
         joined = chunks[0]
-        self.assertIn(b"upstream_connect_stalled", joined)
+        self.assertIn(b"pool_acquire_timeout", joined)
         self.assertIn(b"[DONE]", joined)
         # Only one attempt — no retry.
         self.assertEqual(endpoint.active_requests, 0)
@@ -616,8 +621,8 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         # Case A: clean completion with event: header form (exercises new parser).
         clean_upstream = _StreamResponse([
             b"event: response.created\ndata: {\"id\":\"r_1\"}\n\n",
-            b"event: response.completed\ndata: {\"response\":{\"usage\":"
-            b"{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
+            b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"r_1","usage":'
+            b'{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}\n\n',
         ])
         proxy, load_balancer, endpoint = self._make_proxy(_StreamClient([clean_upstream]))
         await load_balancer.on_request_start(endpoint)
@@ -725,20 +730,19 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(endpoint.active_requests, 0)
 
     async def test_stream_responses_event_header_terminal_is_accepted(self):
-        """SSE per WHATWG allows the terminal signal to be carried on the
-        ``event:`` header line instead of inside the ``data:`` payload. Some
-        GHCP model releases emit ``event: response.completed\\ndata: {"id":...}``
-        with no ``type`` field in the payload. The LB must treat that as a
-        legitimate completion and NOT fire silent-truncation.
+        """A named event with a client-valid JSON discriminator is accepted.
+
+        Header-only success is intentionally rejected by separate protocol tests;
+        WHATWG framing does not define the Responses payload schema.
         """
         chunks = [
             b"event: response.created\ndata: {\"id\":\"resp_1\"}\n\n",
             b"event: response.output_text.delta\ndata: {\"delta\":\"ok\"}\n\n",
             # Real Responses API `response.completed` payload keeps usage nested
-            # under `response`; here we omit the payload `type` field on purpose
-            # so the terminal signal must be recognised via the `event:` header.
-            b"event: response.completed\ndata: {\"response\":{\"id\":\"resp_1\","
-            b"\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}}\n\n",
+            # under `response`; the pinned client requires a payload `type`
+            # even when the event header also names the terminal.
+            b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\","
+            b"\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"total_tokens\":12}}}\n\n",
         ]
         upstream = _StreamResponse(chunks)
         proxy, load_balancer, endpoint = self._make_proxy(_StreamClient([upstream]))
@@ -831,7 +835,7 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_monitor_releases_confirmed_disconnect_only_after_sustained_high_water(self):
         proxy, load_balancer, endpoint = self._make_proxy(unittest.mock.Mock())
-        endpoint.active_requests = 1
+        await load_balancer.on_request_start(endpoint)
         second_endpoint = main.CopilotEndpoint(
             name="copilot-test-2", github_token="token", models=["gpt-test"]
         )
@@ -967,14 +971,16 @@ class AzureRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         endpoint.active_requests = 1
 
         with patch.object(main.asyncio, "sleep", new=AsyncMock()):
-            response = await proxy.proxy_responses(
-                {"model": "gpt-test", "input": "hello"}, stream=False
-            )
+            with self.assertRaises(HTTPException) as caught:
+                response = await proxy.proxy_responses(
+                    {"model": "gpt-test", "input": "hello"}, stream=False
+                )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(caught.exception.status_code, 502)
+        self.assertEqual(client.post.await_count, 1)  # Never replay a successful/ambiguous POST.
         self.assertEqual(endpoint.active_requests, 1)
-        self.assertEqual(load_balancer.on_request_start.await_count, 2)
-        self.assertEqual(load_balancer.on_request_end.await_count, 2)
+        self.assertEqual(load_balancer.on_request_start.await_count, 1)
+        self.assertEqual(load_balancer.on_request_end.await_count, 1)
 
     async def test_usage_record_failure_uses_exactly_once_accounting(self):
         request = httpx.Request("POST", "https://example.test/responses")
@@ -995,9 +1001,12 @@ class AzureRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(endpoint.usage_record_errors, 1)
+        self.assertEqual(endpoint.total_errors, 0)
+        self.assertEqual(client.post.await_count, 1)  # Never replay a successful/ambiguous POST.
         self.assertEqual(endpoint.active_requests, 1)
-        self.assertEqual(load_balancer.on_request_start.await_count, 2)
-        self.assertEqual(load_balancer.on_request_end.await_count, 2)
+        self.assertEqual(load_balancer.on_request_start.await_count, 1)
+        self.assertEqual(load_balancer.on_request_end.await_count, 1)
 
     async def test_buffered_cancellation_releases_slot_without_circuit_error(self):
         client = _BlockingClient()

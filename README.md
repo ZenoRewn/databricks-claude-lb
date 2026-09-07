@@ -2,6 +2,8 @@
 
 一个智能负载均衡代理，统一对接 **Databricks Claude**、**Azure OpenAI** 和 **GitHub Copilot** 三套上游，按模型自动路由。
 
+**运行契约：** [SSE framing、8 MiB/64 MiB 可配置资源策略、Copilot `api_types` 兼容性](docs/STREAM_PROTOCOL.md)。这些字节预算不是模型 token 上限或上游截断结论。
+
 ## 为什么需要这个项目？
 
 - **突破单一 workspace/区域限制**：通过多个端点分散请求，提高整体吞吐量
@@ -22,7 +24,7 @@
 - **上游错误规范化** - 自动把上游 HTML 错误页（CDN "Connection Closed" 之类）转成结构化 JSON，避免泄露给客户端
 - **负载均衡** - `least_requests`（默认）/ `round_robin` / `random`
 - **熔断器** - 自动检测故障端点并临时禁用，超时后自动恢复
-- **流式响应** - SSE 流式 + 等待上游响应头 / 响应期间 15s keep-alive 心跳 + `RemoteProtocolError` 等中断恢复 + 已发送 chunk 后正确 `message_stop` 终止
+- **流式响应** - UTF-8/BOM、CRLF/CR/LF 完整 SSE 帧转发；独立错误帧、有限内存、15s keep-alive；未完成帧丢弃，不伪造完成、不重放已执行 POST（见 [流协议与资源策略](docs/STREAM_PROTOCOL.md)）
 - **Extended Thinking** - 支持 Claude Opus/Sonnet 的 adaptive 思考模式（含旧模型自动降级 `enabled` + budget_tokens）
 - **Prompt Caching** - 自动清理 `cache_control` 额外字段（如 `scope`），兼容 Databricks
 - **用量持久化** - 按天存储 token 用量，JSON 文件 或 MySQL 8.x 后端，重启自动恢复
@@ -438,9 +440,10 @@ GHCP 上游会返回 429 + `retry-after` 头。LB 的熔断器会临时摘掉该
 
 - 当某个端点连续发生 `circuit_breaker_threshold` 次服务端错误时，熔断器开启
 - 熔断器开启后，该端点在 `circuit_breaker_timeout` 秒内不会收到新请求
-- 超时后自动恢复，错误计数重置
+- 超时后进入 HALF_OPEN，仅允许一个真实请求探测恢复；成功才关闭熔断，累计错误数不清零
 - 客户端错误（4xx，除 429）不触发熔断器
-- 可通过 `/reset` 端点手动重置所有熔断器
+- `/reset` 保留原有 Databricks/Azure 显式重置行为；正常恢复不依赖重置或重启
+- 取消和客户端拒绝不证明上游恢复；详细状态、重试边界和兼容性见 [RESILIENCE.md](docs/RESILIENCE.md)
 
 ## 架构说明
 
