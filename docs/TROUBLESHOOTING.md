@@ -429,7 +429,7 @@ Handoff §7.2 实证：同一 Responses opaque reasoning state 只能被生成�
 
 ---
 
-## 11. Token exchange 被共享 streaming pool 卡住
+## 13. Token exchange 被共享 streaming pool 卡住
 
 ### 症状与原因
 
