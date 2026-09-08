@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Dict, Optional
 from dataclasses import dataclass, field
 from contextlib import aclosing, closing, asynccontextmanager
+import contextvars
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse
 
@@ -2066,20 +2067,24 @@ LATENCY_BUCKETS_SECONDS = (
 
 
 class LatencyHistogram:
-    """Per-(provider, api_type) Prometheus-shaped histogram of successful requests.
+    """Per-(provider, api_type, tenant) Prometheus-shaped histogram of successful requests.
 
     Not concurrent-safe under threads, but the whole LB runs in a single asyncio
     loop — so incrementing counters here is race-free between coroutines.
+
+    P3.2: 增加 `tenant` label 维度让多租户环境下能按租户拆分 p99 观测。
+    tenant=None 默认写 "default"（兼容旧单-key 配置）。
     """
     __slots__ = ("buckets", "counts", "totals")
 
     def __init__(self, buckets=LATENCY_BUCKETS_SECONDS):
         self.buckets = tuple(buckets)
-        self.counts: dict[tuple[str, str], list[int]] = {}
-        self.totals: dict[tuple[str, str], tuple[int, float]] = {}
+        # key = (provider, api_type, tenant)
+        self.counts: dict[tuple[str, str, str], list[int]] = {}
+        self.totals: dict[tuple[str, str, str], tuple[int, float]] = {}
 
-    def observe(self, provider: str, api_type: str, seconds: float) -> None:
-        key = (provider, api_type)
+    def observe(self, provider: str, api_type: str, seconds: float, tenant: str = "default") -> None:
+        key = (provider, api_type, tenant)
         row = self.counts.get(key)
         if row is None:
             row = [0] * (len(self.buckets) + 1)  # +1 for +Inf bucket
@@ -2093,24 +2098,25 @@ class LatencyHistogram:
         self.totals[key] = (c + 1, s + seconds)
 
     def render_prom(self, metric_name: str) -> str:
-        """Emit Prometheus text format with le="..." label + _sum + _count."""
+        """Emit Prometheus text format with le="..." + tenant label + _sum + _count."""
         lines = [
             f"# HELP {metric_name}_seconds Successful request latency histogram (end-to-end, from admission to record).",
             f"# TYPE {metric_name}_seconds histogram",
         ]
-        for (provider, api_type), row in self.counts.items():
+        for (provider, api_type, tenant), row in self.counts.items():
             # observe() already stores cumulative counts (each obs increments every
             # bucket where seconds <= edge), so print row[i] directly per bucket.
+            base_labels = f'provider="{provider}",api_type="{api_type}",tenant="{tenant}"'
             for i, edge in enumerate(self.buckets):
                 lines.append(
-                    f'{metric_name}_seconds_bucket{{provider="{provider}",api_type="{api_type}",le="{edge}"}} {row[i]}'
+                    f'{metric_name}_seconds_bucket{{{base_labels},le="{edge}"}} {row[i]}'
                 )
             lines.append(
-                f'{metric_name}_seconds_bucket{{provider="{provider}",api_type="{api_type}",le="+Inf"}} {row[-1]}'
+                f'{metric_name}_seconds_bucket{{{base_labels},le="+Inf"}} {row[-1]}'
             )
-            count, total = self.totals[(provider, api_type)]
-            lines.append(f'{metric_name}_seconds_sum{{provider="{provider}",api_type="{api_type}"}} {total:.6f}')
-            lines.append(f'{metric_name}_seconds_count{{provider="{provider}",api_type="{api_type}"}} {count}')
+            count, total = self.totals[(provider, api_type, tenant)]
+            lines.append(f'{metric_name}_seconds_sum{{{base_labels}}} {total:.6f}')
+            lines.append(f'{metric_name}_seconds_count{{{base_labels}}} {count}')
         return "\n".join(lines) + ("\n" if lines else "")
 
 
@@ -2118,6 +2124,10 @@ class LatencyHistogram:
 # successful request. Failed / cancelled / neutral requests do NOT populate this
 # — they're a separate distribution and mixing them hides real p99 latency.
 LATENCY_HISTOGRAM = LatencyHistogram()
+
+# P3.2: current-request tenant name via contextvar. asyncio 会自动把 ContextVar
+# 沿 await 链传递，所以在 _record_usage 这种深调用里读到的还是发起请求时设置的值。
+_CURRENT_TENANT: contextvars.ContextVar[str] = contextvars.ContextVar("current_tenant", default="default")
 
 
 def _replay_safe_transport_failure(exc):
@@ -2457,7 +2467,7 @@ class ClaudeProxy:
                       cache_creation_tokens: int = 0, cache_read_tokens: int = 0):
         """记录 token 用量和延迟指标"""
         # Prometheus histogram（提供 p50/p95/p99 分位数观测）
-        LATENCY_HISTOGRAM.observe("databricks", "messages", elapsed)
+        LATENCY_HISTOGRAM.observe("databricks", "messages", elapsed, tenant=_CURRENT_TENANT.get())
         # 端点级别
         endpoint.total_input_tokens += input_tokens
         endpoint.total_output_tokens += output_tokens
@@ -2499,7 +2509,9 @@ class ClaudeProxy:
         await self.client.aclose()
 
     def verify_api_key(self, key: str) -> bool:
-        return key == self.api_key
+        # P3.2: empty key never matches, even if self.api_key was configured empty
+        # (which can happen when auth.api_key is unset and only auth.api_keys is used).
+        return bool(key) and key == self.api_key
 
     async def proxy_request(self, body: dict, stream: bool = False, request_id: Optional[str] = None):
         """代理请求到 Databricks 原生 Anthropic 端点。P1.4: request_id 沿路传到
@@ -2948,7 +2960,9 @@ class AzureOpenAIProxy:
         self.upstream_html_events_by_status: Dict[str, int] = {}
 
     def verify_api_key(self, key: str) -> bool:
-        return key == self.api_key
+        # P3.2: empty key never matches, even if self.api_key was configured empty
+        # (which can happen when auth.api_key is unset and only auth.api_keys is used).
+        return bool(key) and key == self.api_key
 
     async def close(self):
         await self.client.aclose()
@@ -2958,7 +2972,7 @@ class AzureOpenAIProxy:
                       api_type: str = "chat"):
         """记录 token 用量和延迟指标"""
         # Prometheus histogram（提供 p50/p95/p99 分位数观测）
-        LATENCY_HISTOGRAM.observe("azure", api_type, elapsed)
+        LATENCY_HISTOGRAM.observe("azure", api_type, elapsed, tenant=_CURRENT_TENANT.get())
         endpoint.total_input_tokens += input_tokens
         endpoint.total_output_tokens += output_tokens
         endpoint.total_cache_creation_tokens += cache_creation_tokens
@@ -3627,7 +3641,9 @@ class CopilotProxy:
         )
 
     def verify_api_key(self, key: str) -> bool:
-        return key == self.api_key
+        # P3.2: empty key never matches, even if self.api_key was configured empty
+        # (which can happen when auth.api_key is unset and only auth.api_keys is used).
+        return bool(key) and key == self.api_key
 
     async def close(self):
         await self.client.aclose()
@@ -4294,7 +4310,7 @@ class CopilotProxy:
                       cache_creation_tokens: int = 0, cache_read_tokens: int = 0,
                       api_type: str = "chat"):
         # Prometheus histogram（提供 p50/p95/p99 分位数观测）
-        LATENCY_HISTOGRAM.observe("copilot", api_type, elapsed)
+        LATENCY_HISTOGRAM.observe("copilot", api_type, elapsed, tenant=_CURRENT_TENANT.get())
         endpoint.total_input_tokens += input_tokens
         endpoint.total_output_tokens += output_tokens
         endpoint.total_cache_creation_tokens += cache_creation_tokens
@@ -5449,7 +5465,13 @@ def load_config(config_path: str = "config.yaml") -> tuple:
             _validate_copilot_api_types(ep_cfg["api_types"])
 
     lb_config = config.get("load_balancer", {})
-    api_key = expand_env_vars(config.get("auth", {}).get("api_key", ""))
+    auth_config = config.get("auth", {}) or {}
+    api_key = expand_env_vars(auth_config.get("api_key", ""))
+    # P3.2: multi-tenant api_keys —— 与旧的 single api_key 并存，都注册到全局 map
+    api_keys_dict = auth_config.get("api_keys")
+    _register_api_keys(api_key, api_keys_dict)
+    if api_keys_dict:
+        logger.info(f"[Auth] multi-tenant keys enabled: {sorted(set(API_KEY_TO_TENANT.values()))}")
 
     # Databricks 端点
     endpoints = []
@@ -5671,8 +5693,10 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
     auth_header = request.headers.get("authorization", "")
     actual_key = x_api_key or (auth_header[7:] if auth_header.startswith("Bearer ") else "")
 
-    if not proxy.verify_api_key(actual_key):
+    if not proxy.verify_api_key(actual_key) and _lookup_tenant(actual_key) is None:
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
+    # P3.2: 记录租户名到 request.state，供 metrics / structured log 打 label
+    request.state.tenant = _lookup_tenant(actual_key) or "default"
 
     # 读取原始请求体，先做粗暴上限保护避免 OOM，然后尝试压图
     body_bytes = await request.body()
@@ -5758,8 +5782,48 @@ def _extract_api_key(request: Request, x_api_key: Optional[str] = None) -> str:
     return auth_header
 
 
+# P3.2: multi-tenant API keys —— 从 `auth.api_key` (str) 或 `auth.api_keys` (dict)
+# 加载。map: key_string -> tenant_name。单 key 配置会被规范化为 {"default": key}。
+# tenant_name 用作 metrics label 与 structured log 字段，让运维可以按租户拆分观测。
+API_KEY_TO_TENANT: Dict[str, str] = {}
+
+
+def _register_api_keys(single_key: str, keys_dict: Optional[dict]) -> None:
+    """P3.2: 把配置里的 api_key/api_keys 规范化到 API_KEY_TO_TENANT。
+    - `auth.api_key: str`（旧配置）→ tenant "default"
+    - `auth.api_keys: {name: key}`（新配置）→ tenant name from dict key
+    两种可以共存；重复 key 后者覆盖前者并 log 一次警告。"""
+    API_KEY_TO_TENANT.clear()
+    if single_key:
+        API_KEY_TO_TENANT[single_key] = "default"
+    if keys_dict:
+        for tenant_name, raw_key in keys_dict.items():
+            key = expand_env_vars(raw_key) if isinstance(raw_key, str) else raw_key
+            if not isinstance(tenant_name, str) or not tenant_name.strip():
+                raise ValueError(f"auth.api_keys tenant name must be non-empty string, got {tenant_name!r}")
+            if not isinstance(key, str) or not key:
+                raise ValueError(f"auth.api_keys[{tenant_name!r}] value must be non-empty string")
+            if key in API_KEY_TO_TENANT and API_KEY_TO_TENANT[key] != tenant_name:
+                logger.warning(
+                    "auth.api_keys: tenant %r reuses same key as %r; last-writer-wins",
+                    tenant_name, API_KEY_TO_TENANT[key],
+                )
+            API_KEY_TO_TENANT[key] = tenant_name.strip()
+
+
+def _lookup_tenant(actual_key: str) -> Optional[str]:
+    """P3.2: 返回 api_key 对应的 tenant 名字；无匹配返 None。"""
+    if not actual_key:
+        return None
+    return API_KEY_TO_TENANT.get(actual_key)
+
+
 def _verify_lb_api_key(actual_key: str) -> bool:
-    """OpenAI 风格端点的统一鉴权：与 Databricks 客户端共用同一把 api_key"""
+    """OpenAI 风格端点的统一鉴权。P3.2 后走 API_KEY_TO_TENANT 中心化查找；
+    保留 proxy.verify_api_key 兼容性（proxies 仍然可以独立持有 api_key）。"""
+    if _lookup_tenant(actual_key) is not None:
+        return True
+    # 保持向后兼容：proxy 实例上残留的 api_key 也接受（覆盖 unit test 场景）
     if azure_proxy and azure_proxy.verify_api_key(actual_key):
         return True
     if copilot_proxy and copilot_proxy.verify_api_key(actual_key):
@@ -6512,6 +6576,8 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
             f"[OpenAICompat][{request_id}] auth failed route=/v1/responses auth_headers={_request_auth_header_names(request)}"
         )
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
+    request.state.tenant = _lookup_tenant(actual_key) or "default"  # P3.2
+    _CURRENT_TENANT.set(request.state.tenant)
 
     body_bytes = await request.body()
     if len(body_bytes) > MAX_RAW_REQUEST_SIZE:
@@ -6565,6 +6631,8 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
             f"[OpenAICompat][{request_id}] auth failed route=/v1/chat/completions auth_headers={_request_auth_header_names(request)}"
         )
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
+    request.state.tenant = _lookup_tenant(actual_key) or "default"  # P3.2
+    _CURRENT_TENANT.set(request.state.tenant)
 
     body_bytes = await request.body()
     if len(body_bytes) > MAX_RAW_REQUEST_SIZE:

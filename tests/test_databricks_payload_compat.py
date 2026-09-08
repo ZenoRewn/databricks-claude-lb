@@ -404,20 +404,20 @@ class OpenAICompatAsyncTests(unittest.IsolatedAsyncioTestCase):
 class LatencyHistogramTests(unittest.TestCase):
     def test_observe_populates_buckets_and_totals(self):
         h = main.LatencyHistogram(buckets=(0.1, 1.0, 10.0))
-        h.observe("copilot", "responses", 0.05)   # <=0.1
-        h.observe("copilot", "responses", 0.5)    # <=1.0
-        h.observe("copilot", "responses", 5.0)    # <=10.0
+        h.observe("copilot", "responses", 0.05)   # <=0.1, tenant="default"
+        h.observe("copilot", "responses", 0.5)
+        h.observe("copilot", "responses", 5.0)
         h.observe("copilot", "responses", 120.0)  # +Inf only
 
-        # observe() stores cumulative counts directly (Prom-shape):
-        # row[i] = count of observations with seconds <= buckets[i].
-        row = h.counts[("copilot", "responses")]
-        self.assertEqual(row[0], 1)  # <=0.1  → {0.05}
-        self.assertEqual(row[1], 2)  # <=1.0  → {0.05, 0.5}
-        self.assertEqual(row[2], 3)  # <=10.0 → {0.05, 0.5, 5.0}
-        self.assertEqual(row[3], 4)  # +Inf   → {0.05, 0.5, 5.0, 120.0}
+        # observe() stores cumulative counts directly (Prom-shape).
+        # P3.2: key now is (provider, api_type, tenant); default tenant="default".
+        row = h.counts[("copilot", "responses", "default")]
+        self.assertEqual(row[0], 1)  # <=0.1
+        self.assertEqual(row[1], 2)  # <=1.0
+        self.assertEqual(row[2], 3)  # <=10.0
+        self.assertEqual(row[3], 4)  # +Inf
 
-        count, total = h.totals[("copilot", "responses")]
+        count, total = h.totals[("copilot", "responses", "default")]
         self.assertEqual(count, 4)
         self.assertAlmostEqual(total, 0.05 + 0.5 + 5.0 + 120.0, places=6)
 
@@ -428,13 +428,27 @@ class LatencyHistogramTests(unittest.TestCase):
         h.observe("azure", "chat", 5.0)  # only +Inf
 
         text = h.render_prom("proxy_request_latency")
-        self.assertIn('proxy_request_latency_seconds_bucket{provider="azure",api_type="chat",le="0.1"} 1', text)
-        # cumulative: <=1.0 includes <=0.1 too → 2
-        self.assertIn('proxy_request_latency_seconds_bucket{provider="azure",api_type="chat",le="1.0"} 2', text)
-        self.assertIn('proxy_request_latency_seconds_bucket{provider="azure",api_type="chat",le="+Inf"} 3', text)
-        self.assertIn('proxy_request_latency_seconds_count{provider="azure",api_type="chat"} 3', text)
-        # sum = 0.05 + 0.5 + 5.0 = 5.55
-        self.assertIn('proxy_request_latency_seconds_sum{provider="azure",api_type="chat"} 5.550000', text)
+        self.assertIn('proxy_request_latency_seconds_bucket{provider="azure",api_type="chat",tenant="default",le="0.1"} 1', text)
+        self.assertIn('proxy_request_latency_seconds_bucket{provider="azure",api_type="chat",tenant="default",le="1.0"} 2', text)
+        self.assertIn('proxy_request_latency_seconds_bucket{provider="azure",api_type="chat",tenant="default",le="+Inf"} 3', text)
+        self.assertIn('proxy_request_latency_seconds_count{provider="azure",api_type="chat",tenant="default"} 3', text)
+        self.assertIn('proxy_request_latency_seconds_sum{provider="azure",api_type="chat",tenant="default"} 5.550000', text)
+
+    def test_observe_per_tenant_separates_series(self):
+        # P3.2: 同 provider/api_type 不同租户产出独立系列
+        h = main.LatencyHistogram(buckets=(0.1, 1.0))
+        h.observe("copilot", "chat", 0.05, tenant="tenant-a")
+        h.observe("copilot", "chat", 0.05, tenant="tenant-b")
+        h.observe("copilot", "chat", 0.5, tenant="tenant-a")
+
+        row_a = h.counts[("copilot", "chat", "tenant-a")]
+        row_b = h.counts[("copilot", "chat", "tenant-b")]
+        self.assertEqual(row_a[-1], 2)  # +Inf = 2 for tenant-a
+        self.assertEqual(row_b[-1], 1)
+
+        text = h.render_prom("proxy_request_latency")
+        self.assertIn('tenant="tenant-a"', text)
+        self.assertIn('tenant="tenant-b"', text)
 
     def test_render_empty_yields_only_help_type_headers(self):
         h = main.LatencyHistogram()
@@ -443,6 +457,50 @@ class LatencyHistogramTests(unittest.TestCase):
         self.assertIn("# TYPE proxy_request_latency_seconds histogram", text)
         # No sample rows — the two header lines only
         self.assertEqual(len([l for l in text.splitlines() if not l.startswith("#")]), 0)
+
+
+class MultiTenantApiKeysTests(unittest.TestCase):
+    """P3.2: auth.api_key (str) 与 auth.api_keys (dict) 都要注册到全局 map."""
+
+    def setUp(self):
+        # 每个测试都清空 map，防污染
+        main.API_KEY_TO_TENANT.clear()
+
+    def tearDown(self):
+        main.API_KEY_TO_TENANT.clear()
+
+    def test_register_single_key_becomes_default_tenant(self):
+        main._register_api_keys("single-key-xyz", None)
+        self.assertEqual(main.API_KEY_TO_TENANT, {"single-key-xyz": "default"})
+        self.assertEqual(main._lookup_tenant("single-key-xyz"), "default")
+        self.assertIsNone(main._lookup_tenant("wrong-key"))
+
+    def test_register_multi_tenant_keys(self):
+        main._register_api_keys("", {
+            "team-a": "key-a",
+            "team-b": "key-b",
+        })
+        self.assertEqual(main._lookup_tenant("key-a"), "team-a")
+        self.assertEqual(main._lookup_tenant("key-b"), "team-b")
+        self.assertIsNone(main._lookup_tenant("unknown"))
+
+    def test_register_both_single_and_multi_coexist(self):
+        main._register_api_keys("legacy-key", {"team-x": "key-x"})
+        self.assertEqual(main._lookup_tenant("legacy-key"), "default")
+        self.assertEqual(main._lookup_tenant("key-x"), "team-x")
+
+    def test_register_rejects_empty_tenant_name(self):
+        with self.assertRaises(ValueError):
+            main._register_api_keys("", {"": "some-key"})
+
+    def test_register_rejects_empty_key_value(self):
+        with self.assertRaises(ValueError):
+            main._register_api_keys("", {"team-x": ""})
+
+    def test_lookup_tenant_empty_key_returns_none(self):
+        main._register_api_keys("legacy-key", None)
+        self.assertIsNone(main._lookup_tenant(""))
+        self.assertIsNone(main._lookup_tenant(None))
 
 
 class BackgroundLoopSelfHealTests(unittest.IsolatedAsyncioTestCase):
