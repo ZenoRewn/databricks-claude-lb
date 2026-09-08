@@ -104,6 +104,22 @@ class UsageDataStore:
                 except asyncio.CancelledError:
                     break
 
+    @staticmethod
+    def _empty_day(d: date) -> dict:
+        return {
+            "date": d.isoformat(),
+            "models": {},
+            "totals": {"input_tokens": 0, "output_tokens": 0,
+                       "cache_creation_tokens": 0, "cache_read_tokens": 0,
+                       "requests": 0, "errors": 0},
+        }
+
+    @staticmethod
+    def _empty_model() -> dict:
+        return {"input_tokens": 0, "output_tokens": 0,
+                "cache_creation_tokens": 0, "cache_read_tokens": 0,
+                "requests": 0}
+
     async def _flush(self):
         async with self._lock:
             pending, self._buffer = self._buffer, []
@@ -116,37 +132,43 @@ class UsageDataStore:
                 self._today_date = today
 
             if "models" not in self._today_cache:
-                self._today_cache = {
-                    "date": today.isoformat(),
-                    "models": {},
-                    "totals": {"input_tokens": 0, "output_tokens": 0,
-                               "cache_creation_tokens": 0, "cache_read_tokens": 0,
-                               "requests": 0, "errors": 0},
-                }
+                self._today_cache = self._empty_day(today)
 
+            # 两份数据同步累：
+            #   _today_cache —— 当天累计，/stats 与 dashboard 读它，重启时由
+            #                    _load_day 从后端种回，语义不变
+            #   batch        —— 仅本次 flush 的增量，交给 _save_day_delta。
+            #                    多写后端（MySQL）用它做 col = col + VALUES(col)，
+            #                    这样多副本不会互相覆盖对方的量
+            batch = self._empty_day(today)
             models = self._today_cache["models"]
             totals = self._today_cache["totals"]
+            b_models = batch["models"]
+            b_totals = batch["totals"]
             for delta in pending:
                 m = delta["model"]
                 if m not in models:
-                    models[m] = {"input_tokens": 0, "output_tokens": 0,
-                                 "cache_creation_tokens": 0, "cache_read_tokens": 0,
-                                 "requests": 0}
-                models[m]["input_tokens"] += delta["input_tokens"]
-                models[m]["output_tokens"] += delta["output_tokens"]
-                models[m]["cache_creation_tokens"] += delta["cache_creation_tokens"]
-                models[m]["cache_read_tokens"] += delta["cache_read_tokens"]
+                    models[m] = self._empty_model()
+                if m not in b_models:
+                    b_models[m] = self._empty_model()
+                for field in ("input_tokens", "output_tokens",
+                              "cache_creation_tokens", "cache_read_tokens"):
+                    models[m][field] += delta[field]
+                    b_models[m][field] += delta[field]
+                    totals[field] += delta[field]
+                    b_totals[field] += delta[field]
                 models[m]["requests"] += 1
-                totals["input_tokens"] += delta["input_tokens"]
-                totals["output_tokens"] += delta["output_tokens"]
-                totals["cache_creation_tokens"] += delta["cache_creation_tokens"]
-                totals["cache_read_tokens"] += delta["cache_read_tokens"]
+                b_models[m]["requests"] += 1
                 totals["requests"] += 1
+                b_totals["requests"] += 1
                 if delta.get("is_error"):
                     totals["errors"] += 1
+                    b_totals["errors"] += 1
 
-            self._today_cache["last_updated"] = datetime.now().astimezone().isoformat()
-            await self._save_day(today, self._today_cache)
+            stamp = datetime.now().astimezone().isoformat()
+            self._today_cache["last_updated"] = stamp
+            batch["last_updated"] = stamp
+            await self._save_day_delta(today, batch, self._today_cache)
 
     def get_today_data(self) -> dict:
         return self._today_cache if self._today_cache else {}
@@ -159,9 +181,25 @@ class UsageDataStore:
     # 子类实现
     async def _backend_start(self): pass
     async def _backend_stop(self): pass
+    # _save_day 写「当天累计绝对值」，只被下面 _save_day_delta 的默认实现调用。
+    # MysqlUsageStore 不实现它 —— 它 override 的是 _save_day_delta（增量累加）。
+    # 因此**不要**在别处直接调 _save_day，MySQL 后端上那是个静默 no-op。
     async def _save_day(self, d: date, data: dict): pass
     async def _load_day(self, d: date) -> dict: return {}
     async def _delete_before(self, cutoff: date) -> int: return 0
+
+    async def _save_day_delta(self, d: date, delta: dict, cumulative: dict):
+        """落盘钩子。``delta`` 只含本次 flush 的增量，``cumulative`` 是当天累计。
+
+        默认实现写 ``cumulative``（整天绝对覆盖），这是**单写者**语义 ——
+        文件后端无法跨进程原子累加，所以 JsonUsageStore 保持这条路径，
+        代价是 JSON 后端只能跑单副本。
+
+        支持原子累加的后端（MySQL）override 本方法、改用 ``delta``，这样多个
+        副本各自 flush 时不会把对方的量抹掉（否则 DB 行只保留最后一次写入的
+        「该副本起点 + 该副本增量」，其余副本的量永久丢失）。
+        """
+        await self._save_day(d, cumulative)
 
 
 class JsonUsageStore(UsageDataStore):
@@ -273,10 +311,22 @@ class MysqlUsageStore(UsageDataStore):
             self._pool.close()
             await self._pool.wait_closed()
 
-    async def _save_day(self, d: date, data: dict):
+    async def _save_day_delta(self, d: date, delta: dict, cumulative: dict):
+        """增量累加落盘 —— 多副本安全。
+
+        写 ``delta``（本次 flush 的增量）而非 ``cumulative``（当天累计），
+        并用 ``col = col + VALUES(col)`` 让 InnoDB 在行锁内做累加。多个 pod
+        同时跑时，DB 行 = 所有副本增量之和；若改回 ``= VALUES(col)`` 的绝对
+        覆盖，各副本每 30s 就把对方的量抹掉一次（回归测试见
+        ``tests/test_usage_store.py::test_two_writers_sum_instead_of_clobber``）。
+
+        副作用之一：单副本下也更安全 —— 旧写法若某次 ``_load_day`` 因瞬时 DB
+        异常返回空，``_flush`` 会以零值重建缓存并把当天整行覆盖掉；增量写没有
+        这条路径。
+        """
         if not self._pool:
             return
-        models = data.get("models", {})
+        models = delta.get("models", {})
         if not models:
             return
         async with self._pool.acquire() as conn:
@@ -287,16 +337,19 @@ class MysqlUsageStore(UsageDataStore):
                             cache_creation_tokens, cache_read_tokens, requests, errors)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         ON DUPLICATE KEY UPDATE
-                            input_tokens = VALUES(input_tokens),
-                            output_tokens = VALUES(output_tokens),
-                            cache_creation_tokens = VALUES(cache_creation_tokens),
-                            cache_read_tokens = VALUES(cache_read_tokens),
-                            requests = VALUES(requests),
-                            errors = VALUES(errors)
+                            input_tokens = input_tokens + VALUES(input_tokens),
+                            output_tokens = output_tokens + VALUES(output_tokens),
+                            cache_creation_tokens = cache_creation_tokens + VALUES(cache_creation_tokens),
+                            cache_read_tokens = cache_read_tokens + VALUES(cache_read_tokens),
+                            requests = requests + VALUES(requests),
+                            errors = errors + VALUES(errors)
                     """, (d.isoformat(), model_name,
                           mstats.get("input_tokens", 0), mstats.get("output_tokens", 0),
                           mstats.get("cache_creation_tokens", 0), mstats.get("cache_read_tokens", 0),
-                          mstats.get("requests", 0), 0))
+                          mstats.get("requests", 0),
+                          # per-model errors 目前不被跟踪（models[m] 里没有 errors
+                          # 字段，只有 totals 有），故恒为 0 增量。已知缺口，独立议题。
+                          0))
 
     async def _load_day(self, d: date) -> dict:
         if not self._pool:
