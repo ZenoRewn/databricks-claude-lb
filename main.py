@@ -7132,7 +7132,29 @@ async def reset(
 
 @app.get("/stats/dashboard", response_class=HTMLResponse)
 async def dashboard():
-    return HTMLResponse(content=DASHBOARD_HTML)
+    # P3.4: 加 CSP + 其他安全头。CSP 允许 fonts.googleapis.com / cdn.jsdelivr.net
+    # / self-inline（dashboard 内嵌 style + script）。'unsafe-inline' 保留是因为
+    # 页面里有 inline <style> 与 <script>——若日后换用 nonce/hash 可以收紧。
+    csp = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com data:; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
+    return HTMLResponse(
+        content=DASHBOARD_HTML,
+        headers={
+            "Content-Security-Policy": csp,
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+        },
+    )
 
 
 _DASHBOARD_HTML_PATH = Path(__file__).parent / "dashboard.html"
