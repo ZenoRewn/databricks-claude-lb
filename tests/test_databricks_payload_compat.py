@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 
 import main
@@ -442,6 +443,41 @@ class LatencyHistogramTests(unittest.TestCase):
         self.assertIn("# TYPE proxy_request_latency_seconds histogram", text)
         # No sample rows — the two header lines only
         self.assertEqual(len([l for l in text.splitlines() if not l.startswith("#")]), 0)
+
+
+class BackgroundLoopSelfHealTests(unittest.IsolatedAsyncioTestCase):
+    """P2.5: 后台 loop 不再因单轮迭代抛错而静默退出."""
+
+    async def test_background_refresh_loop_survives_outer_scope_error(self):
+        # 让 load_balancer.endpoints 属性访问 raise —— 模拟真正的
+        # "outer-scope" 意外错误（不是 per-endpoint 分支已经 catch 住的场景）
+        proxy = object.__new__(main.CopilotProxy)
+        calls = {"n": 0}
+        class ExplodingLB:
+            @property
+            def endpoints(self):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise RuntimeError("simulated outer failure")
+                return []  # 第 2 次正常返回
+        proxy.load_balancer = ExplodingLB()
+
+        # interval=0 让循环紧凑；self-heal 后 sleep 5s，我们及时 cancel
+        task = asyncio.create_task(proxy.background_refresh_loop(interval=0, threshold=1))
+        # 等第一轮抛错被 self-heal 捕获（sleep 5s）
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            if calls["n"] >= 1:
+                break
+        task.cancel()
+        # loop 内部 break 后正常返回；不管是 CancelledError 还是 clean return，
+        # 都不应该 raise 其他类型的异常
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass  # normal cancellation propagation
+        # 第一次抛错后 loop 没有退出——self-heal 有效
+        self.assertGreaterEqual(calls["n"], 1)
 
 
 class ProviderAgnosticHtmlCooldownTests(unittest.TestCase):

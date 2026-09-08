@@ -1778,19 +1778,32 @@ class UsageDataStore:
         return await self._delete_before(cutoff)
 
     async def _periodic_flush(self):
+        # P2.5 self-heal: 内层 try 已经把 flush + cleanup 包住；外层新增 sleep 也包
+        # 在 try 里以防 CancelledError 之外的异常从 sleep 抛出（罕见但曾发生过）。
         while True:
-            await asyncio.sleep(30)
             try:
-                await self._flush()
-                if self.retention_days > 0:
-                    today = date.today()
-                    if self._last_cleanup_date != today:
-                        deleted = await self._delete_before(today - timedelta(days=self.retention_days))
-                        if deleted:
-                            logger.info(f"Daily cleanup: deleted {deleted} expired records")
-                        self._last_cleanup_date = today
+                await asyncio.sleep(30)
+                try:
+                    await self._flush()
+                    if self.retention_days > 0:
+                        today = date.today()
+                        if self._last_cleanup_date != today:
+                            deleted = await self._delete_before(today - timedelta(days=self.retention_days))
+                            if deleted:
+                                logger.info(f"Daily cleanup: deleted {deleted} expired records")
+                            self._last_cleanup_date = today
+                except Exception as e:
+                    logger.error(f"Usage data flush error: {e}")
+            except asyncio.CancelledError:
+                break
             except Exception as e:
-                logger.error(f"Usage data flush error: {e}")
+                logger.error(
+                    f"Usage data periodic loop unexpected error, backing off 5s: {type(e).__name__}: {e}"
+                )
+                try:
+                    await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    break
 
     async def _flush(self):
         async with self._lock:
@@ -3916,51 +3929,67 @@ class CopilotProxy:
         )
         try:
             while True:
-                await asyncio.sleep(interval)
-                now = time.monotonic()
-                # All Copilot endpoints share one AsyncClient pool, so gate on the
-                # aggregate active count rather than any individual endpoint.
-                total_active = sum(ep.active_requests for ep in self.load_balancer.endpoints)
-                if total_active >= high_watermark:
-                    self._stream_overload_since.setdefault("shared_pool", now)
-                else:
-                    self._stream_overload_since.pop("shared_pool", None)
+                # P2.5 self-heal：把整轮 iteration 包在 try/except 里，未预期异常时
+                # log + backoff interval 秒后继续，不让 monitor task 静默退出（否则
+                # stream reclaim 兜底就没了）。CancelledError 仍走外层 except 正常终止。
+                try:
+                    await asyncio.sleep(interval)
+                    now = time.monotonic()
+                    # All Copilot endpoints share one AsyncClient pool, so gate on the
+                    # aggregate active count rather than any individual endpoint.
+                    total_active = sum(ep.active_requests for ep in self.load_balancer.endpoints)
+                    if total_active >= high_watermark:
+                        self._stream_overload_since.setdefault("shared_pool", now)
+                    else:
+                        self._stream_overload_since.pop("shared_pool", None)
 
-                for connection_id, item in list(self._stream_connections.items()):
-                    overload_since = self._stream_overload_since.get("shared_pool")
-                    if overload_since is None or now - overload_since < overload_grace:
-                        item["disconnected_since"] = None
-                        continue
-
-                    task = item.get("task")
-                    owner_abandoned = task is None or task.done() or task.cancelled()
-                    checker = item.get("disconnect_checker")
-                    disconnected = owner_abandoned
-                    if not disconnected and checker is not None:
-                        try:
-                            disconnected = await checker()
-                        except Exception as exc:
-                            logger.warning("[Copilot] disconnect check failed for %s: %s", connection_id, exc)
+                    for connection_id, item in list(self._stream_connections.items()):
+                        overload_since = self._stream_overload_since.get("shared_pool")
+                        if overload_since is None or now - overload_since < overload_grace:
+                            item["disconnected_since"] = None
                             continue
 
-                    if not disconnected:
-                        item["disconnected_since"] = None
-                        continue
-                    if item["disconnected_since"] is None:
-                        item["disconnected_since"] = now
-                        self.stream_disconnects_detected_total += 1
-                        continue
-                    if now - item["disconnected_since"] < disconnect_grace:
-                        continue
+                        task = item.get("task")
+                        owner_abandoned = task is None or task.done() or task.cancelled()
+                        checker = item.get("disconnect_checker")
+                        disconnected = owner_abandoned
+                        if not disconnected and checker is not None:
+                            try:
+                                disconnected = await checker()
+                            except Exception as exc:
+                                logger.warning("[Copilot] disconnect check failed for %s: %s", connection_id, exc)
+                                continue
 
-                    logger.warning(
-                        "[Copilot] force-releasing disconnected stream %s endpoint=%s age=%.1fs",
-                        connection_id, item["endpoint"], now - item["started_at"],
+                        if not disconnected:
+                            item["disconnected_since"] = None
+                            continue
+                        if item["disconnected_since"] is None:
+                            item["disconnected_since"] = now
+                            self.stream_disconnects_detected_total += 1
+                            continue
+                        if now - item["disconnected_since"] < disconnect_grace:
+                            continue
+
+                        logger.warning(
+                            "[Copilot] force-releasing disconnected stream %s endpoint=%s age=%.1fs",
+                            connection_id, item["endpoint"], now - item["started_at"],
+                        )
+                        self.stream_forced_releases_total += 1
+                        if task is not None and not task.done():
+                            task.cancel()
+                        await item["release"]()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(
+                        "[Copilot] connection_monitor_loop iteration error, backing off %ss: %s: %s",
+                        interval, type(e).__name__, e,
+                        extra={"kind": "copilot_connection_monitor_error", "error_type": type(e).__name__},
                     )
-                    self.stream_forced_releases_total += 1
-                    if task is not None and not task.done():
-                        task.cancel()
-                    await item["release"]()
+                    try:
+                        await asyncio.sleep(interval)
+                    except asyncio.CancelledError:
+                        raise
         except asyncio.CancelledError:
             pass
         finally:
@@ -4142,24 +4171,39 @@ class CopilotProxy:
 
         默认 5 min 扫描，10 min 阈值（30min token 在 ~20min 时被主动刷一次）。
         即使无外部请求也保持 token 新鲜，避免冷门服务在请求来时才发现 token 已死。
+
+        P2.5: 兜底外层 try/except 包每轮迭代——单轮抛出未预期异常时 log + backoff 5s
+        继续下一轮，而不是 task 静默退出。CancelledError 依旧正常向上传播。
         """
         logger.info(f"[Copilot] background refresh started: interval={interval}s, threshold={threshold}s")
         while True:
             try:
                 await asyncio.sleep(interval)
+                for ep in list(self.load_balancer.endpoints):
+                    try:
+                        now = int(time.time())
+                        remaining = ep.session_token_expires_at - now
+                        if remaining <= threshold or not ep.session_token:
+                            logger.info(f"[Copilot] background refresh: '{ep.name}' remaining={remaining}s, refreshing")
+                            await self.get_session_token(ep, force=True)
+                    except HTTPException as e:
+                        logger.warning(f"[Copilot] background refresh failed for {ep.name}: {e.detail}")
+                    except Exception as e:
+                        logger.warning(f"[Copilot] background refresh failed for {ep.name}: {type(e).__name__}: {e}")
             except asyncio.CancelledError:
                 break
-            for ep in list(self.load_balancer.endpoints):
+            except Exception as e:
+                # P2.5 self-heal: 无论内部 per-endpoint 兜底还是 asyncio.sleep 自身
+                # 抛出的意外异常，都不让整个 task 退出。
+                logger.error(
+                    "[Copilot] background_refresh_loop unexpected error, backing off 5s: %s: %s",
+                    type(e).__name__, e,
+                    extra={"kind": "copilot_background_refresh_error", "error_type": type(e).__name__},
+                )
                 try:
-                    now = int(time.time())
-                    remaining = ep.session_token_expires_at - now
-                    if remaining <= threshold or not ep.session_token:
-                        logger.info(f"[Copilot] background refresh: '{ep.name}' remaining={remaining}s, refreshing")
-                        await self.get_session_token(ep, force=True)
-                except HTTPException as e:
-                    logger.warning(f"[Copilot] background refresh failed for {ep.name}: {e.detail}")
-                except Exception as e:
-                    logger.warning(f"[Copilot] background refresh failed for {ep.name}: {type(e).__name__}: {e}")
+                    await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    break
         logger.info("[Copilot] background refresh stopped")
 
     def is_any_endpoint_healthy(self) -> bool:
