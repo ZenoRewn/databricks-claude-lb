@@ -233,15 +233,23 @@ OPENAI_COMPAT_DEFAULT_MODEL_IDS = (
     "gpt-4o",
     "gpt-4o-mini",
     "gpt-5",
+    "gpt-5-mini",
+    "gpt-5-nano",
+    "gpt-5-pro",           # 新增：high-tier reasoning
     "gpt-5.1",
+    "gpt-5.2",
+    "gpt-5.4",
     "gpt-5.5",
+    "gpt-5.6-cyber",       # 新增：GPT-5.6 top tier
     "gpt-5.6-sol",
     "gpt-5.6-luna",
     "gpt-5.6-terra",
     "gpt-5-codex",
     "gpt-5.1-codex",
+    "gpt-5.3-codex",       # 新增：latest codex tier
     "o3",
     "o3-mini",
+    "o3-pro",              # 新增：high-tier reasoning
     "o4-mini",
     "gemini-2.5-pro",
     "gemini-2.5-flash",
@@ -1075,11 +1083,13 @@ DATABRICKS_MODELS = {
     "sonnet": "databricks-claude-sonnet-4-6",  # 默认使用最新版本
     "sonnet-4-5": "databricks-claude-sonnet-4-5",
     "sonnet-4-6": "databricks-claude-sonnet-4-6",
+    "sonnet-5":   "databricks-claude-sonnet-5",   # Anthropic 2026-09 新版；Databricks 上线后即可用
     "opus": "databricks-claude-opus-4-7",  # 默认版本；显式指定 opus-5 走 Opus 5
     "opus-4-5": "databricks-claude-opus-4-5",
     "opus-4-6": "databricks-claude-opus-4-6",
     "opus-4-7": "databricks-claude-opus-4-7",
-    "opus-5": "databricks-claude-opus-5",  # Databricks 已 GA
+    "opus-4-8": "databricks-claude-opus-4-8",   # Anthropic 2026-09 legacy tier
+    "opus-5": "databricks-claude-opus-5",       # Databricks 已 GA
     "haiku": "databricks-claude-haiku-4-5",
 }
 
@@ -1092,47 +1102,66 @@ DEFAULT_MODEL = "databricks-claude-sonnet-4-6"
 # - 子串匹配（按 key 长度降序优先），所以 "gpt-4o-mini" 必须排在 "gpt-4o" 之前才能被 specific 匹配；
 #   实际靠 get_model_pricing() 的排序保障，dict 顺序仅作可读性
 MODEL_PRICING = {
+    # 数据源：Anthropic https://claude.com/pricing、OpenAI https://developers.openai.com/api/docs/pricing
+    # 最近核对：2026-09-08。GHCP 实际是订阅制，此处仅作 API 层"假想成本"用于横向对照。
+    #
+    # 定价 key 约定：
+    #   - input / output：USD per 1M tokens
+    #   - cache_write：Anthropic 独有（5-min TTL cache 写入），OpenAI 侧一律 0
+    #   - cache_read：cached input token 折扣价（Anthropic 的 cache_read / OpenAI 的 cached input）
+    # 子串匹配靠 _PRICING_KEYS_BY_LENGTH 按 key 长度降序，长 key 先命中。
+
     # ---------- Anthropic Claude ----------
-    # NOTE: opus-5 使用与 opus-4-7 相同的定价占位（Anthropic 公开价目前一致）；
-    # 如未来 Anthropic 公布 opus-5 差异化定价请覆盖此行。子串匹配靠 key 长度降序生效。
-    "opus-5":   {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
-    "opus-4-7": {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
-    "opus-4-6": {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
-    "opus-4-5": {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
+    "opus-5":     {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
+    "opus-4-8":   {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},   # 2026 legacy tier
+    "opus-4-7":   {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
+    "opus-4-6":   {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
+    "opus-4-5":   {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
+    "opus-4-1":   {"input": 15.00, "output": 75.00, "cache_write": 18.75, "cache_read": 1.50},  # older tier, 3x price
+    "sonnet-5":   {"input": 2.00, "output": 10.00, "cache_write": 2.50, "cache_read": 0.20},   # NEW 2026-09
     "sonnet-4-6": {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
     "sonnet-4-5": {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
-    "haiku-4-5": {"input": 1.00, "output": 5.00, "cache_write": 1.25, "cache_read": 0.10},
+    "haiku-4-5":  {"input": 1.00, "output": 5.00,  "cache_write": 1.25, "cache_read": 0.10},
 
     # ---------- OpenAI GPT-5 系列 ----------
-    # GPT-5.x 公开 API 价格 reference：input $1.25 / output $10 / cached input $0.125（写作时点公开值）
-    # GHCP 实际无 per-token 计费，此处仅作 API 层对照
-    "gpt-5.1-codex-mini": {"input": 0.15, "output": 0.60, "cache_write": 0.0, "cache_read": 0.075},
+    # 注意 5.4/5.5 是短上下文 (<272K) 价；长上下文 tier 约 2× (未在这张表覆盖)
+    "gpt-5.1-codex-mini": {"input": 0.15, "output": 0.60,  "cache_write": 0.0, "cache_read": 0.075},
     "gpt-5.1-codex-max":  {"input": 5.00, "output": 40.00, "cache_write": 0.0, "cache_read": 0.50},
     "gpt-5.1-codex":      {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
+    "gpt-5.3-codex":      {"input": 1.75, "output": 14.00, "cache_write": 0.0, "cache_read": 0.175},  # NEW
     "gpt-5-codex":        {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
     "gpt-5-mini":         {"input": 0.25, "output": 2.00,  "cache_write": 0.0, "cache_read": 0.025},
     "gpt-5-nano":         {"input": 0.05, "output": 0.40,  "cache_write": 0.0, "cache_read": 0.005},
-    "gpt-5.6-sol":        {"input": 5.00, "output": 30.00, "cache_write": 6.25,  "cache_read": 0.50},
-    "gpt-5.6-terra":      {"input": 2.50, "output": 15.00, "cache_write": 3.125, "cache_read": 0.25},
-    "gpt-5.6-luna":       {"input": 1.00, "output": 6.00,  "cache_write": 1.25,  "cache_read": 0.10},
-    "gpt-5.5":            {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
-    "gpt-5.4":            {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
-    "gpt-5.2":            {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
-    "gpt-5.1":            {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
-    "gpt-5":              {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
+    "gpt-5-pro":          {"input": 15.00, "output": 120.00, "cache_write": 0.0, "cache_read": 0.0},   # NEW high tier
+    "gpt-5.6-cyber":      {"input": 12.50, "output": 75.00, "cache_write": 0.0, "cache_read": 1.25},   # NEW
+    "gpt-5.6-sol":        {"input": 4.00,  "output": 20.00, "cache_write": 0.0, "cache_read": 0.40},   # was 5/30 → corrected
+    "gpt-5.6-terra":      {"input": 2.00,  "output": 12.00, "cache_write": 0.0, "cache_read": 0.20},   # was 2.5/15 → corrected
+    "gpt-5.6-luna":       {"input": 0.20,  "output": 1.20,  "cache_write": 0.0, "cache_read": 0.02},   # was 1/6 → 大幅下调
+    "gpt-5.5-pro":        {"input": 30.00, "output": 180.00, "cache_write": 0.0, "cache_read": 0.0},   # NEW
+    "gpt-5.5":            {"input": 5.00,  "output": 30.00, "cache_write": 0.0, "cache_read": 0.50},   # was 1.25/10 → corrected
+    "gpt-5.4-nano":       {"input": 0.20,  "output": 1.25,  "cache_write": 0.0, "cache_read": 0.02},   # NEW
+    "gpt-5.4-mini":       {"input": 0.75,  "output": 4.50,  "cache_write": 0.0, "cache_read": 0.075},  # NEW
+    "gpt-5.4-pro":        {"input": 30.00, "output": 180.00, "cache_write": 0.0, "cache_read": 0.0},   # NEW
+    "gpt-5.4":            {"input": 2.50,  "output": 15.00, "cache_write": 0.0, "cache_read": 0.25},   # was 1.25/10 → corrected
+    "gpt-5.2-pro":        {"input": 21.00, "output": 168.00, "cache_write": 0.0, "cache_read": 0.0},   # NEW
+    "gpt-5.2":            {"input": 1.75,  "output": 14.00, "cache_write": 0.0, "cache_read": 0.175},  # was 1.25/10 → corrected
+    "gpt-5.1":            {"input": 1.25,  "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
+    "gpt-5":              {"input": 1.25,  "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
 
     # ---------- OpenAI GPT-4 系列 ----------
-    "gpt-4.1-nano": {"input": 0.10, "output": 0.40, "cache_write": 0.0, "cache_read": 0.025},
-    "gpt-4.1-mini": {"input": 0.40, "output": 1.60, "cache_write": 0.0, "cache_read": 0.10},
-    "gpt-4.1":      {"input": 2.00, "output": 8.00, "cache_write": 0.0, "cache_read": 0.50},
-    "gpt-4o-mini":  {"input": 0.15, "output": 0.60, "cache_write": 0.0, "cache_read": 0.075},
+    "gpt-4.1-nano": {"input": 0.10, "output": 0.40,  "cache_write": 0.0, "cache_read": 0.025},
+    "gpt-4.1-mini": {"input": 0.40, "output": 1.60,  "cache_write": 0.0, "cache_read": 0.10},
+    "gpt-4.1":      {"input": 2.00, "output": 8.00,  "cache_write": 0.0, "cache_read": 0.50},
+    "gpt-4o-mini":  {"input": 0.15, "output": 0.60,  "cache_write": 0.0, "cache_read": 0.075},
     "gpt-4o":       {"input": 2.50, "output": 10.00, "cache_write": 0.0, "cache_read": 1.25},
     "gpt-4-turbo":  {"input": 10.00, "output": 30.00, "cache_write": 0.0, "cache_read": 0.0},
     "gpt-4":        {"input": 30.00, "output": 60.00, "cache_write": 0.0, "cache_read": 0.0},
 
     # ---------- OpenAI o-series（reasoning） ----------
+    "o4-mini": {"input": 1.10, "output": 4.40, "cache_write": 0.0, "cache_read": 0.275},  # NEW（之前 catalog 里有但缺定价）
     "o3-mini": {"input": 1.10, "output": 4.40, "cache_write": 0.0, "cache_read": 0.55},
     "o1-mini": {"input": 1.10, "output": 4.40, "cache_write": 0.0, "cache_read": 0.55},
+    "o3-pro":  {"input": 20.00, "output": 80.00, "cache_write": 0.0, "cache_read": 0.0},   # NEW high tier
     "o3":      {"input": 2.00, "output": 8.00, "cache_write": 0.0, "cache_read": 0.50},
     "o1":      {"input": 15.00, "output": 60.00, "cache_write": 0.0, "cache_read": 7.50},
 
@@ -1201,10 +1230,15 @@ def get_databricks_model(model: str) -> str:
             mapped = DATABRICKS_MODELS["opus-4-6"]
         elif "4-7" in model_lower or "4.7" in model_lower:
             mapped = DATABRICKS_MODELS["opus-4-7"]
+        elif "4-8" in model_lower or "4.8" in model_lower:
+            mapped = DATABRICKS_MODELS["opus-4-8"]
         else:
             mapped = DATABRICKS_MODELS["opus"]  # 默认最新版本
     elif "sonnet" in model_lower:
-        if "4-5" in model_lower or "4.5" in model_lower:
+        # Sonnet 5 判断必须在 4-x 之前（与 opus-5 同样的模式）
+        if re.search(r"sonnet[-_.]?5(?:[-_.]|$)", model_lower):
+            mapped = DATABRICKS_MODELS["sonnet-5"]
+        elif "4-5" in model_lower or "4.5" in model_lower:
             mapped = DATABRICKS_MODELS["sonnet-4-5"]
         elif "4-6" in model_lower or "4.6" in model_lower:
             mapped = DATABRICKS_MODELS["sonnet-4-6"]

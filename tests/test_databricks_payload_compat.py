@@ -67,6 +67,28 @@ class DatabricksPayloadCompatTests(unittest.TestCase):
             "databricks-claude-opus-5",
         )
 
+    def test_opus_5_all_variants_bypass_downgrade(self):
+        """回归防护：任何 opus-5 变体都必须映射到 databricks-claude-opus-5，
+        绝不能被通用 opus 分支吞掉降级到 4-7。列出常见客户端可能发出的形态。"""
+        variants = [
+            "databricks-claude-opus-5",   # 已经是 Databricks 名，原样返回
+            "opus-5",                     # 裸模型名
+            "claude-opus-5",              # 无日期后缀
+            "claude-opus-5-latest",       # latest 别名
+            "claude-opus-5-20250514",     # 20250514 date suffix
+            "claude-opus-5-20260101",     # 未来 date suffix
+            "claude-opus-5.1",            # 小版本号（次要修订）
+            "CLAUDE-OPUS-5",              # 全大写
+            "Claude-Opus-5",              # 混合大小写
+            "claude-opus-5_20260101",     # 下划线分隔（非常见但要 robust）
+        ]
+        for v in variants:
+            self.assertEqual(
+                main.get_databricks_model(v),
+                "databricks-claude-opus-5",
+                msg=f"variant {v!r} was NOT mapped to opus-5 (regression!)",
+            )
+
     def test_claude_opus_4_x_still_maps_correctly(self):
         # 加 opus-5 分支后，旧版本映射必须保持不变
         self.assertEqual(
@@ -82,6 +104,46 @@ class DatabricksPayloadCompatTests(unittest.TestCase):
             main.get_databricks_model("claude-opus"),
             "databricks-claude-opus-4-7",
         )
+
+    def test_new_2026_models_have_pricing(self):
+        """回归：2026-09 新增的模型必须都有定价，避免 get_model_pricing 静默返 None。"""
+        required = [
+            # Anthropic 新增
+            "databricks-claude-sonnet-5",
+            "databricks-claude-opus-4-8",
+            # OpenAI 新增 / 修正
+            "o4-mini", "o3-pro",
+            "gpt-5-pro",
+            "gpt-5.2-pro", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.4-pro",
+            "gpt-5.5-pro",
+            "gpt-5.6-cyber",
+            "gpt-5.3-codex",
+        ]
+        for m in required:
+            p = main.get_model_pricing(m)
+            self.assertIsNotNone(p, msg=f"{m}: no pricing")
+            self.assertGreater(p["input"], 0, msg=f"{m}: zero input price")
+            self.assertGreater(p["output"], 0, msg=f"{m}: zero output price")
+
+    def test_openai_default_catalog_all_priced(self):
+        """/models 端点默认 catalog 里每个 model 都必须能计费——否则 /stats 里
+        estimated_total_cost_usd 会因 pricing=None 少统计一部分请求。"""
+        for m in main.OPENAI_COMPAT_DEFAULT_MODEL_IDS:
+            self.assertIsNotNone(main.get_model_pricing(m), msg=f"{m}: missing pricing")
+
+    def test_sonnet_5_maps_to_databricks_sonnet_5(self):
+        """Sonnet 5 与 Opus 5 使用相同的 regex 分支模式（数字 5 boundary）。"""
+        for m in ["sonnet-5", "claude-sonnet-5", "claude-sonnet-5-latest",
+                  "claude-sonnet-5-20260101", "Claude-Sonnet-5"]:
+            self.assertEqual(
+                main.get_databricks_model(m),
+                "databricks-claude-sonnet-5",
+                msg=f"{m}: not mapped to sonnet-5",
+            )
+        # 未指定 5 时仍走默认（4-6）
+        self.assertEqual(main.get_databricks_model("claude-sonnet"), "databricks-claude-sonnet-4-6")
+        # 显式 4-6 保持不变
+        self.assertEqual(main.get_databricks_model("claude-sonnet-4-6"), "databricks-claude-sonnet-4-6")
 
     def test_opus_5_pricing_matches_opus_4_7_placeholder(self):
         # 子串匹配：opus-5 的定价 key 长度大于 opus，应优先命中
@@ -211,10 +273,17 @@ class OpenAICompatTests(unittest.TestCase):
         self.assertTrue(main._should_adapt_chat_to_responses(" gpt-5.6-terra "))
 
     def test_uses_specific_gpt_5_6_pricing(self):
-        self.assertEqual(main.get_model_pricing("gpt-5.6-sol")["input"], 5.00)
-        self.assertEqual(main.get_model_pricing("gpt-5.6-terra")["output"], 15.00)
-        self.assertEqual(main.get_model_pricing("gpt-5.6-terra")["cache_write"], 3.125)
-        self.assertEqual(main.get_model_pricing("gpt-5.6-luna")["cache_read"], 0.10)
+        # 2026-09-08 与 OpenAI 官方 dev docs 对齐后的价：
+        # sol 4/20, terra 2/12, luna 0.20/1.20 (short-context tier)
+        self.assertEqual(main.get_model_pricing("gpt-5.6-sol")["input"], 4.00)
+        self.assertEqual(main.get_model_pricing("gpt-5.6-terra")["output"], 12.00)
+        # OpenAI 无独立 cache write 收费，全部归 0
+        self.assertEqual(main.get_model_pricing("gpt-5.6-terra")["cache_write"], 0.0)
+        # luna cached input 折扣价 = $0.02/M
+        self.assertEqual(main.get_model_pricing("gpt-5.6-luna")["cache_read"], 0.02)
+        # 新加入的 cyber 层级验证一下
+        self.assertEqual(main.get_model_pricing("gpt-5.6-cyber")["input"], 12.50)
+        self.assertEqual(main.get_model_pricing("gpt-5.6-cyber")["output"], 75.00)
 
     def test_drops_only_nonpositive_chat_token_limits(self):
         body = {
