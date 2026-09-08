@@ -1432,3 +1432,33 @@ class RequestIdSurfaceTests(unittest.IsolatedAsyncioTestCase):
     def test_request_id_response_headers_empty_when_none(self):
         self.assertEqual(main._request_id_response_headers(None), {})
         self.assertEqual(main._request_id_response_headers(""), {})
+
+
+class AnthropicRequestIdSurfaceTests(unittest.IsolatedAsyncioTestCase):
+    """P1.4: ClaudeProxy._stream_request 现在带 request_id，SSE error 与
+    _build_upstream_error_detail 都能把 X-Request-Id 透传给下游。"""
+
+    def test_proxy_request_signature_accepts_request_id(self):
+        import inspect
+        sig = inspect.signature(main.ClaudeProxy.proxy_request)
+        self.assertIn("request_id", sig.parameters)
+
+    def test_stream_request_signature_accepts_request_id(self):
+        import inspect
+        sig = inspect.signature(main.ClaudeProxy._stream_request)
+        self.assertIn("request_id", sig.parameters)
+
+    def test_normal_request_signature_accepts_request_id(self):
+        import inspect
+        sig = inspect.signature(main.ClaudeProxy._normal_request)
+        self.assertIn("request_id", sig.parameters)
+
+    def test_build_upstream_error_detail_lb_request_id_lands_in_output(self):
+        # 生产分支已经在 error.upstream_ids 里加了 lb_request_id；P1.4 只是让
+        # Anthropic path 也把参数传下来。这里确认 upstream_ids 结构不变。
+        detail = main._build_upstream_error_detail(
+            502, "some html body", "Databricks", "adb-1",
+            content_type="text/html", upstream_headers={},
+            lb_request_id="req_anth123",
+        )
+        self.assertEqual(detail["error"].get("upstream_ids", {}).get("lb_request_id"), "req_anth123")

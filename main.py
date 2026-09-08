@@ -2488,9 +2488,10 @@ class ClaudeProxy:
     def verify_api_key(self, key: str) -> bool:
         return key == self.api_key
 
-    async def proxy_request(self, body: dict, stream: bool = False):
-        """代理请求到 Databricks 原生 Anthropic 端点"""
-        
+    async def proxy_request(self, body: dict, stream: bool = False, request_id: Optional[str] = None):
+        """代理请求到 Databricks 原生 Anthropic 端点。P1.4: request_id 沿路传到
+        _stream_request/_normal_request，让 SSE error 与结构化日志能关联 X-Request-Id。"""
+
         # 转换模型名称
         if "model" in body:
             original_model = body["model"]
@@ -2624,9 +2625,9 @@ class ClaudeProxy:
                 }
 
                 if stream:
-                    return await self._stream_request(endpoint, url, body, headers, model=model, start_time=start_time, attempt_lease=attempt_lease)
+                    return await self._stream_request(endpoint, url, body, headers, model=model, start_time=start_time, attempt_lease=attempt_lease, request_id=request_id)
                 else:
-                    result = await self._normal_request(endpoint, url, body, headers, model=model, start_time=start_time)
+                    result = await self._normal_request(endpoint, url, body, headers, model=model, start_time=start_time, request_id=request_id)
                     await self.load_balancer.on_request_end(endpoint, success=True, lease=attempt_lease)
                     return result
                     
@@ -2655,6 +2656,7 @@ class ClaudeProxy:
                     error_body = _build_upstream_error_detail(
                         e.response.status_code, body_text, "Databricks", endpoint.name,
                         content_type=upstream_ct, upstream_headers=upstream_hdrs,
+                        lb_request_id=request_id,   # P1.4: 透传 X-Request-Id
                     )
                     # P1.3: HTML 检测触发软熔断 + 结构化日志
                     if error_body.get("error", {}).get("code") == "upstream_html_error":
@@ -2678,7 +2680,8 @@ class ClaudeProxy:
         
         raise HTTPException(status_code=502, detail={"error": {"code": "upstream_request_failed", "message": "Upstream request failed; execution may have occurred. Not replayed after ambiguous failure."}})
     
-    async def _normal_request(self, endpoint, url, body, headers, model: str = "unknown", start_time: float = 0) -> JSONResponse:
+    async def _normal_request(self, endpoint, url, body, headers, model: str = "unknown", start_time: float = 0,
+                                request_id: Optional[str] = None) -> JSONResponse:
         """非流式请求 - 直接透传"""
         response = await self.client.post(url, json=body, headers=headers)
         response.raise_for_status()
@@ -2695,7 +2698,8 @@ class ClaudeProxy:
 
         return JSONResponse(content=resp_json, status_code=response.status_code)
 
-    async def _stream_request(self, endpoint, url, body, headers, max_retries: int = 3, model: str = "unknown", start_time: float = 0, attempt_lease=None) -> StreamingResponse:
+    async def _stream_request(self, endpoint, url, body, headers, max_retries: int = 3, model: str = "unknown", start_time: float = 0, attempt_lease=None,
+                                request_id: Optional[str] = None) -> StreamingResponse:
         """流式请求 - 直接透传 Databricks 的 Anthropic 格式响应，支持重试"""
 
         proxy_self = self
@@ -2794,7 +2798,9 @@ class ClaudeProxy:
                                 logger.info(f"[{body.get('model')}] -> {current_endpoint.name} (stream attempt {attempt + 2})")
                                 continue
 
-                        yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': error_msg}})}\n\n".encode()
+                        # P1.4: 把 [req=...] 前缀到 error.message，与 Copilot 侧对齐
+                        _msg = _apply_request_id_prefix(error_msg, {"request_id": request_id} if request_id else None)
+                        yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': _msg}})}\n\n".encode()
                         return
 
                     def own_pump(task, owned_queue):
@@ -2824,12 +2830,18 @@ class ClaudeProxy:
                                 return
                             yield wire_output.frame(frame)
                     await end_current_request(success=False)
-                    yield b'event: error\ndata: {"type":"error","error":{"code":"upstream_truncated","message":"Upstream ended without message_stop; cause undetermined"}}\n\n'
+                    # P1.4: 透传 request_id 到 truncated error
+                    _trunc_msg = _apply_request_id_prefix(
+                        "Upstream ended without message_stop; cause undetermined",
+                        {"request_id": request_id} if request_id else None,
+                    )
+                    yield f"event: error\ndata: {json.dumps({'type':'error','error':{'code':'upstream_truncated','message':_trunc_msg}})}\n\n".encode()
                     return
 
                 except (_LocalStreamLimit, _LocalObserverError) as e:
                     await end_current_request(success=False, is_client_error=True)
-                    payload = {"type": "error", "error": {"code": e.code, "type": "local_resource_limit" if isinstance(e, _LocalStreamLimit) else "local_observer_error", "message": str(e)}}
+                    _msg = _apply_request_id_prefix(str(e), {"request_id": request_id} if request_id else None)
+                    payload = {"type": "error", "error": {"code": e.code, "type": "local_resource_limit" if isinstance(e, _LocalStreamLimit) else "local_observer_error", "message": _msg}}
                     yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode()
                     return
 
@@ -2855,7 +2867,9 @@ class ClaudeProxy:
                             logger.info(f"[{body.get('model')}] -> {current_endpoint.name} (stream retry {attempt + 2})")
                             continue
 
-                    yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': error_detail}})}\n\n".encode()
+                    # P1.4: request_id 前缀到 network-error message
+                    _detail = _apply_request_id_prefix(error_detail, {"request_id": request_id} if request_id else None)
+                    yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': _detail}})}\n\n".encode()
                     return
 
                 except Exception as e:
@@ -2863,7 +2877,8 @@ class ClaudeProxy:
                     error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
                     logger.error(f"Stream error: {error_detail}\n{traceback.format_exc()}")
                     await end_current_request(success=False, is_client_error=isinstance(e, httpx.PoolTimeout))
-                    yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': error_detail}})}\n\n".encode()
+                    _detail = _apply_request_id_prefix(error_detail, {"request_id": request_id} if request_id else None)
+                    yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': _detail}})}\n\n".encode()
                     return
 
                 finally:
@@ -5600,6 +5615,14 @@ MAX_RAW_REQUEST_SIZE = 64 * 1024 * 1024  # LB 入口宽容上限：压缩前最�
 
 @app.post("/v1/messages")
 async def messages(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    # P1.4: generate/honour request_id so error SSE frames + upstream logs correlate.
+    request_id = (
+        request.headers.get("x-request-id")
+        or request.headers.get("openai-request-id")
+        or f"req_{uuid.uuid4().hex[:8]}"
+    )
+    request.state.request_id = request_id
+
     auth_header = request.headers.get("authorization", "")
     actual_key = x_api_key or (auth_header[7:] if auth_header.startswith("Bearer ") else "")
 
@@ -5659,9 +5682,9 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
         )
 
     stream = body.get("stream", False)
-    logger.info(f"Request: model={body.get('model')}, stream={stream}, thinking={body.get('thinking')}, size={body_size/1024:.1f}KB")
+    logger.info(f"[Databricks][{request_id}] Request: model={body.get('model')}, stream={stream}, thinking={body.get('thinking')}, size={body_size/1024:.1f}KB")
 
-    return await proxy.proxy_request(body, stream=stream)
+    return await proxy.proxy_request(body, stream=stream, request_id=request_id)
 
 
 @app.post("/v1/messages/count_tokens")
