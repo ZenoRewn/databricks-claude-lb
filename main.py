@@ -2032,6 +2032,70 @@ def _record_usage_best_effort(proxy_instance, endpoint, *args, **kwargs):
         logger.error("Usage accounting failed: %s", type(exc).__name__)
 
 
+# Prometheus histogram bucket edges in seconds. Covers sub-100ms (fast chat
+# completion) → 100ms-1s (typical) → 1-30s (thinking) → 30s+ (long thinking /
+# large output). Chosen so p50/p95/p99 quantiles remain meaningful for the
+# mixed traffic profile Copilot / Databricks / Azure see.
+LATENCY_BUCKETS_SECONDS = (
+    0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0, 600.0,
+)
+
+
+class LatencyHistogram:
+    """Per-(provider, api_type) Prometheus-shaped histogram of successful requests.
+
+    Not concurrent-safe under threads, but the whole LB runs in a single asyncio
+    loop — so incrementing counters here is race-free between coroutines.
+    """
+    __slots__ = ("buckets", "counts", "totals")
+
+    def __init__(self, buckets=LATENCY_BUCKETS_SECONDS):
+        self.buckets = tuple(buckets)
+        self.counts: dict[tuple[str, str], list[int]] = {}
+        self.totals: dict[tuple[str, str], tuple[int, float]] = {}
+
+    def observe(self, provider: str, api_type: str, seconds: float) -> None:
+        key = (provider, api_type)
+        row = self.counts.get(key)
+        if row is None:
+            row = [0] * (len(self.buckets) + 1)  # +1 for +Inf bucket
+            self.counts[key] = row
+            self.totals[key] = (0, 0.0)
+        for i, edge in enumerate(self.buckets):
+            if seconds <= edge:
+                row[i] += 1
+        row[-1] += 1  # +Inf bucket = total count
+        c, s = self.totals[key]
+        self.totals[key] = (c + 1, s + seconds)
+
+    def render_prom(self, metric_name: str) -> str:
+        """Emit Prometheus text format with le="..." label + _sum + _count."""
+        lines = [
+            f"# HELP {metric_name}_seconds Successful request latency histogram (end-to-end, from admission to record).",
+            f"# TYPE {metric_name}_seconds histogram",
+        ]
+        for (provider, api_type), row in self.counts.items():
+            # observe() already stores cumulative counts (each obs increments every
+            # bucket where seconds <= edge), so print row[i] directly per bucket.
+            for i, edge in enumerate(self.buckets):
+                lines.append(
+                    f'{metric_name}_seconds_bucket{{provider="{provider}",api_type="{api_type}",le="{edge}"}} {row[i]}'
+                )
+            lines.append(
+                f'{metric_name}_seconds_bucket{{provider="{provider}",api_type="{api_type}",le="+Inf"}} {row[-1]}'
+            )
+            count, total = self.totals[(provider, api_type)]
+            lines.append(f'{metric_name}_seconds_sum{{provider="{provider}",api_type="{api_type}"}} {total:.6f}')
+            lines.append(f'{metric_name}_seconds_count{{provider="{provider}",api_type="{api_type}"}} {count}')
+        return "\n".join(lines) + ("\n" if lines else "")
+
+
+# Global histogram shared across proxies; each _record_usage feeds it once per
+# successful request. Failed / cancelled / neutral requests do NOT populate this
+# — they're a separate distribution and mixing them hides real p99 latency.
+LATENCY_HISTOGRAM = LatencyHistogram()
+
+
 def _replay_safe_transport_failure(exc):
     # POST is not idempotent. Read/write/EOF/protocol/internal failures can occur
     # after execution, even when no response content has reached the client.
@@ -2305,6 +2369,8 @@ class ClaudeProxy:
     def _record_usage(self, endpoint: WorkspaceEndpoint, model: str, input_tokens: int, output_tokens: int, elapsed: float,
                       cache_creation_tokens: int = 0, cache_read_tokens: int = 0):
         """记录 token 用量和延迟指标"""
+        # Prometheus histogram（提供 p50/p95/p99 分位数观测）
+        LATENCY_HISTOGRAM.observe("databricks", "messages", elapsed)
         # 端点级别
         endpoint.total_input_tokens += input_tokens
         endpoint.total_output_tokens += output_tokens
@@ -2761,8 +2827,11 @@ class AzureOpenAIProxy:
         await self.client.aclose()
 
     def _record_usage(self, endpoint: AzureOpenAIEndpoint, model: str, input_tokens: int, output_tokens: int, elapsed: float,
-                      cache_creation_tokens: int = 0, cache_read_tokens: int = 0):
+                      cache_creation_tokens: int = 0, cache_read_tokens: int = 0,
+                      api_type: str = "chat"):
         """记录 token 用量和延迟指标"""
+        # Prometheus histogram（提供 p50/p95/p99 分位数观测）
+        LATENCY_HISTOGRAM.observe("azure", api_type, elapsed)
         endpoint.total_input_tokens += input_tokens
         endpoint.total_output_tokens += output_tokens
         endpoint.total_cache_creation_tokens += cache_creation_tokens
@@ -2907,7 +2976,7 @@ class AzureOpenAIProxy:
             output_tokens = usage.get("output_tokens", 0)
             cache_read_tokens = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
         _record_usage_best_effort(self, endpoint, model, input_tokens, output_tokens, elapsed,
-                          cache_read_tokens=cache_read_tokens)
+                          cache_read_tokens=cache_read_tokens, api_type=api_type)
 
         return JSONResponse(content=resp_json, status_code=response.status_code)
 
@@ -3019,7 +3088,8 @@ class AzureOpenAIProxy:
                                     _record_usage_best_effort(
                                         proxy_self, current_endpoint, model,
                                         observation.input_tokens, observation.output_tokens, time.time() - start_time,
-                                        cache_read_tokens=observation.cache_read_tokens)
+                                        cache_read_tokens=observation.cache_read_tokens,
+                                        api_type=api_type)
                                 yield wire_output.frame(frame)
                                 return
                             yield wire_output.frame(frame)
@@ -4082,7 +4152,10 @@ class CopilotProxy:
     # ---- 用量记录（与 AzureOpenAIProxy._record_usage 对称）----
 
     def _record_usage(self, endpoint: CopilotEndpoint, model: str, input_tokens: int, output_tokens: int, elapsed: float,
-                      cache_creation_tokens: int = 0, cache_read_tokens: int = 0):
+                      cache_creation_tokens: int = 0, cache_read_tokens: int = 0,
+                      api_type: str = "chat"):
+        # Prometheus histogram（提供 p50/p95/p99 分位数观测）
+        LATENCY_HISTOGRAM.observe("copilot", api_type, elapsed)
         endpoint.total_input_tokens += input_tokens
         endpoint.total_output_tokens += output_tokens
         endpoint.total_cache_creation_tokens += cache_creation_tokens
@@ -4504,7 +4577,7 @@ class CopilotProxy:
             output_tokens = usage.get("completion_tokens", 0)
             cache_read_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
         _record_usage_best_effort(self, endpoint, model, input_tokens, output_tokens, elapsed,
-                           cache_read_tokens=cache_read_tokens)
+                           cache_read_tokens=cache_read_tokens, api_type=api_type)
         # Same shape as the streaming `[Copilot stream_end]`: one row per request.
         _log_copilot_request_end(
             outcome="completed",
@@ -4831,7 +4904,8 @@ class CopilotProxy:
                                 if success:
                                     _record_usage_best_effort(
                                         proxy_self, current_endpoint, model, input_tokens, output_tokens,
-                                        time.time() - start_time, cache_read_tokens=cache_read_tokens)
+                                        time.time() - start_time, cache_read_tokens=cache_read_tokens,
+                                        api_type=api_type)
                                 _emit_stream_end(observation.terminal, logging.INFO if success else logging.WARNING,
                                                  terminal_valid=True, account_neutral=observation.neutral)
                                 yield wire_output.frame(frame)
@@ -6647,6 +6721,11 @@ async def metrics():
                 value = int(instance.load_balancer.resilience_stats(ep)[field_name])
                 samples.append(f'{metric}{{endpoint={label}}} {value}')
             emit(metric, "Local admission/accounting state; not a synthetic upstream health probe", kind, samples)
+
+    # Latency histogram (p50/p95/p99 per provider+api_type)
+    hist_text = LATENCY_HISTOGRAM.render_prom("proxy_request_latency")
+    if hist_text.strip():
+        lines.append(hist_text.rstrip())
 
     body = "\n".join(lines) + "\n" if lines else "# no providers configured\n"
     return Response(content=body, media_type="text/plain; version=0.0.4")

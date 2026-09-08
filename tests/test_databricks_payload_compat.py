@@ -400,5 +400,49 @@ class OpenAICompatAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("copilot_status", ctx.exception.detail["error"])
 
 
+class LatencyHistogramTests(unittest.TestCase):
+    def test_observe_populates_buckets_and_totals(self):
+        h = main.LatencyHistogram(buckets=(0.1, 1.0, 10.0))
+        h.observe("copilot", "responses", 0.05)   # <=0.1
+        h.observe("copilot", "responses", 0.5)    # <=1.0
+        h.observe("copilot", "responses", 5.0)    # <=10.0
+        h.observe("copilot", "responses", 120.0)  # +Inf only
+
+        # observe() stores cumulative counts directly (Prom-shape):
+        # row[i] = count of observations with seconds <= buckets[i].
+        row = h.counts[("copilot", "responses")]
+        self.assertEqual(row[0], 1)  # <=0.1  → {0.05}
+        self.assertEqual(row[1], 2)  # <=1.0  → {0.05, 0.5}
+        self.assertEqual(row[2], 3)  # <=10.0 → {0.05, 0.5, 5.0}
+        self.assertEqual(row[3], 4)  # +Inf   → {0.05, 0.5, 5.0, 120.0}
+
+        count, total = h.totals[("copilot", "responses")]
+        self.assertEqual(count, 4)
+        self.assertAlmostEqual(total, 0.05 + 0.5 + 5.0 + 120.0, places=6)
+
+    def test_render_prom_emits_cumulative_buckets_and_sum_count(self):
+        h = main.LatencyHistogram(buckets=(0.1, 1.0))
+        h.observe("azure", "chat", 0.05)
+        h.observe("azure", "chat", 0.5)
+        h.observe("azure", "chat", 5.0)  # only +Inf
+
+        text = h.render_prom("proxy_request_latency")
+        self.assertIn('proxy_request_latency_seconds_bucket{provider="azure",api_type="chat",le="0.1"} 1', text)
+        # cumulative: <=1.0 includes <=0.1 too → 2
+        self.assertIn('proxy_request_latency_seconds_bucket{provider="azure",api_type="chat",le="1.0"} 2', text)
+        self.assertIn('proxy_request_latency_seconds_bucket{provider="azure",api_type="chat",le="+Inf"} 3', text)
+        self.assertIn('proxy_request_latency_seconds_count{provider="azure",api_type="chat"} 3', text)
+        # sum = 0.05 + 0.5 + 5.0 = 5.55
+        self.assertIn('proxy_request_latency_seconds_sum{provider="azure",api_type="chat"} 5.550000', text)
+
+    def test_render_empty_yields_only_help_type_headers(self):
+        h = main.LatencyHistogram()
+        text = h.render_prom("proxy_request_latency")
+        self.assertIn("# HELP proxy_request_latency_seconds", text)
+        self.assertIn("# TYPE proxy_request_latency_seconds histogram", text)
+        # No sample rows — the two header lines only
+        self.assertEqual(len([l for l in text.splitlines() if not l.startswith("#")]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
