@@ -444,5 +444,61 @@ class LatencyHistogramTests(unittest.TestCase):
         self.assertEqual(len([l for l in text.splitlines() if not l.startswith("#")]), 0)
 
 
+class ProviderAgnosticHtmlCooldownTests(unittest.TestCase):
+    """P1.3: _note_upstream_html + LoadBalancer._prefer_html_fresh 三条 proxy 通用."""
+
+    def _fake_proxy(self):
+        class Proxy:
+            upstream_html_events_total = 0
+            upstream_html_events_by_status: dict = {}
+        return Proxy()
+
+    def test_note_upstream_html_sets_cooldown_and_counters(self):
+        # Databricks endpoint 也有 html_soft_cooldown_until 字段（P1.3 加）
+        ep = main.WorkspaceEndpoint(name="db-1", api_base="https://x", token="t")
+        proxy = self._fake_proxy()
+        proxy.upstream_html_events_by_status = {}
+        main._note_upstream_html(proxy, ep, "Databricks", "messages", 502,
+                                 upstream_ids={"cf-ray": "abc-SIN"})
+        self.assertEqual(ep.upstream_html_events_total, 1)
+        self.assertEqual(proxy.upstream_html_events_total, 1)
+        self.assertEqual(proxy.upstream_html_events_by_status, {"5xx": 1})
+        self.assertGreater(ep.html_soft_cooldown_until, main.time.time())
+
+    def test_note_upstream_html_status_buckets(self):
+        proxy = self._fake_proxy()
+        proxy.upstream_html_events_by_status = {}
+        ep = main.AzureOpenAIEndpoint(name="az-1", endpoint="https://x", api_key="k")
+        for status in (200, 403, 502, 999):
+            main._note_upstream_html(proxy, ep, "Azure", "chat", status)
+        self.assertEqual(proxy.upstream_html_events_by_status,
+                         {"200": 1, "4xx": 1, "5xx": 1, "other": 1})
+
+    def test_prefer_html_fresh_skips_cooldown_endpoints(self):
+        ep_a = main.WorkspaceEndpoint(name="a", api_base="https://x", token="t")
+        ep_b = main.WorkspaceEndpoint(name="b", api_base="https://y", token="t")
+        ep_a.html_soft_cooldown_until = main.time.time() + 30
+        chosen = main.LoadBalancer._prefer_html_fresh([ep_a, ep_b])
+        # 只有 ep_b 不在冷却窗口 → 返回 [ep_b]
+        self.assertEqual([e.name for e in chosen], ["b"])
+
+    def test_prefer_html_fresh_degrades_when_all_in_cooldown(self):
+        # 全部处于 cooldown 时，仍然返回原候选（保可用性；下次踩 HTML 会刷新窗口）
+        ep_a = main.WorkspaceEndpoint(name="a", api_base="https://x", token="t")
+        ep_b = main.WorkspaceEndpoint(name="b", api_base="https://y", token="t")
+        now = main.time.time()
+        ep_a.html_soft_cooldown_until = now + 30
+        ep_b.html_soft_cooldown_until = now + 30
+        chosen = main.LoadBalancer._prefer_html_fresh([ep_a, ep_b])
+        self.assertEqual([e.name for e in chosen], ["a", "b"])
+
+    def test_prefer_html_fresh_ignores_legacy_endpoints_without_field(self):
+        # 老代码里没 html_soft_cooldown_until 字段的对象也不 crash
+        class LegacyEndpoint:
+            name = "legacy"
+        chosen = main.LoadBalancer._prefer_html_fresh([LegacyEndpoint()])
+        self.assertEqual(chosen[0].name, "legacy")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1555,6 +1555,11 @@ class WorkspaceEndpoint:
     # 按模型维度统计: {"model_name": {"input_tokens": int, "output_tokens": int, "cache_creation_tokens": int, "cache_read_tokens": int, "requests": int}}
     model_stats: dict = field(default_factory=dict, repr=False)
 
+    # HTML 软熔断窗口（P1.3：三条 proxy 统一）。上游返 HTML 时短时跳过该 endpoint，
+    # 30s 到期即脱敏；不动 total_errors / circuit_open，语义与 CopilotEndpoint 对齐。
+    html_soft_cooldown_until: float = field(default=0.0, repr=False)
+    upstream_html_events_total: int = field(default=0, repr=False)
+
 
 @dataclass
 class AzureOpenAIEndpoint:
@@ -1587,6 +1592,10 @@ class AzureOpenAIEndpoint:
     successful_requests: int = field(default=0, repr=False)
     model_stats: dict = field(default_factory=dict, repr=False)
 
+    # HTML 软熔断窗口（P1.3：三条 proxy 统一，语义同 WorkspaceEndpoint / CopilotEndpoint）
+    html_soft_cooldown_until: float = field(default=0.0, repr=False)
+    upstream_html_events_total: int = field(default=0, repr=False)
+
 
 # ==================== GitHub Copilot 常量 ====================
 # 模仿 VS Code Copilot Chat 扩展的请求头；GitHub 上游会校验这些头，请勿删除。
@@ -1611,7 +1620,9 @@ COPILOT_HEADERS = {
 # 加入软熔断池 N 秒（默认 30s），期间 `_select_endpoint` 优先跳过它。0 = 关闭该
 # 功能（回到旧行为）。相比硬熔断：不清 total_errors 也不置 circuit_open，30s 到
 # 期即自动脱敏，比 circuit_breaker_timeout (60s+) 更适合 CDN 抖动场景。
+# P1.3 起：三条 proxy（Copilot / Databricks / Azure）共享同一 env 变量与语义。
 COPILOT_HTML_SOFT_COOLDOWN = float(os.getenv("COPILOT_HTML_SOFT_COOLDOWN", "30"))
+UPSTREAM_HTML_SOFT_COOLDOWN = COPILOT_HTML_SOFT_COOLDOWN  # provider-agnostic alias
 # VS Code Copilot 官方公开的 OAuth Client ID（device flow 用）
 COPILOT_CLIENT_ID = "Iv1.b507a08c87ecfe98"
 COPILOT_DEVICE_CODE_URL = "https://github.com/login/device/code"
@@ -2109,6 +2120,55 @@ def _retry_rejected_response(response, attempt, max_attempts):
             and not getattr(response, "headers", {}).get("Retry-After"))
 
 
+def _upstream_html_status_bucket(status: int) -> str:
+    """按上游 HTTP 状态分桶：200 (Cloudflare challenge) vs 4xx vs 5xx vs other，
+    分别对应完全不同的处理线索——展示在 metrics label 里给运维用。"""
+    if status == 200:
+        return "200"
+    if 400 <= status < 500:
+        return "4xx"
+    if 500 <= status < 600:
+        return "5xx"
+    return "other"
+
+
+def _note_upstream_html(proxy, endpoint, provider_label: str, api_type: str, status: int,
+                        upstream_ids: Optional[dict] = None) -> None:
+    """Provider-agnostic HTML 检测入口（P1.3：三条 proxy 统一）：
+    - 累加 proxy 与 endpoint 上的 `upstream_html_events_total` 计数
+    - 累加 `upstream_html_events_by_status[bucket]`（若 proxy 有该字段）
+    - 设置 `endpoint.html_soft_cooldown_until`（`UPSTREAM_HTML_SOFT_COOLDOWN=0` 则跳过）
+    - 打一行 `kind=<provider>_upstream_html` 结构化日志（带 upstream_ids 便于关联）
+    调用点使用 `getattr(..., default)` 兼容 endpoint 字段可能不存在的情况——
+    生产上三条 proxy 的 endpoint 都已加齐 html_soft_cooldown_until，但 defensive
+    default 让本函数在 legacy 配置下不会 raise。
+    """
+    if hasattr(proxy, "upstream_html_events_total"):
+        proxy.upstream_html_events_total = getattr(proxy, "upstream_html_events_total", 0) + 1
+    endpoint.upstream_html_events_total = getattr(endpoint, "upstream_html_events_total", 0) + 1
+    bucket = _upstream_html_status_bucket(status)
+    by_status = getattr(proxy, "upstream_html_events_by_status", None)
+    if by_status is not None:
+        by_status[bucket] = by_status.get(bucket, 0) + 1
+    cooldown = UPSTREAM_HTML_SOFT_COOLDOWN
+    if cooldown > 0 and hasattr(endpoint, "html_soft_cooldown_until"):
+        endpoint.html_soft_cooldown_until = time.time() + cooldown
+    ids_payload = upstream_ids or {}
+    logger.warning(
+        "[%s] upstream HTML response detected (endpoint=%s api=%s status=%s cooldown=%.1fs upstream_ids=%s)",
+        provider_label, endpoint.name, api_type, status, cooldown, ids_payload,
+        extra={
+            "kind": f"{provider_label.lower()}_upstream_html",
+            "endpoint": endpoint.name,
+            "provider": provider_label.lower(),
+            "api_type": api_type,
+            "upstream_status": status,
+            "html_soft_cooldown_seconds": cooldown,
+            "upstream_ids": ids_payload,
+        },
+    )
+
+
 @dataclass(eq=False)
 class RequestAttempt:
     """Per-admission identity; endpoint reference is excluded from repr/logging."""
@@ -2181,8 +2241,18 @@ class LoadBalancer:
             raise RuntimeError("Explicit request attempt required for concurrent completion")
         return attempts[0]
 
+    @staticmethod
+    def _prefer_html_fresh(candidates: list) -> list:
+        """P1.3: 优先选未在 HTML 软熔断窗口内的 endpoint；全部命中冷却时
+        降级返回原候选（保可用性，让 _apply_html_cooldown 刷新窗口）。"""
+        if not candidates:
+            return candidates
+        now = time.time()
+        fresh = [ep for ep in candidates if getattr(ep, "html_soft_cooldown_until", 0.0) <= now]
+        return fresh if fresh else candidates
+
     def select_endpoint(self) -> Optional[WorkspaceEndpoint]:
-        available = self.get_available_endpoints()
+        available = self._prefer_html_fresh(self.get_available_endpoints())
         if not available:
             logger.error("No available endpoints!")
             return None
@@ -2222,9 +2292,10 @@ class LoadBalancer:
             return random.choices(available, weights=weights, k=1)[0]
 
     def select_endpoint_for_model(self, model: str):
-        """从可用端点中筛选支持指定模型的端点，再按策略选择"""
+        """从可用端点中筛选支持指定模型的端点，再按策略选择。
+        P1.3: HTML 软熔断优先跳过；全冷却时降级到"最小活跃"（同 CopilotProxy._select_endpoint 语义）。"""
         available = self.get_available_endpoints()
-        matched = [ep for ep in available if model in ep.deployments]
+        matched = self._prefer_html_fresh([ep for ep in available if model in ep.deployments])
         if not matched:
             return None
 
@@ -2365,6 +2436,9 @@ class ClaudeProxy:
         self.global_stats = GlobalStats()
         self.today_model_stats: dict = {}
         self.today_date: str = date.today().isoformat()
+        # P1.3: HTML soft cooldown counters（与 CopilotProxy 对齐）
+        self.upstream_html_events_total = 0
+        self.upstream_html_events_by_status: Dict[str, int] = {}
 
     def _record_usage(self, endpoint: WorkspaceEndpoint, model: str, input_tokens: int, output_tokens: int, elapsed: float,
                       cache_creation_tokens: int = 0, cache_read_tokens: int = 0):
@@ -2576,7 +2650,17 @@ class ClaudeProxy:
                         body_text = e.response.text
                     except Exception:
                         body_text = ""
-                    error_body = _build_upstream_error_detail(e.response.status_code, body_text, "Databricks", endpoint.name)
+                    upstream_ct = e.response.headers.get("content-type", "")
+                    upstream_hdrs = e.response.headers
+                    error_body = _build_upstream_error_detail(
+                        e.response.status_code, body_text, "Databricks", endpoint.name,
+                        content_type=upstream_ct, upstream_headers=upstream_hdrs,
+                    )
+                    # P1.3: HTML 检测触发软熔断 + 结构化日志
+                    if error_body.get("error", {}).get("code") == "upstream_html_error":
+                        ids = error_body["error"].get("upstream_ids") or {}
+                        _note_upstream_html(self, endpoint, "Databricks", "messages",
+                                            e.response.status_code, upstream_ids=ids)
                     logger.error(f"Request failed with {e.response.status_code}: {json.dumps(error_body, ensure_ascii=False)[:500]}")
                     raise HTTPException(status_code=e.response.status_code, detail=error_body,
                                         headers={"Retry-After": e.response.headers["Retry-After"]} if "Retry-After" in e.response.headers else None)
@@ -2672,6 +2756,7 @@ class ClaudeProxy:
                         # 429 rate limit 也触发熔断
                         is_client_error = 400 <= response.status_code < 500 and response.status_code not in (401, 403, 429)
 
+                        upstream_ct = response.headers.get("content-type", "")
                         try:
                             error_json = json.loads(error_body)
                             error_msg = error_json.get('message', 'Request failed')
@@ -2679,6 +2764,17 @@ class ClaudeProxy:
                         except Exception:
                             error_msg = error_body.decode('utf-8') if isinstance(error_body, bytes) else str(error_body)
                             logger.error(f"Stream request failed ({response.status_code}): {error_msg}")
+
+                        # P1.3: 用 _build_upstream_error_detail 复用 HTML 识别通道，然后
+                        # 只把 upstream_html_error 触发软熔断（不改 event: error 帧的 shape）
+                        _detail_probe = _build_upstream_error_detail(
+                            response.status_code, error_msg, "Databricks", current_endpoint.name,
+                            content_type=upstream_ct, upstream_headers=response.headers,
+                        )
+                        if _detail_probe.get("error", {}).get("code") == "upstream_html_error":
+                            ids = _detail_probe["error"].get("upstream_ids") or {}
+                            _note_upstream_html(proxy_self, current_endpoint, "Databricks", "messages",
+                                                response.status_code, upstream_ids=ids)
 
                         await end_current_request(success=False, is_client_error=is_client_error)
 
@@ -2819,6 +2915,9 @@ class AzureOpenAIProxy:
             http2=False,
         )
         self.global_stats = GlobalStats()
+        # P1.3: HTML soft cooldown counters（与 CopilotProxy 对齐）
+        self.upstream_html_events_total = 0
+        self.upstream_html_events_by_status: Dict[str, int] = {}
 
     def verify_api_key(self, key: str) -> bool:
         return key == self.api_key
@@ -2939,9 +3038,16 @@ class AzureOpenAIProxy:
                     body_text = e.response.text
                 except Exception:
                     body_text = ""
+                upstream_ct = e.response.headers.get("content-type", "") if e.response is not None else ""
+                upstream_hdrs = e.response.headers if e.response is not None else None
                 error_body = _build_upstream_error_detail(
-                    status, body_text, "Azure OpenAI", endpoint.name
+                    status, body_text, "Azure OpenAI", endpoint.name,
+                    content_type=upstream_ct, upstream_headers=upstream_hdrs,
                 )
+                # P1.3: HTML 检测触发软熔断（Azure 侧）
+                if error_body.get("error", {}).get("code") == "upstream_html_error":
+                    ids = error_body["error"].get("upstream_ids") or {}
+                    _note_upstream_html(self, endpoint, "Azure", api_type, status, upstream_ids=ids)
                 raise HTTPException(status_code=status, detail=error_body,
                                     headers={"Retry-After": e.response.headers["Retry-After"]} if "Retry-After" in e.response.headers else None)
             except Exception as e:
@@ -3041,11 +3147,18 @@ class AzureOpenAIProxy:
                             error_text = error_body.decode("utf-8") if isinstance(error_body, bytes) else str(error_body)
                         except Exception:
                             error_text = ""
+                        upstream_ct = response.headers.get("content-type", "")
                         upstream_detail = _build_upstream_error_detail(
-                            response.status_code, error_text, "Azure OpenAI", current_endpoint.name
+                            response.status_code, error_text, "Azure OpenAI", current_endpoint.name,
+                            content_type=upstream_ct, upstream_headers=response.headers,
                         )
                         log_snippet = error_text[:300].replace("\n", " ") if error_text else ""
                         is_html = upstream_detail.get("error", {}).get("code") == "upstream_html_error"
+                        # P1.3: HTML 检测触发软熔断（Azure stream 侧）
+                        if is_html:
+                            ids = upstream_detail["error"].get("upstream_ids") or {}
+                            _note_upstream_html(proxy_self, current_endpoint, "Azure", api_type,
+                                                response.status_code, upstream_ids=ids)
                         logger.error(
                             f"Azure stream failed ({response.status_code}, "
                             f"{'HTML error page' if is_html else 'JSON/text'}): {log_snippet}"
@@ -4103,42 +4216,8 @@ class CopilotProxy:
 
     def _apply_html_cooldown(self, endpoint: CopilotEndpoint, api_type: str, status: int,
                               upstream_ids: Optional[dict] = None) -> None:
-        """检测到 HTML 响应时统一入口：累加计数器 + 设置软熔断窗口 + 结构化日志。
-
-        - 累加全局 `upstream_html_events_total` 与 per-endpoint 计数（供 /metrics）
-        - `endpoint.html_soft_cooldown_until = now + COPILOT_HTML_SOFT_COOLDOWN`（0 = 关闭）
-        - 打一行 `kind=copilot_upstream_html` 结构化日志，带 upstream_ids 便于 Kusto 检索
-        """
-        self.upstream_html_events_total += 1
-        endpoint.upstream_html_events_total += 1
-        # 按上游 HTTP 状态分桶：200 (Cloudflare challenge) vs 4xx (拒绝) vs 5xx (上游错) 完全不同的处理线索
-        if status == 200:
-            bucket = "200"
-        elif 400 <= status < 500:
-            bucket = "4xx"
-        elif 500 <= status < 600:
-            bucket = "5xx"
-        else:
-            bucket = "other"
-        self.upstream_html_events_by_status[bucket] = (
-            self.upstream_html_events_by_status.get(bucket, 0) + 1
-        )
-        cooldown = COPILOT_HTML_SOFT_COOLDOWN
-        if cooldown > 0:
-            endpoint.html_soft_cooldown_until = time.time() + cooldown
-        ids_payload = upstream_ids or {}
-        logger.warning(
-            "[Copilot] upstream HTML response detected (endpoint=%s api=%s status=%s cooldown=%.1fs upstream_ids=%s)",
-            endpoint.name, api_type, status, cooldown, ids_payload,
-            extra={
-                "kind": "copilot_upstream_html",
-                "endpoint": endpoint.name,
-                "api_type": api_type,
-                "upstream_status": status,
-                "html_soft_cooldown_seconds": cooldown,
-                "upstream_ids": ids_payload,
-            },
-        )
+        """Thin wrapper：Copilot 侧沿用旧签名，实际逻辑委托给 module-level 助手。"""
+        _note_upstream_html(self, endpoint, "copilot", api_type, status, upstream_ids)
 
     def can_handle(self, model: str, api_type: Optional[str] = None) -> bool:
         """是否有任何健康端点可服务该模型（路由层用来决定是否优先 Copilot）"""
@@ -6678,6 +6757,7 @@ async def metrics():
     # Databricks
     if proxy:
         db_circuit, db_active, db_req, db_err, db_in, db_out = [], [], [], [], [], []
+        db_html, db_cd, db_cd_rem = [], [], []
         for ep in proxy.load_balancer.endpoints:
             lbl = f'endpoint="{ep.name}"'
             db_circuit.append(f'databricks_endpoint_circuit_open{{{lbl}}} {1 if ep.circuit_open else 0}')
@@ -6686,26 +6766,49 @@ async def metrics():
             db_err.append(f'databricks_endpoint_errors_total{{{lbl}}} {ep.total_errors}')
             db_in.append(f'databricks_endpoint_input_tokens_total{{{lbl}}} {ep.total_input_tokens}')
             db_out.append(f'databricks_endpoint_output_tokens_total{{{lbl}}} {ep.total_output_tokens}')
+            db_html.append(f'databricks_upstream_html_events_total{{{lbl}}} {ep.upstream_html_events_total}')
+            in_cooldown = 1 if ep.html_soft_cooldown_until > now else 0
+            db_cd.append(f'databricks_html_soft_cooldown_active{{{lbl}}} {in_cooldown}')
+            db_cd_rem.append(f'databricks_html_soft_cooldown_remaining_seconds{{{lbl}}} {max(0, ep.html_soft_cooldown_until - now)}')
         emit("databricks_endpoint_circuit_open", "1 if Databricks endpoint circuit open", "gauge", db_circuit)
         emit("databricks_endpoint_active_requests", "In-flight requests", "gauge", db_active)
         emit("databricks_endpoint_requests_total", "Total requests", "counter", db_req)
         emit("databricks_endpoint_errors_total", "Total errors", "counter", db_err)
         emit("databricks_endpoint_input_tokens_total", "Cumulative input tokens", "counter", db_in)
         emit("databricks_endpoint_output_tokens_total", "Cumulative output tokens", "counter", db_out)
+        emit("databricks_upstream_html_events_total",
+             "Times upstream returned HTML page per Databricks endpoint (P1.3 provider-agnostic HTML cooldown)",
+             "counter", db_html)
+        emit("databricks_html_soft_cooldown_active",
+             "1 if Databricks endpoint is currently in HTML soft-cooldown window", "gauge", db_cd)
+        emit("databricks_html_soft_cooldown_remaining_seconds",
+             "Remaining seconds before Databricks endpoint exits HTML soft cooldown", "gauge", db_cd_rem)
 
     # Azure
     if azure_proxy:
         az_circuit, az_active, az_req, az_err = [], [], [], []
+        az_html, az_cd, az_cd_rem = [], [], []
         for ep in azure_proxy.load_balancer.endpoints:
             lbl = f'endpoint="{ep.name}"'
             az_circuit.append(f'azure_openai_endpoint_circuit_open{{{lbl}}} {1 if ep.circuit_open else 0}')
             az_active.append(f'azure_openai_endpoint_active_requests{{{lbl}}} {ep.active_requests}')
             az_req.append(f'azure_openai_endpoint_requests_total{{{lbl}}} {ep.total_requests}')
             az_err.append(f'azure_openai_endpoint_errors_total{{{lbl}}} {ep.total_errors}')
+            az_html.append(f'azure_openai_upstream_html_events_total{{{lbl}}} {ep.upstream_html_events_total}')
+            in_cooldown = 1 if ep.html_soft_cooldown_until > now else 0
+            az_cd.append(f'azure_openai_html_soft_cooldown_active{{{lbl}}} {in_cooldown}')
+            az_cd_rem.append(f'azure_openai_html_soft_cooldown_remaining_seconds{{{lbl}}} {max(0, ep.html_soft_cooldown_until - now)}')
         emit("azure_openai_endpoint_circuit_open", "1 if Azure OpenAI endpoint circuit open", "gauge", az_circuit)
         emit("azure_openai_endpoint_active_requests", "In-flight requests", "gauge", az_active)
         emit("azure_openai_endpoint_requests_total", "Total requests", "counter", az_req)
         emit("azure_openai_endpoint_errors_total", "Total errors", "counter", az_err)
+        emit("azure_openai_upstream_html_events_total",
+             "Times upstream returned HTML page per Azure endpoint (P1.3 provider-agnostic HTML cooldown)",
+             "counter", az_html)
+        emit("azure_openai_html_soft_cooldown_active",
+             "1 if Azure endpoint is currently in HTML soft-cooldown window", "gauge", az_cd)
+        emit("azure_openai_html_soft_cooldown_remaining_seconds",
+             "Remaining seconds before Azure endpoint exits HTML soft cooldown", "gauge", az_cd_rem)
 
     for provider, instance in (("copilot", copilot_proxy), ("azure_openai", azure_proxy), ("databricks", proxy)):
         if not instance:
