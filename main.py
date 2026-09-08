@@ -3483,10 +3483,11 @@ class CopilotProxy:
     # Idle keepalive lifetime affects reuse, not ownership of active responses.
     # Preserve the deployed default; pool wait alone cannot justify tuning it.
     POOL_KEEPALIVE_EXPIRY = float(os.getenv("COPILOT_POOL_KEEPALIVE_EXPIRY", "90"))
-    # HTTP/2 opt-in：Copilot 的 `api.githubcopilot.com` 支持 h2，一条 TCP 连接能承载
-    # 上百条并发 stream，能把"新建连接"这一步的压力几乎归零；但需要 `h2` 包。默认
-    # 关闭以避免未装 h2 时启动 crash——设 `COPILOT_HTTP2=true` 且已装 `h2` 即启用。
-    _http2_env = os.getenv("COPILOT_HTTP2", "").strip().lower()
+    # HTTP/2 默认启用（P2.6）：Copilot 的 `api.githubcopilot.com` 支持 h2，一条 TCP
+    # 连接能承载上百条并发 stream，把"新建连接"这一步的压力几乎归零。requirements.txt
+    # 已固定 `h2>=4.0.0` 依赖；旧镜像 / 手工装环境如缺 h2 会 ERROR 日志 + 自动 HTTP/1.1
+    # 降级，不会 crash。运维显式关闭走 `COPILOT_HTTP2=false`。
+    _http2_env = os.getenv("COPILOT_HTTP2", "true").strip().lower()
     HTTP2_REQUESTED = _http2_env in ("1", "true", "yes", "on")
     try:
         import h2 as _h2_pkg  # noqa: F401 - detection only
@@ -3556,7 +3557,7 @@ class CopilotProxy:
             )
         else:
             logger.info(
-                "[Copilot] HTTP/1.1 (h2 pkg %s). Set COPILOT_HTTP2=true to opt into HTTP/2.",
+                "[Copilot] HTTP/1.1 (h2 pkg %s). COPILOT_HTTP2=false or explicit opt-out — flip to true or omit to use HTTP/2.",
                 "available" if self.H2_PACKAGE_AVAILABLE else "not installed",
             )
         # 最近一次成功握手谈成的协议版本。首个成功请求（warmup HEAD /models 或首个

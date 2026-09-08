@@ -1,6 +1,9 @@
 fastapi>=0.100.0
 uvicorn>=0.23.0
 httpx>=0.24.0
+# HTTP/2 支持：一条 TCP 连接承载几百条并发 stream，大幅降低 pool 争用。默认启用
+# （COPILOT_HTTP2=false 可关闭）；未装该包时代码自动降级 HTTP/1.1 并打 ERROR 日志。
+h2>=4.0.0
 pyyaml>=6.0
 # 图片自动压缩（>200KB 的 base64 image 缩到 ≤1280px JPEG，避开 ADB 4MB / GHCP 上游 limit）
 Pillow>=10.0.0
