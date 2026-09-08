@@ -40,3 +40,29 @@ jobs:
         # 会全局替换 root logger handler 破坏 caplog（详见 tests/fixtures/revision2/conftest.py）
         run: |
           python -m pytest tests/ -q --tb=short
+
+  docker-smoke:
+    # 防"拆模块 vs 改 Dockerfile 脱钩"回归：镜像必须能 import main。
+    # 2026-09-08 lb-dockerfile-gap 教训：refactor 拆出 usage_store.py /
+    # otel_setup.py / dashboard.html 后 Dockerfile 忘了同步 COPY，只 COPY main.py
+    # → 生产 CrashLoopBackOff（ModuleNotFoundError: usage_store）。
+    # 这一步只跑一次，Python 版本无关，用最新稳定即可。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t lb-smoke .
+      - name: Import smoke — module & runtime assets present
+        run: |
+          docker run --rm --entrypoint sh lb-smoke -c '
+            set -e
+            cd /app
+            # 首先所有已拆模块/资源必须都在镜像里
+            for f in main.py usage_store.py otel_setup.py dashboard.html; do
+              [ -f "$f" ] || { echo "MISSING: $f"; exit 1; }
+            done
+            # 其次 main.py 顶层能 import，OSErr 不降级隐藏
+            python -c "import main; print(\"import OK: main.py\")"
+            python -c "import usage_store; print(\"import OK: usage_store\")"
+            python -c "import otel_setup; print(\"import OK: otel_setup\")"
+          '
