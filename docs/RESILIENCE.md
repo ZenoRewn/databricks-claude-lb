@@ -142,6 +142,90 @@ that records truncation but does not trip the endpoint. Do not silently select
 an arbitrary body-size cutoff, suppress all EOF failures, or blacklist request
 fingerprints/prompts. VS Code and Mac client equivalence is unverified.
 
+## Multi-replica semantics
+
+What is and is not safe when `replicas > 1`. This section exists because the
+intuitive worry is the wrong one, and acting on it blocks a real fix.
+
+### Copilot opaque state is NOT process-affine
+
+A recurring misreading is that a Codex session is pinned to an LB process, so a
+second replica would cause `input item does not belong to this connection`. It
+would not. The LB holds **no cross-request session state for Copilot**:
+
+- `CopilotProxy._request_has_opaque_state(body, api_type)` is a `@staticmethod`
+  that inspects only the request body (`previous_response_id`, or any
+  `input[*].encrypted_content`). It reads nothing process-local.
+- `pinned_endpoint` in `_proxy` is a local variable. It constrains endpoint
+  switching **within one HTTP request's retries** and is discarded on return.
+- There is no `response_id → endpoint` map anywhere in the codebase.
+- Measured 2026-09-08: force-refreshing an endpoint's session token
+  (`POST /admin/copilot/reload`) does **not** invalidate previously minted
+  `encrypted_content` — the state is bound to the **account**, not to the
+  session token and not to the process. GHCP additionally rejects
+  `previous_response_id` outright (HTTP 400 `previous_response_id is not
+  supported`), so `encrypted_content` is the only opaque-state channel in play.
+
+Consequence: **with a single Copilot account, any replica can serve any turn.**
+Routing is replica-agnostic.
+
+**With two or more Copilot accounts this changes.** `least_requests` would split
+consecutive turns of one conversation across accounts, and cross-account
+`encrypted_content` returns 401. Replicas share no memory, so the fix must be
+*stateless and deterministic* — e.g. a consistent hash over a stable session key
+so every replica maps a given conversation to the same account. This is a
+**prerequisite for adding a second Copilot account**, independent of replica
+count (it is already a latent issue at `replicas=1` for the same reason). Not
+implemented; `copilot_stateful_request_pinned_total{reason}` staying at 0 is
+consistent with single-account operation.
+
+### The real blocker was usage persistence
+
+`UsageDataStore` accumulates the running day total in `_today_cache` (seeded
+from the backend by `_load_day` at startup) and flushes every 30s. Persisting
+that *cumulative* value is only correct for a single writer:
+
+- Two replicas load the same starting point, each accumulate their own share,
+  and each overwrite the row with `starting_point + own_share`. Whichever
+  flushes last wins; the other replica's tokens are permanently lost. With a
+  30s flush cycle this repeats indefinitely, so the stored day total collapses
+  to roughly one replica's private view.
+
+Fixed by splitting the persistence hook:
+
+- `UsageDataStore._save_day_delta(d, delta, cumulative)` — `delta` carries only
+  the current flush batch. The default implementation writes `cumulative` via
+  `_save_day`, i.e. the original single-writer whole-day overwrite.
+- `MysqlUsageStore` overrides it and writes `delta` with
+  `col = col + VALUES(col)`, so InnoDB accumulates under the row lock and the
+  stored row equals the sum across all replicas.
+- `JsonUsageStore` keeps the default path. A file cannot be incremented
+  atomically across processes, so **the JSON backend is single-replica only,
+  permanently.** Multi-replica requires `usage_storage.type: mysql`.
+
+Regression guard: `tests/test_usage_store.py::test_two_writers_sum_instead_of_clobber`
+simulates two writers from a shared starting point and asserts the persisted
+deltas sum to the true total. It fails against the overwrite implementation.
+
+Secondary benefit at `replicas=1`: under the old scheme a transient `_load_day`
+returning empty would let `_flush` rebuild the cache from zero and overwrite the
+whole day row with just that batch. Delta writes have no such path.
+
+### Still per-process under multiple replicas
+
+These are per-process by design and are *degraded observability*, not
+correctness bugs — but they will surprise anyone reading a dashboard:
+
+| State | Multi-replica behaviour |
+|---|---|
+| `GlobalStats`, `ClaudeProxy.today_model_stats` | Each replica counts only its own traffic. `/stats` and the dashboard reflect whichever pod the request landed on, not the fleet. Prometheus scrapes every pod, so `/metrics` aggregates correctly — trust `/metrics`, not `/stats`, once `replicas > 1`. |
+| Circuit breaker state (`circuit_open`, HALF_OPEN leases) | Each replica learns endpoint health independently. A dead endpoint trips N times instead of once; admission fairness holds per replica. |
+| Copilot session token cache | N replicas perform N token exchanges. Harmless but multiplies calls to `copilot_internal/v2/token`; the background refresh interval applies per replica. |
+| HTML soft cooldown | Per replica; one pod's cooldown does not steer another pod away. |
+
+Deployment-side preconditions and the exact `RollingUpdate` block are documented
+in `deploy/k8s/deployment.yaml`; live-vs-repo drift is in `docs/AKS.md`.
+
 ## Tests and review gate
 
 New tests cover time-controlled 100-contender HALF_OPEN admission, stale results,

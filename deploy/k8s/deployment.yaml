@@ -10,9 +10,39 @@ spec:
   replicas: 1
   # ReadWriteOnce PVC 与 RollingUpdate 不兼容（旧 Pod 持有 PVC，新 Pod 无法挂）
   # → Recreate strategy 短暂 downtime（~10s）但安全
-  # 若改用 MySQL 后端 + 去掉 PVC，可改回 RollingUpdate
   strategy:
     type: Recreate
+  # ─── 零断服变体（MySQL 后端）────────────────────────────────────────────
+  # 本文件默认配套 usage_data_dir（JSON 文件后端）+ RWO PVC，因此只能 Recreate。
+  # 想消除发布断服窗口，前置条件有三条，缺一不可：
+  #
+  #   1) usage_storage.type: mysql（ConfigMap 里换掉 usage_data_dir），
+  #      并从本文件删掉 usage-data volume/volumeMount 与 pvc.yaml
+  #   2) usage_store.py 的增量 upsert 已合入 —— MysqlUsageStore._save_day_delta
+  #      走 `col = col + VALUES(col)`。**这是硬前置**：老的绝对覆盖写法下，
+  #      两个 Pod 各自持有当天累计并每 30s 互相覆盖，用量/成本会静默丢失
+  #      （回归测试 tests/test_usage_store.py::test_two_writers_sum_instead_of_clobber）
+  #   3) 只有 1 个 GitHub Copilot 账户，或已实现跨副本确定性路由。
+  #      LB 对 Copilot **无跨请求进程态**（详见 docs/RESILIENCE.md「多副本语义」），
+  #      单账户下任意副本都能接任意一轮；多账户时 least_requests 会把同一会话的
+  #      不同轮分到不同账户，encrypted_content 跨账户即 401
+  #
+  # ⚠️ 一次性迁移注意：引入增量 upsert 的**那一次**发布不要让新旧代码并存。
+  #    旧代码写「当天累计绝对值」、新代码写增量，两者同时在跑时旧 Pod 的绝对
+  #    写会把新 Pod 已累加的量冲掉。当前的 Recreate（以及 live 的
+  #    maxSurge=0）天然无重叠窗口，所以按现状发布是安全的；等两边都是新代码
+  #    之后再切 maxSurge=1。
+  #
+  # 三条都满足后，把上面的 strategy 换成：
+  #
+  #   strategy:
+  #     type: RollingUpdate
+  #     rollingUpdate:
+  #       maxSurge: 1
+  #       maxUnavailable: 0     # 新 Pod Ready 后才杀旧 Pod → 零可用窗口消失
+  #
+  # 并把 replicas 提到 2、追加 PDB（minAvailable: 1）到 kustomization.yaml。
+  # ────────────────────────────────────────────────────────────────────────
   selector:
     matchLabels:
       app: claude-lb
@@ -109,6 +139,19 @@ spec:
               port: http
             failureThreshold: 30
             periodSeconds: 2
+          # SSE 长流排空：SIGTERM 一到 kubelet 就把 Pod 从 Service endpoints 摘掉，
+          # 但 iptables/ingress 的规则更新是异步的，且此刻仍有进行中的 streaming
+          # 响应（thinking + 长输出可以跑好几分钟）。preStop 先睡一会儿，让
+          #   a) endpoints 变更传播完，新连接不再进来
+          #   b) 已建立的流有时间自然结束
+          # 之后 SIGTERM 才发给 uvicorn，触发它的 graceful shutdown。
+          # 时间预算：preStop 15s + uvicorn --timeout-graceful-shutdown 30s = 45s
+          # < terminationGracePeriodSeconds 60s，不会被 SIGKILL 截断。
+          # 注意 preStop 超时不单独计时，它占用的是 grace period 的额度。
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "15"]
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false   # tini 需要 /tmp，可以收紧后再开 RO root
@@ -121,6 +164,16 @@ spec:
             items:
               - key: config.yaml
                 path: config.yaml
+        # ⚠️ 名字有歧义：本仓库以 `claude-lb-copilot-cache` 为准（与
+        # secret.example.yaml 一致，key 必须是 copilot-auth-<endpoint-name>.json，
+        # 否则 resolve_github_token() 找不到文件）。但 live 集群 zeno-apps 里存在的
+        # 是另一个名字 `claude-lb-copilot-auth`，且当前**没有被任何卷引用**。
+        # 那个 secret 的 key 是否是 copilot-auth-gh-account-1.json **未经核实**，
+        # 所以不要凭名字直接改这里去挂它 —— 先验证 key：
+        #   kubectl -n zeno-apps get secret claude-lb-copilot-auth \
+        #     -o jsonpath='{range $k,$v := .data}{$k}{"\n"}{end}'
+        # key 对得上就把下面 secretName 改成它；对不上就按 secret.example.yaml
+        # 重新生成一个 claude-lb-copilot-cache。详见 docs/AKS.md「live 与 repo 漂移」。
         - name: copilot-cache
           secret:
             secretName: claude-lb-copilot-cache

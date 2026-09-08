@@ -4,6 +4,59 @@
 
 ---
 
+## 🚨 红线：禁止 `kubectl apply -f deploy/k8s/`
+
+**本仓库的 manifest 描述的是「设计目标形态」，不是现网 live 形态。二者已结构性偏离，盲 apply 会打挂服务。**
+
+具体后果：
+
+| 盲 apply 的动作 | 后果 |
+|---|---|
+| 覆盖 ConfigMap | repo 里敏感字段是 `${DATABRICKS_TOKEN_*}` 占位符，而 live Deployment 的 `envFrom` 是空的 → 占位符无处展开 → `expand_env_vars()` 拿到字面量 `${...}` 当 token → **9 个 Databricks endpoint 全部 401** |
+| 覆盖 Deployment | config 挂载点从 live 的 `/app/config.yaml` 变成 repo 的 `/etc/claude-lb`，同时 `CONFIG_PATH` 被设成 `/etc/claude-lb/config.yaml` —— 二者自洽，但若只 apply 了 ConfigMap 没 apply Deployment（或反之）就找不到配置文件 |
+| 创建 PVC + usage-data 卷 | live 走的是 MySQL 后端（`usage_storage.type: mysql`），凭空多一个 RWO PVC 且 `Recreate` 策略被带回 |
+| 挂 copilot-cache | live 里那个 secret 叫 `claude-lb-copilot-auth` 而不是 repo 的 `claude-lb-copilot-cache`，直接 apply 会因 secret 不存在而 Pod Pending |
+
+### live 与 repo 漂移对照
+
+> 数据来源：2026-09-08 在有集群网络的机器上实测（本项目 repo 侧无法直连 —— 集群是私有 AKS，API server 在 privatelink 内网，外部机器 DNS 解析不到）。
+
+| 项 | repo（本仓库） | live（zeno-apps/claude-lb） |
+|---|---|---|
+| ConfigMap 敏感字段 | `${LB_API_KEY}` / `${DATABRICKS_TOKEN_*}` 占位符 | ❌ **16 个字段明文**（LB key、9 ADB PAT、4 Azure key、MySQL 密码、GH token） |
+| `envFrom` | `secretRef: claude-lb-secrets` | ❌ 空；`claude-lb-secrets` 不存在 |
+| config 挂载点 | `/etc/claude-lb`（配 `CONFIG_PATH`） | `/app/config.yaml`（未设 `CONFIG_PATH`，靠默认值恰好匹配） |
+| usage 存储 | `usage_data_dir` + RWO PVC | `usage_storage.type: mysql`，**无 PVC** |
+| copilot-cache 卷 | `secret/claude-lb-copilot-cache`，挂 `/home/app/.config/databricks-claude-lb` | ❌ 未挂载；namespace 里另有 `secret/claude-lb-copilot-auth` 但无卷引用 |
+| 发布策略 | `Recreate`（RWO PVC 所致） | `RollingUpdate` + `maxUnavailable=1` / `maxSurge=0`（等价于先杀后拉，**同样零可用**） |
+| preStop / grace | `sleep 15` / 60s | ❌ 无 preStop / 30s |
+| PDB / HPA | 无（单副本不需要） | 无 |
+| live 独有 env | — | `COPILOT_STREAM_HIGH_WATERMARK` / `_OVERLOAD_GRACE` / `_DISCONNECT_GRACE` / `_MONITOR_INTERVAL` / `IMG_MAX_COUNT` |
+
+### 收敛步骤（需在有集群网络的机器上执行，动的是认证路径，务必留回滚锚点）
+
+1. **记回滚锚点**：`kubectl -n zeno-apps get deploy claude-lb -o yaml > /tmp/rollback-deploy.yaml`，同时记下当前镜像 digest
+2. **建 Secret**：从 live ConfigMap 提出那 16 个值生成 `claude-lb-secrets`（用 `--from-env-file` 走临时文件后立即 shred，避免值进 shell history）
+3. **核 copilot secret 的 key**（别凭名字猜）：
+   ```bash
+   kubectl -n zeno-apps get secret claude-lb-copilot-auth \
+     -o jsonpath='{range $k,$v := .data}{$k}{"\n"}{end}'
+   ```
+   key 必须是 `copilot-auth-gh-account-1.json`（= ConfigMap 里 endpoint 的 name）。不匹配就按 `deploy/k8s/secret.example.yaml` 重新生成
+4. **换 ConfigMap 为占位符版** + **Deployment 加 `envFrom`**，两者必须**同一次** rollout，中间不能有只改一半的中间态
+5. **验证不能只看 Ready**：`/health/ready` 200 + 启动日志 14 个 endpoint 全载（9 ADB + 4 Azure + 1 Copilot）+ 真实推理各打一次。**缺任何一个 env 会让对应 endpoint 拿到字面量 `${...}` 而静默失败，Ready 仍是绿的**
+6. 顺带把挂载点对齐、挂上 copilot-cache、按需加 preStop
+
+### 关于「每次发布必然断服」
+
+live 的 `maxUnavailable=1 + maxSurge=0 + replicas=1` 与 repo 的 `Recreate` 效果相同：**先杀旧再拉新，中间零可用**。要真正消除这个窗口需要多副本，前置条件见 `deploy/k8s/deployment.yaml` 里「零断服变体」注释块与 `docs/RESILIENCE.md`「多副本语义」。
+
+**关键一点**：多副本的阻断项**不是** Copilot 会话亲和性 —— LB 对 Copilot 无跨请求进程态，单账户下任意副本都能接任意一轮。真正的阻断项是 usage 持久化的多写安全（已在 `usage_store.py` 改为增量 upsert 解决）。别把这两件事搞混而白等。
+
+短期不动副本数的话，加 preStop 至少能让进行中的 SSE 长流优雅排空，不再被硬断。
+
+---
+
 ## 整体架构
 
 ```
@@ -274,6 +327,37 @@ ContainerLogV2
 | extend p = parse_json(LogMessage)
 | where p.level == "WARNING" or p.level == "ERROR"
 | where p.message contains "[Copilot]"
+| project TimeGenerated, p.level, p.message
+```
+
+### OpenTelemetry tracing（默认镜像用不了，必须先重建镜像）
+
+`OTEL_ENABLED=true` **单独设进 Deployment 是无效的**。OTel 的 5 个依赖放在
+`requirements-otel.txt` 且**故意不在 `requirements.txt` 里**（tracing 默认关闭，
+不值得让所有部署都背上 protobuf/grpc 传递依赖），所以默认镜像里没有这些包。
+在这种镜像上打开开关只会在启动日志里留一条：
+
+```
+[OTel] OTEL_ENABLED=true but opentelemetry packages are missing (ModuleNotFoundError: ...). Tracing DISABLED.
+```
+
+然后静默继续跑，**没有 trace 但服务完全正常** —— 很容易被当成 collector 配错而往
+错方向排查。要真正启用：
+
+```dockerfile
+# Dockerfile 里 `RUN pip install -r requirements.txt` 之后追加
+COPY requirements-otel.txt .
+RUN pip install --no-cache-dir -r requirements-otel.txt
+```
+
+重建 + push 镜像，再设 `OTEL_ENABLED=true` 与 `OTEL_EXPORTER_OTLP_ENDPOINT`。
+排查用这条 KQL 确认到底是缺包还是 collector 不通：
+
+```kusto
+ContainerLogV2
+| where PodName startswith "claude-lb-"
+| extend p = parse_json(LogMessage)
+| where p.message startswith "[OTel]"
 | project TimeGenerated, p.level, p.message
 ```
 

@@ -66,3 +66,28 @@ jobs:
             python -c "import usage_store; print(\"import OK: usage_store\")"
             python -c "import otel_setup; print(\"import OK: otel_setup\")"
           '
+
+      - name: Runtime asset integrity — dashboard is the real page, not the fallback
+        # 上一步只保证「文件在 + import 过」。dashboard.html 是 import 时读的，
+        # _load_dashboard_html() 的 except OSError 只抓打不开，抓不到「打开了但
+        # 内容被截断/损坏」——那种情况 /health/live 和 /health/ready 依然全绿，
+        # 只有人肉打开 dashboard 才会发现是空壳。这里用语义哨兵而不是只看长度，
+        # 因为长度阈值会被正常重构打破。
+        run: |
+          docker run --rm --entrypoint sh lb-smoke -c '
+            set -e
+            cd /app
+            python - <<PY
+          import main
+          h = main.DASHBOARD_HTML
+          assert "Dashboard unavailable" not in h, "dashboard degraded to fallback placeholder"
+          assert h.lstrip().startswith("<!DOCTYPE html>"), "dashboard missing doctype"
+          assert h.rstrip().endswith("</html>"), "dashboard truncated (no closing </html>)"
+          # 文件末尾的 bootstrap 段：截断时最先丢的就是它
+          assert "setInterval(refresh" in h, "dashboard bootstrap missing"
+          # 主题切换与 Chart.js 主题同步是核心交互，缺了说明内容不完整
+          assert "applyChartTheme" in h, "dashboard theme sync missing"
+          assert len(h) > 20000, f"dashboard suspiciously small: {len(h)} chars"
+          print(f"dashboard OK: {len(h)} chars")
+          PY
+          '

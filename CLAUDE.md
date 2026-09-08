@@ -170,7 +170,14 @@ Handoff §7.2 实证：同一 Responses opaque reasoning state（`previous_respo
   - `MysqlUsageStore`: MySQL 8.x 后端，`usage_daily` 表（`date, model` 联合主键），`aiomysql` 连接池
 - `create_usage_store(config)`: 工厂函数，根据配置创建对应后端实例
 - 内存缓冲 → 30 秒批量刷盘（零请求延迟影响）
-- 原子写入：JSON 用 temp file + `os.replace()`；MySQL 用 `INSERT ON DUPLICATE KEY UPDATE`
+- **落盘走 `_save_day_delta(d, delta, cumulative)` 钩子，`delta` 只含本批增量**：
+  - 基类默认实现写 `cumulative`（整天绝对覆盖）→ 单写者语义，`JsonUsageStore` 走这条
+  - `MysqlUsageStore` override 成 `col = col + VALUES(col)` 增量累加 → **多副本安全**
+  - 为什么必须这样：`_today_cache` 是当天累计，多个 Pod 各自从 `_load_day` 同一起点累加、每 30s 各自落盘；若写累计绝对值，两 Pod 互相覆盖，用量/成本静默丢失（回归测试 `tests/test_usage_store.py::test_two_writers_sum_instead_of_clobber`）
+  - **JSON 后端永远只能单副本**（文件无法跨进程原子累加）；多副本必须 `usage_storage.type: mysql`
+  - 不要在别处直接调 `_save_day` —— MySQL 后端上它是静默 no-op（该后端只 override delta 钩子）
+  - per-model `errors` 恒写 0（`models[m]` 无 errors 字段，只有 `totals` 有），已知缺口
+- 原子写入：JSON 用 temp file + `os.replace()`；MySQL 用 `INSERT ON DUPLICATE KEY UPDATE`（增量形式）
 - 服务重启自动恢复当天数据到 `GlobalStats` 及 `ClaudeProxy.today_model_stats`
 - `ClaudeProxy.today_model_stats` 缓存当天 per-model 累计（启动时从磁盘恢复 + 运行期 `_record_usage` 累加），跨 0 点自动重置；`/stats` 的 KPI `estimated_total_cost_usd` 与 Anthropic Models 表均以该字段为准，因此重启后 Est. Cost 仍会包含重启前的数据（与 Usage History 来源一致）。端点表格的 per-model `estimated_cost_usd` 保留为本次会话内的负载分布视图
 - 历史数据清理: 配置 `retention_days` 自动清理 + `DELETE /stats/history?keep_days=N` 手动清理 + Dashboard UI
@@ -197,6 +204,8 @@ Handoff §7.2 实证：同一 Responses opaque reasoning state（`previous_respo
 ### OpenTelemetry Tracing（opt-in）
 - 通过 `otel_setup.py` 提供，`setup_tracing(app)` 在 `lifespan` 里调用
 - 默认关闭：`OTEL_ENABLED=true` 才启用；未装 `opentelemetry-*` packages 时 log WARNING + 继续跑（graceful degrade）
+- **依赖在 `requirements-otel.txt`，故意不并入 `requirements.txt` → 默认镜像里没有这些包**。因此在 K8s 里只设 `OTEL_ENABLED=true` **不会生效**（打一条 WARNING 后静默禁用）；容器场景真实动作是把 `requirements-otel.txt` 并进 Dockerfile 重新构建镜像（该文件头部有确切的两行）。`otel_setup.py` 的 warning 文案同时给出 local 与 container 两条修法，不要只按 `pip install` 排查
+- 测试的 skip guard 必须检查**真实子模块**（`opentelemetry.sdk.trace` / `.instrumentation.fastapi` / `.instrumentation.httpx` …），不能只 `import opentelemetry` —— 那是 namespace package，装了任意一个 otel 发行包（如 `azure-monitor-opentelemetry` 传递带入的 `opentelemetry-api`）就 import 成功，导致「装了一部分包」的机器跳不过去、直接断言失败
 - Env 变量走标准 OTel 契约：`OTEL_SERVICE_NAME`、`OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_RESOURCE_ATTRIBUTES`
 - Auto-instruments FastAPI（server span per request）+ httpx（client span per upstream call）
 - 排除 `/health*` `/metrics` 减少高基数噪音
@@ -330,7 +339,7 @@ github_copilot:
 - `COPILOT_UPSTREAM_PROBE_TIMEOUT` / `COPILOT_UPSTREAM_PROBE_CACHE_TTL`
 
 **Observability (OpenTelemetry, opt-in)**
-- `OTEL_ENABLED`: 主开关（默认 `false`）—— 打开需要装 `opentelemetry-api opentelemetry-sdk opentelemetry-instrumentation-fastapi opentelemetry-instrumentation-httpx opentelemetry-exporter-otlp-proto-http`
+- `OTEL_ENABLED`: 主开关（默认 `false`）—— 打开需要 `pip install -r requirements-otel.txt`（5 个包）。**容器里默认镜像不含这些包，只设本变量无效**，须把该文件并进 Dockerfile 重建镜像
 - `OTEL_SERVICE_NAME`: 服务名（默认 `databricks-claude-lb`）
 - `OTEL_EXPORTER_OTLP_ENDPOINT`: OTLP collector 地址（如 `http://otel-col:4318`）；未设则用 `ConsoleSpanExporter`（本地调试）
 - `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_RESOURCE_ATTRIBUTES`: 标准 OTel 变量都自动生效
