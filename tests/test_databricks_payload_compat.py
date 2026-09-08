@@ -459,6 +459,53 @@ class LatencyHistogramTests(unittest.TestCase):
         self.assertEqual(len([l for l in text.splitlines() if not l.startswith("#")]), 0)
 
 
+class LBSettingsTests(unittest.TestCase):
+    """P2.3: LBSettings dataclass 集中所有 env vars."""
+
+    def test_default_values_match_documented(self):
+        # 显式在环境里清空这些 var，让 defaults 生效
+        import os
+        keys = [
+            "STREAM_HEARTBEAT_INTERVAL", "COPILOT_HTML_SOFT_COOLDOWN",
+            "COPILOT_POOL_ACQUIRE_TIMEOUT", "COPILOT_POOL_MAX_CONNECTIONS",
+            "COPILOT_STREAM_HIGH_WATERMARK", "COPILOT_HTTP2",
+            "IMG_COMPRESS_CONCURRENCY", "IMG_MAX_COUNT",
+        ]
+        saved = {k: os.environ.pop(k, None) for k in keys}
+        try:
+            s = main.LBSettings.load()
+            self.assertEqual(s.stream_heartbeat_interval, 15.0)
+            self.assertEqual(s.copilot_html_soft_cooldown, 30.0)
+            self.assertEqual(s.copilot_pool_acquire_timeout, 20.0)
+            self.assertEqual(s.copilot_pool_max_connections, 500)
+            self.assertEqual(s.copilot_stream_high_watermark, 400)
+            self.assertTrue(s.copilot_http2)  # P2.6 opt-out default
+            self.assertEqual(s.img_compress_concurrency, 2)
+            self.assertEqual(s.img_max_count, 50)
+        finally:
+            for k, v in saved.items():
+                if v is not None:
+                    os.environ[k] = v
+
+    def test_env_overrides_apply(self):
+        import os
+        os.environ["STREAM_HEARTBEAT_INTERVAL"] = "5.5"
+        try:
+            s = main.LBSettings.load()
+            self.assertEqual(s.stream_heartbeat_interval, 5.5)
+        finally:
+            os.environ.pop("STREAM_HEARTBEAT_INTERVAL", None)
+
+    def test_as_dict_is_json_serializable(self):
+        import json
+        s = main.LBSettings.load()
+        d = s.as_dict()
+        json.dumps(d)  # 不 raise 即证明所有字段都是 scalar
+        # 必须包含关键字段
+        self.assertIn("copilot_pool_acquire_timeout", d)
+        self.assertIn("stream_heartbeat_interval", d)
+
+
 class MultiTenantApiKeysTests(unittest.TestCase):
     """P3.2: auth.api_key (str) 与 auth.api_keys (dict) 都要注册到全局 map."""
 

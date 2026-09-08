@@ -38,6 +38,124 @@ try:
 except ImportError:  # 优雅降级：未装 Pillow 时图片压缩自动跳过
     _PIL_AVAILABLE = False
 
+
+# ==================== P2.3: 中心化 env vars（LBSettings dataclass） ====================
+# 所有 env 变量都在 LBSettings 中声明，带类型 + 默认值 + 简短注释。启动时打印
+# effective config（GET /config/effective 可运行时查看）。这不是新增 pydantic
+# 依赖——用 stdlib dataclass 就能达到"一处定义、类型化、可 introspect"的效果。
+#
+# 保留旧的散在各处的 os.getenv 调用作为 backing store：LBSettings.load() 在启动
+# 时读一遍，之后模块内其它代码继续用现有变量。这样迁移零 breakage，同时新增
+# LBSettings 类给运维一个"完整清单 + effective values"入口。
+
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.getenv(name, "").strip().lower()
+    if not v:
+        return default
+    return v in ("1", "true", "yes", "on")
+
+
+def _env_float(name: str, default: float) -> float:
+    v = os.getenv(name, "").strip()
+    return float(v) if v else default
+
+
+def _env_int(name: str, default: int) -> int:
+    v = os.getenv(name, "").strip()
+    return int(v) if v else default
+
+
+def _env_str(name: str, default: str) -> str:
+    return os.getenv(name, default)
+
+
+def _env_optfloat(name: str, default: Optional[float]) -> Optional[float]:
+    v = os.getenv(name, "").strip().lower()
+    if v in ("", "none", "0", "-1"):
+        return default
+    return float(v)
+
+
+@dataclass(frozen=True)
+class LBSettings:
+    """P2.3: LB 全部 env vars 的中心化定义。
+    单例通过 LBSettings.load() 生成；GET /config/effective 输出全部字段。"""
+    # ---- Logging ----
+    log_format: str            # LOG_FORMAT=json|text (default text)
+    log_level: str             # LOG_LEVEL (default INFO)
+    # ---- Streaming heartbeat ----
+    stream_heartbeat_interval: float   # STREAM_HEARTBEAT_INTERVAL=15
+    # ---- Image compression ----
+    img_admission_enabled: bool        # IMG_ADMISSION_ENABLED
+    img_compress_concurrency: int      # IMG_COMPRESS_CONCURRENCY=2
+    img_max_count: int                 # IMG_MAX_COUNT=50
+    img_max_total_pixels: int          # IMG_MAX_TOTAL_PIXELS
+    # ---- Copilot headers ----
+    copilot_editor_version: str        # COPILOT_EDITOR_VERSION=vscode/1.104.0
+    copilot_editor_plugin_version: str # COPILOT_EDITOR_PLUGIN_VERSION=copilot-chat/0.30.0
+    copilot_user_agent: str            # COPILOT_USER_AGENT=GitHubCopilotChat/0.30.0
+    # ---- Copilot HTML cooldown ----
+    copilot_html_soft_cooldown: float  # COPILOT_HTML_SOFT_COOLDOWN=30 (0=off)
+    # ---- Copilot HTTP client / pool ----
+    copilot_http2: bool                # COPILOT_HTTP2 default true
+    copilot_pool_max_connections: int  # COPILOT_POOL_MAX_CONNECTIONS
+    copilot_pool_max_keepalive: int    # COPILOT_POOL_MAX_KEEPALIVE
+    copilot_pool_keepalive_expiry: float
+    copilot_pool_acquire_timeout: float # COPILOT_POOL_ACQUIRE_TIMEOUT=20
+    copilot_pool_read_timeout: Optional[float]  # None = unlimited (long thinking)
+    # ---- Copilot token refresh ----
+    copilot_refresh_interval: int      # COPILOT_REFRESH_INTERVAL=300
+    copilot_refresh_threshold: int     # COPILOT_REFRESH_THRESHOLD=600
+    # ---- Copilot stream monitor ----
+    copilot_stream_high_watermark: int
+    copilot_stream_overload_grace: float
+    copilot_stream_disconnect_grace: float
+    copilot_stream_monitor_interval: float
+    # ---- Copilot upstream probe ----
+    copilot_upstream_probe_timeout: float
+    copilot_upstream_probe_cache_ttl: float
+
+    @classmethod
+    def load(cls) -> "LBSettings":
+        return cls(
+            log_format=_env_str("LOG_FORMAT", "text"),
+            log_level=_env_str("LOG_LEVEL", "INFO"),
+            stream_heartbeat_interval=_env_float("STREAM_HEARTBEAT_INTERVAL", 15.0),
+            img_admission_enabled=_env_bool("IMG_ADMISSION_ENABLED", True),
+            img_compress_concurrency=_env_int("IMG_COMPRESS_CONCURRENCY", 2),
+            img_max_count=_env_int("IMG_MAX_COUNT", 50),
+            img_max_total_pixels=_env_int("IMG_MAX_TOTAL_PIXELS", 200_000_000),
+            copilot_editor_version=_env_str("COPILOT_EDITOR_VERSION", "vscode/1.104.0"),
+            copilot_editor_plugin_version=_env_str("COPILOT_EDITOR_PLUGIN_VERSION", "copilot-chat/0.30.0"),
+            copilot_user_agent=_env_str("COPILOT_USER_AGENT", "GitHubCopilotChat/0.30.0"),
+            copilot_html_soft_cooldown=_env_float("COPILOT_HTML_SOFT_COOLDOWN", 30.0),
+            copilot_http2=_env_bool("COPILOT_HTTP2", True),
+            copilot_pool_max_connections=_env_int("COPILOT_POOL_MAX_CONNECTIONS", 500),
+            copilot_pool_max_keepalive=_env_int("COPILOT_POOL_MAX_KEEPALIVE", 200),
+            copilot_pool_keepalive_expiry=_env_float("COPILOT_POOL_KEEPALIVE_EXPIRY", 90.0),
+            copilot_pool_acquire_timeout=_env_float("COPILOT_POOL_ACQUIRE_TIMEOUT", 20.0),
+            copilot_pool_read_timeout=_env_optfloat("COPILOT_POOL_READ_TIMEOUT", None),
+            copilot_refresh_interval=_env_int("COPILOT_REFRESH_INTERVAL", 300),
+            copilot_refresh_threshold=_env_int("COPILOT_REFRESH_THRESHOLD", 600),
+            copilot_stream_high_watermark=_env_int("COPILOT_STREAM_HIGH_WATERMARK", 400),
+            copilot_stream_overload_grace=_env_float("COPILOT_STREAM_OVERLOAD_GRACE", 30.0),
+            copilot_stream_disconnect_grace=_env_float("COPILOT_STREAM_DISCONNECT_GRACE", 15.0),
+            copilot_stream_monitor_interval=_env_float("COPILOT_STREAM_MONITOR_INTERVAL", 5.0),
+            copilot_upstream_probe_timeout=_env_float("COPILOT_UPSTREAM_PROBE_TIMEOUT", 3.0),
+            copilot_upstream_probe_cache_ttl=_env_float("COPILOT_UPSTREAM_PROBE_CACHE_TTL", 5.0),
+        )
+
+    def as_dict(self) -> dict:
+        """给 /config/effective 端点用；scalar 值可直接 JSON 序列化。"""
+        from dataclasses import asdict
+        return asdict(self)
+
+
+# 单例，模块导入时创建。旧的散点式 os.getenv() 也继续存在（作为 backing store），
+# LBSettings 不接管它们——仅提供集中化 introspection。运维改 env 后 rolling restart
+# 才能生效（与 K8s 传统一致；不做 hot reload）。
+LB_SETTINGS: LBSettings = LBSettings.load()
+
 class _JsonLogFormatter(logging.Formatter):
     """结构化 JSON 日志，便于 AKS Log Analytics / Loki / ELK 解析"""
 
@@ -7197,6 +7315,22 @@ async def reset(
     if usage_store:
         await usage_store._flush()
     return {"status": "reset", "note": "In-memory stats reset. Persisted usage data preserved."}
+
+
+@app.get("/config/effective")
+async def config_effective(
+    request: Request,
+    x_api_key: Optional[str] = Header(None, alias="x-api-key"),
+):
+    """P2.3: Return the effective LB settings loaded from env at process start.
+    Auth-gated (any valid api_key/tenant) to avoid leaking internal defaults."""
+    actual_key = _extract_api_key(request, x_api_key)
+    if not _verify_lb_api_key(actual_key):
+        raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
+    return {
+        "settings": LB_SETTINGS.as_dict(),
+        "note": "Values are read once at process startup; rolling restart required to pick up env changes.",
+    }
 
 
 @app.get("/stats/dashboard", response_class=HTMLResponse)
