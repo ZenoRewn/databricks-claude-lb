@@ -14,24 +14,42 @@
 @property --angle { syntax: '<angle>'; initial-value: 0deg; inherits: false; }
 :root {
   color-scheme: dark;
+  /* BoardUI-aligned semantic tokens (2026-09 refresh, still vanilla HTML) */
   --bg-0: #0b1020;
   --bg-1: #0f172a;
   --surface-1: #111a2e;
   --surface-2: #17223b;
   --border: #1f2a44;
   --border-hi: #334155;
+  --separator-border: #1f2a44;       /* BoardUI alias for hairline borders */
+  --border-button-default: #334155;  /* BoardUI alias */
   --text-0: #f1f5f9;
+  --text-primary: #f1f5f9;
   --text-1: #cbd5e1;
+  --text-secondary: #cbd5e1;
   --text-2: #94a3b8;
+  --text-tertiary: #94a3b8;
   --text-3: #64748b;
+  --text-placeholder: #64748b;
   --accent: #60a5fa;
   --accent-2: #c084fc;
+  --border-focus-ring: #60a5fa;      /* BoardUI focus ring token */
   --ok: #4ade80;
   --warn: #fbbf24;
   --err: #f87171;
-  --radius: 14px;
+  /* BoardUI radius scale — 4px grid based */
+  --radius: 14px;                    /* legacy */
   --radius-sm: 10px;
+  --radius-md: 12px;
+  --radius-xl: 16px;
+  --radius-2xl: 20px;
+  --radius-3xl: 24px;                /* BoardUI card standard */
+  /* Motion tokens (BoardUI recipe) */
   --ease: cubic-bezier(.4,0,.2,1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --motion-hover: 150ms;
+  --motion-entrance: 250ms;
+  --motion-exit: 150ms;
   --bg-image:
     radial-gradient(ellipse 80% 50% at 50% -10%, rgba(120, 119, 198, 0.22), transparent 60%),
     radial-gradient(ellipse 60% 40% at 90% 10%, rgba(96, 165, 250, 0.12), transparent 70%),
@@ -291,21 +309,25 @@ body {
   background: var(--card-bg);
   backdrop-filter: blur(10px);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 16px 18px;
+  border-radius: var(--radius-xl);          /* BoardUI: 16px for KPI tiles */
+  padding: 16px 20px;                       /* 4px grid: 16 & 20 */
   overflow: hidden;
-  transition: border-color .2s var(--ease), transform .2s var(--ease), background-color .3s var(--ease);
+  transition: border-color var(--motion-hover) var(--ease), transform var(--motion-hover) var(--ease), background-color .3s var(--ease);
 }
 .card::before {
   content: '';
   position: absolute; inset: 0;
   background: radial-gradient(420px circle at var(--mx, 50%) var(--my, 50%), var(--card-hover-glow), transparent 45%);
   opacity: 0;
-  transition: opacity .25s var(--ease);
+  transition: opacity var(--motion-entrance) var(--ease-out);
   pointer-events: none;
 }
 .card:hover { border-color: var(--border-hi); transform: translateY(-1px); }
 .card:hover::before { opacity: 1; }
+.card:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--border-focus-ring);
+}
 .card .label {
   font-size: .68rem;
   color: var(--text-2);
@@ -339,16 +361,17 @@ body {
   position: relative;
   background: var(--chart-card-bg);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 18px;
+  border-radius: var(--radius-3xl);        /* BoardUI: rounded-3xl for chart panels */
+  padding: 24px;                            /* 4px grid */
   min-height: 260px;
-  transition: background-color .3s var(--ease);
+  transition: background-color .3s var(--ease), border-color var(--motion-hover) var(--ease);
 }
+.chart-card:hover { border-color: var(--border-hi); }
 .chart-card h3 {
   font-size: .82rem;
   font-weight: 600;
   color: var(--text-2);
-  margin-bottom: 12px;
+  margin-bottom: 16px;
   text-transform: uppercase;
   letter-spacing: .06em;
 }
@@ -357,7 +380,7 @@ body {
 .table-wrap {
   background: var(--table-bg);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-2xl);         /* BoardUI: 20px */
   overflow: hidden;
   margin-bottom: 16px;
   transition: background-color .3s var(--ease);
@@ -437,8 +460,8 @@ td strong { color: var(--text-0); font-weight: 600; }
 .info-box {
   background: var(--info-bg);
   border: 1px dashed var(--border-hi);
-  border-radius: var(--radius);
-  padding: 36px;
+  border-radius: var(--radius-2xl);
+  padding: 40px;                            /* 4px grid */
   text-align: center;
   color: var(--text-2);
   font-size: .92rem;
@@ -450,7 +473,7 @@ td strong { color: var(--text-0); font-weight: 600; }
   padding: 12px 16px;
   background: var(--table-bg);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-xl);
   transition: background-color .3s var(--ease);
 }
 .history-toolbar label { color: var(--text-2); font-size: .82rem; }
@@ -466,22 +489,54 @@ td strong { color: var(--text-0); font-weight: 600; }
   outline: none;
   transition: border-color .15s var(--ease);
 }
-.history-toolbar input[type=number]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.history-toolbar input[type=number]:focus-visible {
+  border-color: var(--border-focus-ring);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--border-focus-ring) 50%, transparent);
+  outline: none;
+}
 .btn {
-  padding: 7px 16px;
+  padding: 8px 16px;                        /* 4px grid */
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--radius-md);          /* BoardUI 12px */
   cursor: pointer;
   font-size: .82rem;
   font-weight: 600;
   font-family: inherit;
-  transition: transform .1s var(--ease), filter .15s var(--ease), background-color .2s var(--ease);
+  transition: transform .1s var(--ease), filter var(--motion-hover) var(--ease), background-color var(--motion-hover) var(--ease);
+}
+.btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--border-focus-ring);
 }
 .btn:active { transform: scale(0.97); }
 .btn-primary { background: var(--btn-primary-bg); color: #fff; box-shadow: var(--btn-primary-shadow); }
 .btn-primary:hover { filter: brightness(1.1); }
 .btn-danger { background: var(--btn-danger-bg); color: var(--btn-danger-text); border-color: var(--btn-danger-border); }
 .btn-danger:hover { background: var(--btn-danger-hover); }
+
+/* BoardUI composite typography utilities (single class carries size + weight
+   + line-height + letter-spacing) —— rebuild-safe: never combine
+   `text-sm font-medium leading-5` again on new markup. */
+.text-title-1-medium { font-size: 1.7rem; font-weight: 600; line-height: 2rem; letter-spacing: -0.02em; }
+.text-title-2-medium { font-size: 1.35rem; font-weight: 600; line-height: 1.75rem; letter-spacing: -0.02em; }
+.text-title-3-semibold { font-size: 1.125rem; font-weight: 600; line-height: 1.5rem; letter-spacing: -0.01em; }
+.text-headline-medium { font-size: 1rem; font-weight: 600; line-height: 1.5rem; letter-spacing: -0.005em; }
+.text-body-medium { font-size: 0.9rem; font-weight: 500; line-height: 1.4rem; }
+.text-body-regular { font-size: 0.9rem; font-weight: 400; line-height: 1.4rem; }
+.text-caption-1-semibold { font-size: 0.72rem; font-weight: 600; line-height: 1rem; letter-spacing: 0.06em; text-transform: uppercase; }
+
+/* BoardUI motion respect: reduce all transitions to near-instant + skip
+   shimmer / pulse / entrance blur for users who requested reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .brand h1 { animation: none; background-position: 0 0; }
+  .refresh-pill .ring-fg { transition: none; }
+}
 
 @media (max-width: 768px) {
   body { padding: 16px 12px 32px; }
