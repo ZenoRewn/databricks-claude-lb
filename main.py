@@ -5745,9 +5745,23 @@ def _openai_model_entry(model_id: str) -> dict:
 
 
 def _build_openai_models_payload() -> dict:
+    """Return a model catalog that satisfies both OpenAI-standard and codex-cli.
+
+    - ``data``  —— OpenAI 官方规范字段（Python/JS SDK 都读它）。给出完整 catalog。
+    - ``models`` —— codex-cli 0.145.0 私有必需字段。**必须存在**，否则报
+      "failed to decode models response: missing field `models`"。
+      codex-cli 对每个 entry 要求 slug/display_name/default_reasoning_level/
+      supported_reasoning_levels/shell_type/visibility/... 十几个必填字段（见
+      `codex debug models` 输出）。逐字段填是死胡同（下一个又缺别的），且我们
+      不知道每个模型的真实 reasoning tier —— 与其瞎填不如返空数组：codex-cli
+      拿到 `models: []` 认为"这个 provider 没主动声明 catalog"，回落到
+      config.toml 里 `model = "..."` 或 `-m` 指定的模型，功能不受影响。
+    """
+    entries = [_openai_model_entry(model_id) for model_id in _collect_openai_model_ids()]
     return {
         "object": "list",
-        "data": [_openai_model_entry(model_id) for model_id in _collect_openai_model_ids()],
+        "data": entries,
+        "models": [],
     }
 
 

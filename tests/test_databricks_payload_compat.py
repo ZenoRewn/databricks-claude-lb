@@ -267,6 +267,38 @@ class OpenAICompatTests(unittest.TestCase):
         self.assertIn("gpt-5-codex", ids)
         self.assertIn("gemini-2.5-pro", ids)
 
+    def test_openai_models_payload_has_data_plus_empty_codex_models_key(self):
+        # `data` 是 OpenAI 官方规范字段（Python/JS SDK 都读它）—— 包含完整 catalog。
+        # `models` 是 codex-cli 0.145.0 私有必需字段：必须存在，且每个 entry 要求
+        # slug/display_name/default_reasoning_level/... 十几个必填字段。填不全
+        # 会连续报 "missing field `slug`" → "missing field `display_name`" ...；
+        # 而我们对每个模型的 reasoning tier / service_tiers 元数据没有真实来源，
+        # 所以返 `models: []` 让 codex-cli 认为"provider 未声明 catalog"，
+        # 回落到 config.toml 的 `model = "..."` 或 `-m` 指定，功能不受影响。
+        class FakeLB:
+            def __init__(self, eps): self.endpoints = eps
+        class FakeCopilot:
+            def __init__(self, eps): self.load_balancer = FakeLB(eps)
+        fake_copilot = FakeCopilot([
+            main.CopilotEndpoint(name="unit-fake", github_token="tok",
+                                  token_source={"type":"literal"}, models=["gpt-5.6-sol"]),
+        ])
+        original = main.copilot_proxy
+        main.copilot_proxy = fake_copilot
+        try:
+            payload = main._build_openai_models_payload()
+        finally:
+            main.copilot_proxy = original
+        self.assertEqual(payload["object"], "list")
+        # data 里携带完整 catalog（供 OpenAI 标准客户端消费）
+        self.assertGreaterEqual(len(payload["data"]), 1)
+        for entry in payload["data"]:
+            self.assertIn("id", entry)
+            self.assertEqual(entry["object"], "model")
+        # models 存在但为空（让 codex-cli 满足字段存在检查，跳过 entry schema 校验）
+        self.assertIn("models", payload)
+        self.assertEqual(payload["models"], [])
+
     def test_routes_gpt_5_6_chat_models_through_responses_adapter(self):
         self.assertTrue(main._should_adapt_chat_to_responses("gpt-5.6-sol"))
         self.assertTrue(main._should_adapt_chat_to_responses("GPT-5.6-LUNA"))
