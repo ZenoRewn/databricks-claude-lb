@@ -327,7 +327,91 @@ KQL / Loki 直接过：`ContainerLog | where LogEntry contains "copilot_pool_tim
 
 ---
 
-## 10. Cloudflare 504 Gateway time-out
+## 10. Codex APP / Openclaw 报 "provider returned an HTML error page" 或 "Session Send failed"
+
+### 症状
+
+- Mac 上的 Codex APP、Openclaw 客户端通过 `lb.zeno.ink` 反代 GitHub Copilot 一段时间后偶发失败
+- 报错文案：`The provider returned an HTML error page instead of an API response. This usually means a CDN or gateway (e.g. Cloudflare) blocked the request.` 或 `⚠️ Session Send failed`
+- **VSCode 内置 Copilot Chat 直连 GitHub 一切正常** —— 说明账号 / long-lived token 没被封，问题在 LB 与上游之间
+
+### 真因（按优先级排查）
+
+1. **Cloudflare 挑战页 / bot management 拦截**
+   - GHCP 后端由 Cloudflare 承接。同一 long-lived token 在多客户端高并发时，Cloudflare 可能给某次请求返 `text/html` 挑战页（"Just a moment..."）。之前旧版 LB 只在 `status ≥ 400` 时识别 HTML，`status = 200` + HTML 会被 pump 原样透传给客户端 SSE 消费者，客户端 SDK 自己解析失败报 "HTML error page"。
+   - **本次修复**：LB 在收到 upstream response headers 后立刻检查 `Content-Type`。凡是 `text/html*`（无论 status 是 200/403/502），一律走 `upstream_html_error` 规范化路径 + 触发 30s 软熔断（跳过该 endpoint 直到自动脱敏）+ 主动关闭底层 stream 避免同 socket 复用踩同一 challenge。
+2. **Editor-Version / User-Agent 版本陈旧**
+   - 老版本 LB 写死 `vscode/1.95.3` + `copilot-chat/0.22.4`（2024-11 版本）。Cloudflare 会根据客户端指纹判断是否 legacy client，命中概率随时间上升。
+   - **本次修复**：默认升级到 `vscode/1.104.0` + `copilot-chat/0.30.0`。三个 env 变量 `COPILOT_EDITOR_VERSION` / `COPILOT_EDITOR_PLUGIN_VERSION` / `COPILOT_USER_AGENT` 允许运维随官方版本自行滚动。
+3. **业务请求缺少 Accept / Accept-Encoding / Accept-Language**
+   - 真实 VS Code Copilot Chat 扩展会带这些字段，缺失即被 CDN 判为客户端指纹异常。
+   - **本次修复**：`_build_headers` 现在按 stream/non-stream 分别附上 `Accept: text/event-stream` 或 `Accept: application/json`，同时补 `Accept-Encoding: gzip, deflate` 与 `Accept-Language: en-US,en;q=0.9`。
+4. **本地代理拦截**（Mac 特有；详见 §1）
+   - 如果客户端配置成 `http://localhost:8000` 而 Mac 系统代理正在拦截 localhost，客户端拿到的 HTML 根本不是 LB 送的。判据：**LB 已经把 HTML 兜底转 JSON `upstream_html_error`；客户端看到 raw HTML → 100% 是中间代理干的**。诊断命令见 §1。
+
+### 结构化日志字段
+
+- `kind=copilot_upstream_html`：LB 检测到 HTML 时打的每一行都带这个标签。附带字段：
+  - `endpoint`：命中 CDN 拦截的 Copilot endpoint
+  - `api_type`：`chat` 或 `responses`
+  - `upstream_status`：上游 HTTP status（200 / 403 / 502 等）
+  - `html_soft_cooldown_seconds`：本次软熔断窗口秒数
+  - `upstream_ids`：字典，包含上游返回的 `cf-ray` / `x-github-request-id` / `x-request-id` / `server` / `x-served-by` / `x-cache`（拿这些去找 GitHub Support 反馈最有效）
+- KQL 示例（Azure Log Analytics）：`AppTraces | where LogLevel == "Warning" and Properties.kind == "copilot_upstream_html" | project TimeGenerated, Properties.endpoint, Properties.upstream_status, Properties.upstream_ids`
+
+### 相关 metrics
+
+- `copilot_upstream_html_events_total{endpoint="..."}`：per-endpoint HTML 事件累计
+- `copilot_upstream_html_events_all_total`：全局聚合，方便告警
+- `copilot_html_soft_cooldown_active{endpoint="..."}`：0/1，当前是否在冷却窗口
+- `copilot_html_soft_cooldown_remaining_seconds{endpoint="..."}`：剩余秒数
+
+告警建议：`increase(copilot_upstream_html_events_all_total[10m]) > 5` 触发告警时先看 log 里 `upstream_ids.cf-ray`，能直接提交给 GitHub Support。
+
+### 相关配置
+
+- `COPILOT_HTML_SOFT_COOLDOWN=30`（默认，秒；0 = 关闭软熔断）
+- `COPILOT_EDITOR_VERSION=vscode/1.104.0`（可自行滚动到当前 stable）
+- `COPILOT_EDITOR_PLUGIN_VERSION=copilot-chat/0.30.0`
+- `COPILOT_USER_AGENT=GitHubCopilotChat/0.30.0`
+
+### 关键设计
+
+- HTML 事件不清 `total_errors` 也不置 `circuit_open`，只用独立的软熔断窗口。这样 CDN 抖动不会连带触发硬熔断（60s+ 全禁用），也不打乱现有 error rate 面板。
+- 单 endpoint 场景全部 endpoint 都进冷却时，`_select_endpoint` 会退回到"最小活跃"选一个而不是拒绝服务；下一次请求如果又踩 HTML 会自动刷新窗口，形成"重试式退避"。
+
+---
+
+## 11. Codex 报 401 且 Responses 请求带 `previous_response_id` 或 `encrypted_content`
+
+### 症状
+
+- 多 Copilot endpoint 池下偶发单次 401
+- 出错的请求 body 里能看到 `previous_response_id` 非空，或 `input[*].content[*].encrypted_content` 存在
+- 同一账户重发**无状态**探测（不带这些字段）→ 恢复 200
+
+### 真因
+
+Handoff §7.2 实证：同一 Responses opaque reasoning state 只能被生成它的账户/会话解密。LB 在 5xx / PoolTimeout / 网络错误 / HTML cooldown 时会**自动 failover** 到另一 Copilot endpoint —— 备份 endpoint 上没有那个 session 状态，上游立刻返 401，客户端看不到"其实是我们换账户了"。
+
+### 修复行为（已内建）
+
+请求携带 opaque state → 首次 endpoint 选定后钉住，`_select_endpoint` 之后所有换端点尝试都被拒绝：
+- pinned endpoint 仍健康 → 保持在同一账户，即使它触发了 HTML soft cooldown 也不换（避免更严重的 401）
+- pinned endpoint 被硬熔断 → 抛 503 `stateful_pinned_endpoint_unavailable`，客户端应重构会话（新的 request 不带 opaque state）而不是等 LB 换账户
+
+### 相关 metrics
+
+- `copilot_stateful_request_pinned_total{reason=...}` —— 拒绝换 endpoint 的次数，按原因（`http_5xx` / `pool_timeout` / `network_error` / `pinned_unavailable`）分。**非零就是修复在生效**。
+- `/stats` 里 pool 层聚合展示
+
+### 什么时候例外处理
+
+无状态请求（纯 input，无 previous / encrypted）**不受影响**，仍走正常 endpoint failover。判定逻辑在 `CopilotProxy._request_has_opaque_state()`，Chat Completions 协议不适用一律返 False。
+
+---
+
+## 12. Cloudflare 504 Gateway time-out
 
 ### 症状
 

@@ -11,8 +11,12 @@ import main
 
 
 class _StreamResponse:
-    def __init__(self, chunks, block_after_chunks=False):
-        self.status_code = 200
+    def __init__(self, chunks, block_after_chunks=False, status_code=200,
+                 headers=None, http_version="HTTP/1.1"):
+        self.status_code = status_code
+        # httpx.Response.headers 是 Headers (Mapping)；测试里用 dict 足够。
+        self.headers = headers if headers is not None else {}
+        self.http_version = http_version
         self._chunks = chunks
         self._block_after_chunks = block_after_chunks
         self.closed = False
@@ -25,6 +29,10 @@ class _StreamResponse:
         if self._block_after_chunks:
             self.blocked.set()
             await self._release.wait()
+
+    async def aread(self):
+        # 兼容 _stream_response 内 `error_body = await response.aread()` 的调用
+        return b"".join(self._chunks) if self._chunks else b""
 
     async def aclose(self):
         self.closed = True
@@ -59,9 +67,11 @@ class _BlockingClient:
 
 
 class _ErrorStreamResponse:
-    def __init__(self, status_code, body):
+    def __init__(self, status_code, body, headers=None, http_version="HTTP/1.1"):
         self.status_code = status_code
         self._body = body
+        self.headers = headers if headers is not None else {}
+        self.http_version = http_version
         self.closed = False
 
     async def aread(self):
@@ -105,6 +115,11 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         proxy.stream_truncated_no_completion_by_model = {}
         proxy.stream_read_timeout_total = 0
         proxy.stream_pump_queue_full_events_total = 0
+        # HTML 上游诊断 —— 与 CopilotProxy.__init__ 保持一致
+        proxy.upstream_html_events_total = 0
+        proxy.upstream_html_events_by_status = {}
+        # 状态亲和 pinning 计数（handoff §7.2 防跨账户 opaque state 401）
+        proxy.stateful_pinned_events = {}
         # Fields introduced when we added the DNS+TCP upstream probe on PoolTimeout.
         # We stub out the probe so tests never actually touch the network — otherwise
         # a sandboxed CI would hang on getaddrinfo for the placeholder host.
@@ -828,6 +843,323 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(upstream.closed)
         self.assertEqual(endpoint.active_requests, 0)
         self.assertEqual(endpoint.total_errors, 0)
+
+    async def test_stream_200_html_content_type_treated_as_upstream_html_error(self):
+        # 上游 status=200 但 content-type=text/html —— Cloudflare "Just a moment"
+        # 挑战页的典型形态。旧版会把 HTML 原字节 pump 给客户端；新版必须识别为
+        # upstream_html_error 并触发软熔断。
+        html_body = (
+            b"<!DOCTYPE html><html><head><title>Just a moment...</title></head>"
+            b"<body>Please enable JavaScript.</body></html>"
+        )
+        upstream = _ErrorStreamResponse(
+            200,
+            html_body,
+            headers={"content-type": "text/html; charset=UTF-8", "cf-ray": "abc123-SIN"},
+        )
+        proxy, load_balancer, endpoint = self._make_proxy(_StreamClient([upstream]))
+        await load_balancer.on_request_start(endpoint)
+
+        response = await proxy._stream_response(
+            endpoint,
+            "https://example.test/chat/completions",
+            {"model": "gpt-test", "messages": []},
+            {},
+            "gpt-test",
+            "chat",
+            main.time.time(),
+        )
+        body = b"".join([chunk async for chunk in response.body_iterator])
+
+        # 客户端拿到规范化 error，不含原始 HTML 字节。Chat 分支带 [DONE]。
+        self.assertNotIn(b"<!DOCTYPE html", body)
+        self.assertNotIn(b"<html", body)
+        self.assertIn(b'"code": "upstream_html_error"', body)
+        self.assertIn(b"cf-ray=abc123-SIN", body)
+        self.assertTrue(body.rstrip().endswith(b"data: [DONE]"))
+        # 计数器 + 软熔断都要生效
+        self.assertEqual(proxy.upstream_html_events_total, 1)
+        self.assertEqual(endpoint.upstream_html_events_total, 1)
+        self.assertGreater(endpoint.html_soft_cooldown_until, main.time.time())
+
+    async def test_stream_403_html_triggers_soft_cooldown_and_endpoint_skip(self):
+        # 上游 4xx HTML 也走软熔断路径。同时验证 _select_endpoint 会跳过冷却中的
+        # endpoint —— 加一个 "healthy" endpoint，冷却状态下 _select_endpoint 应优先选它。
+        html_body = b"<html><body>Access denied</body></html>"
+        upstream = _ErrorStreamResponse(
+            403, html_body, headers={"content-type": "text/html", "cf-ray": "xyz-999"},
+        )
+        proxy, load_balancer, endpoint = self._make_proxy(_StreamClient([upstream]))
+        healthy = main.CopilotEndpoint(
+            name="copilot-healthy", github_token="t2", models=["gpt-test"],
+            session_token="s", session_token_expires_at=2**31,
+        )
+        load_balancer.endpoints.append(healthy)
+        await load_balancer.on_request_start(endpoint)
+
+        response = await proxy._stream_response(
+            endpoint,
+            "https://example.test/responses",
+            {"model": "gpt-test", "input": "hi"},
+            {},
+            "gpt-test",
+            "responses",
+            main.time.time(),
+        )
+        body = b"".join([chunk async for chunk in response.body_iterator])
+
+        self.assertIn(b'"code": "upstream_html_error"', body)
+        self.assertNotIn(b"<html", body)
+        # Responses API 终止必须是 response.failed，不带 [DONE]
+        self.assertIn(b'"type": "response.failed"', body)
+        self.assertNotIn(b"data: [DONE]", body)
+        self.assertGreater(endpoint.html_soft_cooldown_until, main.time.time())
+        # _select_endpoint 应跳过 cooldown 中的原 endpoint，选 healthy
+        selected = proxy._select_endpoint("gpt-test")
+        self.assertIs(selected, healthy)
+
+    async def test_upstream_ids_captured_and_propagated_to_sse_error(self):
+        # 上游返回 502 HTML + cf-ray + x-github-request-id + server 三种诊断头。
+        # 断言：SSE error message 尾部 + error.upstream_ids 都能拿到这些字段。
+        html_body = b"<html><body>Bad Gateway</body></html>"
+        upstream = _ErrorStreamResponse(
+            502,
+            html_body,
+            headers={
+                "content-type": "text/html; charset=UTF-8",
+                "cf-ray": "abc123-SIN",
+                "x-github-request-id": "F1E2:1234",
+                "server": "cloudflare",
+            },
+        )
+        proxy, load_balancer, endpoint = self._make_proxy(_StreamClient([upstream]))
+        await load_balancer.on_request_start(endpoint)
+
+        response = await proxy._stream_response(
+            endpoint,
+            "https://example.test/chat/completions",
+            {"model": "gpt-test", "messages": []},
+            {},
+            "gpt-test",
+            "chat",
+            main.time.time(),
+        )
+        body = b"".join([chunk async for chunk in response.body_iterator])
+
+        # SSE error.message 尾部有 `cf-ray=abc123-SIN x-github-request-id=... server=cloudflare`
+        self.assertIn(b"cf-ray=abc123-SIN", body)
+        self.assertIn(b"x-github-request-id=F1E2:1234", body)
+        # error.upstream_ids 结构化字段也要有
+        self.assertIn(b'"upstream_ids"', body)
+        # /stats 里 endpoint 的 HTML 计数 +1
+        self.assertEqual(endpoint.upstream_html_events_total, 1)
+
+    # -- 状态亲和 pinning ---------------------------------------------------
+
+    def test_request_has_opaque_state_detects_previous_response_id(self):
+        # Responses API + previous_response_id 非空 → True
+        self.assertTrue(main.CopilotProxy._request_has_opaque_state(
+            {"model": "gpt-test", "previous_response_id": "resp_abc"}, "responses"
+        ))
+        # 空串 / None / 不存在 → False
+        self.assertFalse(main.CopilotProxy._request_has_opaque_state(
+            {"previous_response_id": ""}, "responses"
+        ))
+        self.assertFalse(main.CopilotProxy._request_has_opaque_state(
+            {"previous_response_id": None}, "responses"
+        ))
+        self.assertFalse(main.CopilotProxy._request_has_opaque_state({}, "responses"))
+
+    def test_request_has_opaque_state_detects_encrypted_content(self):
+        # 顶层 item.encrypted_content
+        self.assertTrue(main.CopilotProxy._request_has_opaque_state(
+            {"input": [{"encrypted_content": "cE=="}]}, "responses"
+        ))
+        # 嵌套在 content 数组里
+        self.assertTrue(main.CopilotProxy._request_has_opaque_state(
+            {"input": [{"content": [{"encrypted_content": "cE=="}]}]}, "responses"
+        ))
+        # 空 encrypted_content 不算
+        self.assertFalse(main.CopilotProxy._request_has_opaque_state(
+            {"input": [{"encrypted_content": ""}]}, "responses"
+        ))
+
+    def test_request_has_opaque_state_ignores_chat_completions(self):
+        # Chat 协议不适用 opaque state 语义，即便同名字段存在也返 False
+        self.assertFalse(main.CopilotProxy._request_has_opaque_state(
+            {"previous_response_id": "resp_abc"}, "chat"
+        ))
+        self.assertFalse(main.CopilotProxy._request_has_opaque_state(
+            {"messages": [{"role": "user", "content": "hi"}]}, "chat"
+        ))
+
+    async def test_select_endpoint_pinned_returns_pin_when_available(self):
+        # 两个 endpoint 都健康时，pinned=A 应始终返回 A，无论 lb 策略偏向谁
+        proxy, load_balancer, endpoint_a = self._make_proxy(unittest.mock.Mock())
+        endpoint_b = main.CopilotEndpoint(
+            name="copilot-b", github_token="t2", models=["gpt-test"],
+            session_token="s", session_token_expires_at=2**31,
+        )
+        load_balancer.endpoints.append(endpoint_b)
+        # 让 A 的活跃请求数远高于 B，least_requests 策略下 A 本来会输
+        endpoint_a.active_requests = 10
+        endpoint_b.active_requests = 0
+        # 不 pinned → 应该选 B（least_requests）
+        chosen_free = proxy._select_endpoint("gpt-test")
+        self.assertIs(chosen_free, endpoint_b)
+        # pinned=A → 无视统计，返回 A
+        chosen_pinned = proxy._select_endpoint("gpt-test", pinned=endpoint_a)
+        self.assertIs(chosen_pinned, endpoint_a)
+
+    async def test_select_endpoint_pinned_returns_none_when_pin_unavailable(self):
+        # pinned endpoint 被熔断（不在 available）→ 返回 None，让调用方 fail-fast
+        proxy, load_balancer, endpoint_a = self._make_proxy(unittest.mock.Mock())
+        endpoint_b = main.CopilotEndpoint(
+            name="copilot-b", github_token="t2", models=["gpt-test"],
+            session_token="s", session_token_expires_at=2**31,
+        )
+        load_balancer.endpoints.append(endpoint_b)
+        # 把 A 从可用池摘掉
+        endpoint_a.circuit_open = True
+        endpoint_a.circuit_opened_at = main.time.time()
+        chosen = proxy._select_endpoint("gpt-test", pinned=endpoint_a)
+        self.assertIsNone(chosen)
+
+    async def test_select_endpoint_pinned_bypasses_html_cooldown(self):
+        # pinned endpoint 处于 HTML 软熔断窗口内 → 仍然返回它（宁可再踩一次挑战页也
+        # 不换账户导致 401）。handoff §7.2 结论。
+        proxy, load_balancer, endpoint_a = self._make_proxy(unittest.mock.Mock())
+        endpoint_b = main.CopilotEndpoint(
+            name="copilot-b", github_token="t2", models=["gpt-test"],
+            session_token="s", session_token_expires_at=2**31,
+        )
+        load_balancer.endpoints.append(endpoint_b)
+        endpoint_a.html_soft_cooldown_until = main.time.time() + 30
+        # 无 pinned → 因为 A 在 cooldown，选 B
+        chosen_free = proxy._select_endpoint("gpt-test")
+        self.assertIs(chosen_free, endpoint_b)
+        # pinned=A → 无视 cooldown，仍返回 A
+        chosen_pinned = proxy._select_endpoint("gpt-test", pinned=endpoint_a)
+        self.assertIs(chosen_pinned, endpoint_a)
+
+    def test_apply_html_cooldown_tracks_status_bucket(self):
+        # 200 / 4xx / 5xx / other 分桶正确
+        proxy, load_balancer, endpoint = self._make_proxy(unittest.mock.Mock())
+        proxy._apply_html_cooldown(endpoint, "responses", 200)
+        proxy._apply_html_cooldown(endpoint, "responses", 403)
+        proxy._apply_html_cooldown(endpoint, "responses", 502)
+        proxy._apply_html_cooldown(endpoint, "responses", 502)
+        proxy._apply_html_cooldown(endpoint, "responses", 999)
+        self.assertEqual(proxy.upstream_html_events_by_status, {
+            "200": 1, "4xx": 1, "5xx": 2, "other": 1,
+        })
+
+    def test_note_stateful_pin_accumulates_by_reason(self):
+        proxy, _, _ = self._make_proxy(unittest.mock.Mock())
+        proxy._note_stateful_pin("http_5xx")
+        proxy._note_stateful_pin("http_5xx")
+        proxy._note_stateful_pin("pool_timeout")
+        self.assertEqual(proxy.stateful_pinned_events, {
+            "http_5xx": 2, "pool_timeout": 1,
+        })
+
+    async def test_stream_upstream_html_includes_lb_request_id(self):
+        # 502 HTML + request_id → error.upstream_ids["lb_request_id"] 存在
+        html_body = b"<html><body>Bad Gateway</body></html>"
+        upstream = _ErrorStreamResponse(
+            502, html_body,
+            headers={"content-type": "text/html", "cf-ray": "abc-999"},
+        )
+        proxy, load_balancer, endpoint = self._make_proxy(_StreamClient([upstream]))
+        await load_balancer.on_request_start(endpoint)
+        response = await proxy._stream_response(
+            endpoint,
+            "https://example.test/chat/completions",
+            {"model": "gpt-test", "messages": []},
+            {},
+            "gpt-test",
+            "chat",
+            main.time.time(),
+            request_id="lb-req-abcdef123456",
+        )
+        body = b"".join([chunk async for chunk in response.body_iterator])
+        # 结构化字段
+        self.assertIn(b'"lb_request_id"', body)
+        self.assertIn(b"lb-req-abcdef123456", body)
+
+    async def test_stream_stateful_5xx_pins_endpoint_and_fails_fast(self):
+        # 单个健康 endpoint，返 502；有状态请求。手动 mock 让 pinning 条件成立后
+        # 走到 "fail fast" 分支；stateful_pinned_events["http_5xx"] +=1。
+        # 用两个 endpoint 更能证明 "没换到 B"：A 返 502，B 是备胎。
+        error_upstream = _ErrorStreamResponse(
+            502, b'{"error":{"message":"upstream busted"}}',
+            headers={"content-type": "application/json"},
+        )
+        # 只塞一个 outcome —— 若跨到 B 会 StopIteration，测试提前暴露
+        proxy, load_balancer, endpoint_a = self._make_proxy(_StreamClient([error_upstream]))
+        endpoint_b = main.CopilotEndpoint(
+            name="copilot-b", github_token="t2", models=["gpt-test"],
+            session_token="s", session_token_expires_at=2**31,
+        )
+        load_balancer.endpoints.append(endpoint_b)
+        # A 处于 HTML cooldown 且 total_requests 高 —— 无 pinning 时肯定会切 B
+        endpoint_a.active_requests = 0  # start_request 会自增
+        stateful_body = {
+            "model": "gpt-test",
+            "previous_response_id": "resp_prev_abc",
+            "input": [{"content": [{"type": "input_text", "text": "hi"}]}],
+        }
+        await load_balancer.on_request_start(endpoint_a)
+        response = await proxy._stream_response(
+            endpoint_a,
+            "https://example.test/responses",
+            stateful_body,
+            {},
+            "gpt-test",
+            "responses",
+            main.time.time(),
+        )
+        body = b"".join([chunk async for chunk in response.body_iterator])
+
+        # 上游 502 走 upstream_http_error 分支
+        self.assertIn(b"upstream busted", body)
+        # pinning 计数生效
+        self.assertEqual(proxy.stateful_pinned_events.get("http_5xx"), 1)
+        # 没换到 B（否则 _StreamClient outcomes 耗尽会 StopIteration，或 B 的
+        # active_requests 会 +1；这里查 B 应该保持 0）
+        self.assertEqual(endpoint_b.active_requests, 0)
+
+    async def test_stream_stateless_5xx_still_failovers_to_second_endpoint(self):
+        # 无状态请求，A 返 502，第二次应切到 B。作为 pinning 的反向对照 —— 保证
+        # 状态亲和不会误伤普通 failover。
+        error_upstream = _ErrorStreamResponse(
+            502, b'{"error":{"message":"upstream busted"}}',
+            headers={"content-type": "application/json"},
+        )
+        success_upstream = _StreamResponse([b"data: [DONE]\n\n"])
+        proxy, load_balancer, endpoint_a = self._make_proxy(
+            _StreamClient([error_upstream, success_upstream]), threshold=10,
+        )
+        endpoint_b = main.CopilotEndpoint(
+            name="copilot-b", github_token="t2", models=["gpt-test"],
+            session_token="s", session_token_expires_at=2**31,
+        )
+        load_balancer.endpoints.append(endpoint_b)
+        await load_balancer.on_request_start(endpoint_a)
+        response = await proxy._stream_response(
+            endpoint_a,
+            "https://example.test/chat/completions",
+            {"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]},
+            {},
+            "gpt-test",
+            "chat",
+            main.time.time(),
+        )
+        body = b"".join([chunk async for chunk in response.body_iterator])
+        # 成功切换后拿到 [DONE]
+        self.assertIn(b"data: [DONE]", body)
+        # pinning 计数没触发
+        self.assertNotIn("http_5xx", proxy.stateful_pinned_events)
 
     async def test_monitor_releases_confirmed_disconnect_only_after_sustained_high_water(self):
         proxy, load_balancer, endpoint = self._make_proxy(unittest.mock.Mock())

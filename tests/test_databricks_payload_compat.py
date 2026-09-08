@@ -48,6 +48,70 @@ class DatabricksPayloadCompatTests(unittest.TestCase):
         self.assertEqual(promoted, 0)
         self.assertEqual(body, {"messages": [{"role": "user", "content": "hello"}]})
 
+    # -- 模型名映射 ---------------------------------------------------------
+
+    def test_claude_opus_5_maps_to_databricks_opus_5(self):
+        # Databricks 端已 GA opus-5，客户端发 claude-opus-5-* 应直通，不再降级到 4-7
+        self.assertEqual(
+            main.get_databricks_model("claude-opus-5"),
+            "databricks-claude-opus-5",
+        )
+        self.assertEqual(
+            main.get_databricks_model("claude-opus-5-20260101"),
+            "databricks-claude-opus-5",
+        )
+        # 大小写不敏感
+        self.assertEqual(
+            main.get_databricks_model("Claude-Opus-5"),
+            "databricks-claude-opus-5",
+        )
+
+    def test_claude_opus_4_x_still_maps_correctly(self):
+        # 加 opus-5 分支后，旧版本映射必须保持不变
+        self.assertEqual(
+            main.get_databricks_model("claude-opus-4-7"),
+            "databricks-claude-opus-4-7",
+        )
+        self.assertEqual(
+            main.get_databricks_model("claude-opus-4-5"),
+            "databricks-claude-opus-4-5",
+        )
+        # 无版本号的 "claude-opus" 走默认（4-7），不能被误识别为 5
+        self.assertEqual(
+            main.get_databricks_model("claude-opus"),
+            "databricks-claude-opus-4-7",
+        )
+
+    def test_opus_5_pricing_matches_opus_4_7_placeholder(self):
+        # 子串匹配：opus-5 的定价 key 长度大于 opus，应优先命中
+        p_opus_5 = main.get_model_pricing("databricks-claude-opus-5")
+        p_opus_4_7 = main.get_model_pricing("databricks-claude-opus-4-7")
+        self.assertIsNotNone(p_opus_5)
+        self.assertEqual(p_opus_5, p_opus_4_7)
+
+    def test_supports_adaptive_thinking_default_true_for_new_models(self):
+        # 黑名单策略：不在旧模型标记里的都默认 adaptive
+        # 用户线索：Opus 5 未被原白名单覆盖 → 修好后必须返 True
+        self.assertTrue(main.supports_adaptive_thinking("databricks-claude-opus-5"))
+        self.assertTrue(main.supports_adaptive_thinking("databricks-claude-opus-4-7"))
+        self.assertTrue(main.supports_adaptive_thinking("databricks-claude-opus-4-6"))
+        self.assertTrue(main.supports_adaptive_thinking("databricks-claude-sonnet-4-6"))
+        # 未来假想版本，代码零改动应默认支持
+        self.assertTrue(main.supports_adaptive_thinking("databricks-claude-opus-6"))
+        self.assertTrue(main.supports_adaptive_thinking("databricks-claude-sonnet-5"))
+
+    def test_supports_adaptive_thinking_false_for_legacy(self):
+        # 旧模型（4-5 系列）仍需 enabled + budget_tokens
+        self.assertFalse(main.supports_adaptive_thinking("databricks-claude-opus-4-5"))
+        self.assertFalse(main.supports_adaptive_thinking("databricks-claude-sonnet-4-5"))
+
+    def test_supports_adaptive_thinking_handles_bad_input(self):
+        # 非字符串输入不该崩：None 直接返 False；空串按黑名单默认 True（走 adaptive，
+        # 让上游对空 model 报清晰错误，比在 LB 里静默转 enabled+budget_tokens 更好）
+        self.assertFalse(main.supports_adaptive_thinking(None))
+        self.assertFalse(main.supports_adaptive_thinking(123))  # 非 str
+        self.assertTrue(main.supports_adaptive_thinking(""))
+
 
 class StreamingHeartbeatTests(unittest.IsolatedAsyncioTestCase):
     async def test_yields_heartbeat_while_waiting_for_response_headers(self):

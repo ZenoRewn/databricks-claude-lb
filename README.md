@@ -490,6 +490,10 @@ GHCP 上游会返回 429 + `retry-after` 头。LB 的熔断器会临时摘掉该
 | `COPILOT_HTTP2` | 启用 HTTP/2 到 Copilot 上游。一条 TCP 连接承载多路 stream，大幅降低"新建连接"压力；需要 `pip install h2`。启动时会 log 三种状态之一：`HTTP/2 negotiation enabled (h2 pkg X)` / `COPILOT_HTTP2=true but h2 package NOT installed` (ERROR，fallback 到 HTTP/1.1) / `HTTP/1.1 (h2 pkg available/not installed)`；运行时看 `/stats` 里 `github_copilot.pool.last_negotiated_http_version` 或 `/metrics` 的 `copilot_upstream_http_version{version="HTTP/2"}=1` 确认上游 CDN 真的接受了 h2 | `false` |
 | `COPILOT_UPSTREAM_PROBE_TIMEOUT` | PoolTimeout 触发时对上游做 DNS+TCP 探针的每步超时（秒），结果打进日志与 SSE error 尾部 | `3` |
 | `COPILOT_UPSTREAM_PROBE_CACHE_TTL` | 探针结果缓存 TTL（秒），防止密集失败风暴 | `5` |
+| `COPILOT_EDITOR_VERSION` | 请求头 `Editor-Version` 值。默认 `vscode/1.104.0`（2025 stable 中期），比 2024-11 的 1.95.3 更不容易被 Cloudflare bot management 标为 legacy client；官方发新稳定版时可自行滚动 | `vscode/1.104.0` |
+| `COPILOT_EDITOR_PLUGIN_VERSION` | 请求头 `Editor-Plugin-Version` 值 | `copilot-chat/0.30.0` |
+| `COPILOT_USER_AGENT` | 请求头 `User-Agent` 值 | `GitHubCopilotChat/0.30.0` |
+| `COPILOT_HTML_SOFT_COOLDOWN` | 上游返回 HTML challenge/错误页时的软熔断窗口秒数。命中的 endpoint 在窗口内被 `_select_endpoint` 优先跳过；0 = 关闭该功能。不动 `total_errors` 也不触发硬熔断，比 `circuit_breaker_timeout` (60s+) 更适合 CDN 抖动场景 | `30` |
 | `COPILOT_STREAM_HIGH_WATERMARK` | 全部 Copilot endpoint 合计 active requests 的连续高水位阈值（共享连接池 500 的 80%） | `400` |
 | `COPILOT_STREAM_OVERLOAD_GRACE` | 高水位持续多久后才启用异常连接兜底回收（秒） | `30` |
 | `COPILOT_STREAM_DISCONNECT_GRACE` | 下游断开持续多久后才强制回收（秒） | `15` |

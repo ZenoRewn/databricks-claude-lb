@@ -17,7 +17,7 @@ import stat
 import uuid
 from io import BytesIO
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
@@ -434,10 +434,11 @@ DATABRICKS_MODELS = {
     "sonnet": "databricks-claude-sonnet-4-6",  # 默认使用最新版本
     "sonnet-4-5": "databricks-claude-sonnet-4-5",
     "sonnet-4-6": "databricks-claude-sonnet-4-6",
-    "opus": "databricks-claude-opus-4-7",  # 默认使用最新版本
+    "opus": "databricks-claude-opus-4-7",  # 默认版本；显式指定 opus-5 走 Opus 5
     "opus-4-5": "databricks-claude-opus-4-5",
     "opus-4-6": "databricks-claude-opus-4-6",
     "opus-4-7": "databricks-claude-opus-4-7",
+    "opus-5": "databricks-claude-opus-5",  # Databricks 已 GA
     "haiku": "databricks-claude-haiku-4-5",
 }
 
@@ -451,6 +452,9 @@ DEFAULT_MODEL = "databricks-claude-sonnet-4-6"
 #   实际靠 get_model_pricing() 的排序保障，dict 顺序仅作可读性
 MODEL_PRICING = {
     # ---------- Anthropic Claude ----------
+    # NOTE: opus-5 使用与 opus-4-7 相同的定价占位（Anthropic 公开价目前一致）；
+    # 如未来 Anthropic 公布 opus-5 差异化定价请覆盖此行。子串匹配靠 key 长度降序生效。
+    "opus-5":   {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
     "opus-4-7": {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
     "opus-4-6": {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
     "opus-4-5": {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
@@ -523,6 +527,19 @@ def calculate_cost(model_name: str, input_tokens: int, output_tokens: int,
     return round(cost, 6)
 
 
+def supports_adaptive_thinking(databricks_model: str) -> bool:
+    """判断给定的 Databricks 内部模型名是否支持 adaptive thinking。
+
+    Adaptive 是 Anthropic 官方推荐的当前协议。采用黑名单：显式列出仍需
+    enabled+budget_tokens 的旧模型，其它默认支持 adaptive。这样未来新模型
+    (Opus 5 / Sonnet 5 / 更高版本) 无需改代码即可走 adaptive。
+    """
+    if not isinstance(databricks_model, str):
+        return False
+    legacy_non_adaptive_markers = ("opus-4-5", "sonnet-4-5")
+    return not any(marker in databricks_model for marker in legacy_non_adaptive_markers)
+
+
 def get_databricks_model(model: str) -> str:
     """将 Claude 模型名称映射到 Databricks 模型名称"""
     model_lower = model.lower()
@@ -531,9 +548,13 @@ def get_databricks_model(model: str) -> str:
     if model_lower.startswith("databricks-"):
         return model
 
-    # 检查是否指定了具体版本 (如 claude-opus-4-7, opus-4-5)
+    # 检查是否指定了具体版本 (如 claude-opus-5, claude-opus-4-7, opus-4-5)
+    # 注意：Opus 5 判断必须先于 "opus-*-*"，否则会被通用 opus 分支吞掉走到默认（4-7）
     if "opus" in model_lower:
-        if "4-5" in model_lower or "4.5" in model_lower:
+        # Opus 5 系列：匹配 "opus-5" / "opus-5-*" / "opus5"（不匹配 "opus-4-*" 里可能出现的 "5"）
+        if re.search(r"opus[-_.]?5(?:[-_.]|$)", model_lower):
+            mapped = DATABRICKS_MODELS["opus-5"]
+        elif "4-5" in model_lower or "4.5" in model_lower:
             mapped = DATABRICKS_MODELS["opus-4-5"]
         elif "4-6" in model_lower or "4.6" in model_lower:
             mapped = DATABRICKS_MODELS["opus-4-6"]
@@ -1035,14 +1056,29 @@ class AzureOpenAIEndpoint:
 
 
 # ==================== GitHub Copilot 常量 ====================
-# 模仿 VS Code Copilot Chat 扩展的请求头；GitHub 上游会校验这些头，请勿删除
+# 模仿 VS Code Copilot Chat 扩展的请求头；GitHub 上游会校验这些头，请勿删除。
+# 默认值从早期的 vscode/1.95.3 + copilot-chat/0.22.4 (2024-11 版本) 抬到 2025
+# stable 中期版本组合，避免被 Cloudflare bot management 归类为 legacy client。
+# 三个 env 变量允许运维随 VS Code / Copilot Chat 官方版本自行滚动，无需改代码。
+#   COPILOT_EDITOR_VERSION        默认 vscode/1.104.0
+#   COPILOT_EDITOR_PLUGIN_VERSION 默认 copilot-chat/0.30.0
+#   COPILOT_USER_AGENT            默认 GitHubCopilotChat/0.30.0
+COPILOT_EDITOR_VERSION = os.getenv("COPILOT_EDITOR_VERSION", "vscode/1.104.0")
+COPILOT_EDITOR_PLUGIN_VERSION = os.getenv("COPILOT_EDITOR_PLUGIN_VERSION", "copilot-chat/0.30.0")
+COPILOT_USER_AGENT = os.getenv("COPILOT_USER_AGENT", "GitHubCopilotChat/0.30.0")
 COPILOT_HEADERS = {
-    "Editor-Version": "vscode/1.95.3",
-    "Editor-Plugin-Version": "copilot-chat/0.22.4",
+    "Editor-Version": COPILOT_EDITOR_VERSION,
+    "Editor-Plugin-Version": COPILOT_EDITOR_PLUGIN_VERSION,
     "Copilot-Integration-Id": "vscode-chat",
-    "User-Agent": "GitHubCopilotChat/0.22.4",
+    "User-Agent": COPILOT_USER_AGENT,
     "Openai-Organization": "github-copilot",
 }
+
+# HTML 软熔断窗口秒数。检测到上游返回 HTML challenge / 错误页时，把该 endpoint
+# 加入软熔断池 N 秒（默认 30s），期间 `_select_endpoint` 优先跳过它。0 = 关闭该
+# 功能（回到旧行为）。相比硬熔断：不清 total_errors 也不置 circuit_open，30s 到
+# 期即自动脱敏，比 circuit_breaker_timeout (60s+) 更适合 CDN 抖动场景。
+COPILOT_HTML_SOFT_COOLDOWN = float(os.getenv("COPILOT_HTML_SOFT_COOLDOWN", "30"))
 # VS Code Copilot 官方公开的 OAuth Client ID（device flow 用）
 COPILOT_CLIENT_ID = "Iv1.b507a08c87ecfe98"
 COPILOT_DEVICE_CODE_URL = "https://github.com/login/device/code"
@@ -1091,6 +1127,15 @@ class CopilotEndpoint:
     total_response_time: float = field(default=0.0, repr=False)
     successful_requests: int = field(default=0, repr=False)
     model_stats: dict = field(default_factory=dict, repr=False)
+
+    # HTML 软熔断窗口。上游返回 HTML challenge 页（如 Cloudflare "Just a moment"）
+    # 或 4xx/5xx HTML 时，把 `time.time() + COPILOT_HTML_SOFT_COOLDOWN` 写到这里；
+    # `CopilotProxy._select_endpoint` 在 `time.time() < html_soft_cooldown_until`
+    # 时先跳过该 endpoint，避免同一 socket 反复踩同一 CDN challenge session。
+    # 不动 `total_errors` / `circuit_open`，以免打乱现有硬熔断的统计口径。
+    html_soft_cooldown_until: float = field(default=0.0, repr=False)
+    # HTML 事件累计计数（供 /metrics 与 /stats）
+    upstream_html_events_total: int = field(default=0, repr=False)
 
 
 @dataclass
@@ -1706,13 +1751,14 @@ class ClaudeProxy:
         if cc_cleaned > 0:
             logger.info(f"Stripped extra fields from {cc_cleaned} cache_control objects")
 
-        # 处理 thinking 参数兼容性
-        # 新模型 (Opus 4.6+, Sonnet 4.6+): 支持 adaptive（推荐），enabled + budget_tokens 已废弃
-        # 旧模型 (Sonnet 4.5, Opus 4.5 等): 仅支持 enabled + budget_tokens
+        # 处理 thinking 参数兼容性 —— 判断逻辑抽到模块级 `supports_adaptive_thinking()`
+        # 便于独立单元测试和未来扩展。Adaptive 是 Anthropic 官方推荐的当前协议；
+        # 采用黑名单策略后 Opus 5 / Sonnet 5 及未来更高版本自动走 adaptive。
+        # 注意：`body["model"]` 已被 get_databricks_model() 替换为 databricks 内部名。
         if "thinking" in body and isinstance(body["thinking"], dict):
             thinking_type = body["thinking"].get("type")
             model = body.get("model", "")
-            supports_adaptive = any(x in model for x in ["opus-4-6", "opus-4-7", "sonnet-4-6"])
+            supports_adaptive = supports_adaptive_thinking(model)
 
             if supports_adaptive:
                 # 新模型: 使用 adaptive，移除多余的 budget_tokens
@@ -2509,32 +2555,115 @@ class _LongLivedTokenInvalidError(Exception):
     """long-lived OAuth token 失效（GitHub 端 401），自愈链上层捕获"""
 
 
-def _build_upstream_error_detail(status: int, body_text: str, provider: str, endpoint_name: str) -> dict:
+# 上游响应头里对排查最有价值的一组字段。cf-ray / x-github-request-id / server
+# 是找 GitHub Support 反馈时能立刻收窄搜索范围的字段，客户端里若能看到 cf-ray
+# 就意味着请求走到了 Cloudflare edge 而非本地 LB 自己异常。
+_UPSTREAM_DIAG_HEADERS = (
+    "x-request-id",
+    "x-github-request-id",
+    "cf-ray",
+    "server",
+    "x-served-by",
+    "x-cache",
+)
+
+
+def _extract_upstream_ids(headers) -> dict:
+    """从 httpx.Response.headers（或任意 Mapping[str, str]）抽出诊断字段。
+
+    出现 HTML 拦截、502、PoolTimeout 时把这几行塞进日志和 SSE error.message 尾部，
+    运维/用户能立刻拿到 cf-ray / x-github-request-id 提交给 GitHub Support。
+    """
+    if not headers:
+        return {}
+    result: dict = {}
+    try:
+        for key in _UPSTREAM_DIAG_HEADERS:
+            value = headers.get(key)
+            if value:
+                # 部分 CDN 会返回逗号分隔的多值，直接采用第一段即可
+                result[key] = str(value)[:200]
+    except Exception:  # noqa: BLE001 - headers 类型多样，防守式
+        return result
+    return result
+
+
+def _format_upstream_ids_suffix(ids: dict) -> str:
+    """把 upstream_ids dict 拼成 `cf-ray=abc x-request-id=def` 形式，供日志/error message 追加。"""
+    if not ids:
+        return ""
+    return " ".join(f"{k}={v}" for k, v in ids.items())
+
+
+def _build_upstream_error_detail(
+    status: int,
+    body_text: str,
+    provider: str,
+    endpoint_name: str,
+    content_type: Optional[str] = None,
+    upstream_headers=None,
+    lb_request_id: Optional[str] = None,
+) -> dict:
     """把上游错误响应规范化成 JSON detail，避免 HTML / 非 JSON 内容透传给客户端。
 
-    - HTML 错误页（CDN "Connection Closed" 等）→ 替换为简洁说明
+    - HTML 错误页（CDN "Connection Closed" / Cloudflare challenge 等）→ 替换为简洁说明
     - 上游已经是 JSON → 直接用
     - 文本/其他 → 截断后放 message
+
+    ``content_type`` 优先于 body 前缀识别：只要 Content-Type 是 ``text/html*``，
+    即使 body 有 BOM / whitespace 前缀也强制走 HTML 分支。这解决了 status=200 +
+    Cloudflare "Just a moment" 挑战页会被 pump 原样透传给客户端 SSE 消费者的问题。
+
+    ``upstream_headers`` 传入时，从中抽 cf-ray / x-github-request-id / server 等
+    诊断字段挂到 ``error.upstream_ids``，同时也把它拼进 ``error.message`` 尾部，
+    Codex 类不读 metadata 的客户端也能在错误面板上看到。
     """
     body_text = (body_text or "").strip()
     snippet = body_text[:300]
     body_lower = body_text.lstrip().lower()
 
+    upstream_ids = _extract_upstream_ids(upstream_headers) if upstream_headers is not None else {}
+    # Attach LB-side request_id so a diagnostic pipeline can cross-reference
+    # LB access logs and upstream GitHub Support tickets by a single field
+    # (message-suffix prefix `[req=...]` also carries it, but structured
+    # `error.upstream_ids.lb_request_id` survives arbitrary client parsing).
+    if lb_request_id:
+        upstream_ids = dict(upstream_ids)  # avoid mutating the shared dict
+        upstream_ids["lb_request_id"] = lb_request_id
+    ids_suffix = _format_upstream_ids_suffix(upstream_ids)
+
+    ct_is_html = False
+    if content_type:
+        try:
+            ct_is_html = content_type.strip().lower().startswith("text/html")
+        except Exception:
+            ct_is_html = False
+
+    is_html_body = (
+        body_lower.startswith("<!doctype")
+        or body_lower.startswith("<html")
+        or "<body" in body_lower[:200]
+    )
+
     # 1) HTML 错误页（CDN/网关），不要透传给客户端
-    if body_lower.startswith("<!doctype") or body_lower.startswith("<html") or "<body" in body_lower[:200]:
-        return {
-            "error": {
-                "message": (
-                    f"{provider} upstream returned a non-JSON HTML error page (HTTP {status}). "
-                    f"This usually indicates a transient outage on the upstream service or its CDN/gateway. "
-                    f"Endpoint: '{endpoint_name}'. Consider retrying."
-                ),
-                "type": "upstream_error",
-                "code": "upstream_html_error",
-                "upstream_status": status,
-                "upstream_endpoint": endpoint_name,
-            }
+    if ct_is_html or is_html_body:
+        base_message = (
+            f"{provider} upstream returned a non-JSON HTML error page (HTTP {status}). "
+            f"This usually indicates a transient outage on the upstream service or its CDN/gateway. "
+            f"Endpoint: '{endpoint_name}'. Consider retrying."
+        )
+        if ids_suffix:
+            base_message = f"{base_message} [{ids_suffix}]"
+        detail: dict = {
+            "message": base_message,
+            "type": "upstream_error",
+            "code": "upstream_html_error",
+            "upstream_status": status,
+            "upstream_endpoint": endpoint_name,
         }
+        if upstream_ids:
+            detail["upstream_ids"] = upstream_ids
+        return {"error": detail}
 
     # 2) 上游 JSON：直接采用（如果格式合理）
     if body_text:
@@ -2545,26 +2674,36 @@ def _build_upstream_error_detail(status: int, body_text: str, provider: str, end
                 if "error" in parsed and isinstance(parsed["error"], dict):
                     parsed["error"].setdefault("upstream_status", status)
                     parsed["error"].setdefault("upstream_endpoint", endpoint_name)
+                    if upstream_ids:
+                        parsed["error"].setdefault("upstream_ids", upstream_ids)
                     return parsed
-                return {
-                    "error": {
-                        "message": json.dumps(parsed)[:500],
-                        "upstream_status": status,
-                        "upstream_endpoint": endpoint_name,
-                    }
+                fallback_msg = json.dumps(parsed)[:500]
+                if ids_suffix:
+                    fallback_msg = f"{fallback_msg} [{ids_suffix}]"
+                inner: dict = {
+                    "message": fallback_msg,
+                    "upstream_status": status,
+                    "upstream_endpoint": endpoint_name,
                 }
+                if upstream_ids:
+                    inner["upstream_ids"] = upstream_ids
+                return {"error": inner}
         except Exception:
             pass
 
     # 3) 纯文本 / 空 body
-    return {
-        "error": {
-            "message": (snippet or f"{provider} upstream returned HTTP {status} with no body"),
-            "type": "upstream_error",
-            "upstream_status": status,
-            "upstream_endpoint": endpoint_name,
-        }
+    text_msg = snippet or f"{provider} upstream returned HTTP {status} with no body"
+    if ids_suffix:
+        text_msg = f"{text_msg} [{ids_suffix}]"
+    detail_text: dict = {
+        "message": text_msg,
+        "type": "upstream_error",
+        "upstream_status": status,
+        "upstream_endpoint": endpoint_name,
     }
+    if upstream_ids:
+        detail_text["upstream_ids"] = upstream_ids
+    return {"error": detail_text}
 
 
 class CopilotProxy:
@@ -2702,6 +2841,22 @@ class CopilotProxy:
         self._probe_lock = asyncio.Lock()
         self._last_probe_at: float = 0.0
         self._last_probe_result: Optional[dict] = None
+        # 上游返回 HTML challenge / 错误页的累计次数。默认 4xx HTML 走 is_client_error
+        # 路径不进 total_errors；用独立 counter 让 /metrics 看到 CDN 层拦截率的真实
+        # 走势，同时供 alert 规则单独判断。
+        self.upstream_html_events_total = 0
+        # 按上游 HTTP 状态桶 (200/4xx/5xx/other) 拆分 HTML 事件计数，Grafana 里可以
+        # 单独看 Cloudflare 挑战页（200-HTML）vs 上游服务错误（4xx/5xx-HTML）。
+        # key = "200" | "4xx" | "5xx" | "other"
+        self.upstream_html_events_by_status: Dict[str, int] = {}
+        # 已经开始承载 opaque state 的请求（携带 previous_response_id 或
+        # input[*].encrypted_content）不允许跨账户/跨 endpoint 重放：另一账户上没有
+        # 对应 session 会直接 401（handoff §7.2 实证）。首次选定 endpoint 后，
+        # 后续所有切换点都传 pinned=first_endpoint 给 _select_endpoint；被拒绝的
+        # 切换按 reason 分类累加进这个 dict，供 /metrics 观测 pinning 生效频次。
+        # reason ∈ {"http_5xx", "pool_timeout", "network_error", "generic_error",
+        # "html_cooldown", "auth_refresh"}
+        self.stateful_pinned_events: Dict[str, int] = {}
 
     def _record_truncation(self, model: str, api_type: str) -> None:
         """Bucket a silent-truncation event by (model, api_type) for Prometheus."""
@@ -3250,37 +3405,96 @@ class CopilotProxy:
 
     # ---- Endpoint 选择 ----
 
-    def _select_endpoint(self, model: str) -> Optional[CopilotEndpoint]:
-        """从可用端点中筛选支持指定模型的端点。空 models = 通配。"""
+    def _select_endpoint(self, model: str,
+                          *, pinned: Optional[CopilotEndpoint] = None) -> Optional[CopilotEndpoint]:
+        """从可用端点中筛选支持指定模型的端点。空 models = 通配。
+
+        HTML 软熔断：`ep.html_soft_cooldown_until` 未到期的端点会被优先跳过；
+        只有当所有匹配端点都在冷却窗口内时才退回到"最小活跃"的那个（保可用性），
+        此时下一次请求即便再次踩 HTML 也会由 `_apply_html_cooldown` 刷新窗口。
+
+        ``pinned``：当调用方（`_proxy` / `_stream_response`）已经在同一次业务
+        请求内选中过某个 endpoint，并且请求携带 opaque state 时传入这个参数。
+        仅当该 endpoint 仍在可用集合内（未熔断）时返回它；否则返回 None（不
+        允许切换）。HTML 软熔断对 pinned 无效——handoff §7.2 揭示的 401 风险
+        高于让同一 endpoint 再踩一次 CDN 挑战页的代价，等 30s 冷却或跨请求
+        才会由外层重路由。
+        """
         available = self.load_balancer.get_available_endpoints()
         matched = [ep for ep in available if not ep.models or model in ep.models]
         if not matched:
             return None
-        if len(matched) == 1:
-            return matched[0]
+        if pinned is not None:
+            # 只要 pinned 仍在可用集合里就返回它，忽略 HTML cooldown。若 pinned
+            # 已被硬熔断（不在 available）就返 None，让调用方 fail-fast。
+            return pinned if pinned in matched else None
+        now = time.time()
+        fresh = [ep for ep in matched if ep.html_soft_cooldown_until <= now]
+        pool = fresh if fresh else matched  # 全部冷却时降级到"最小活跃"选一个而不是拒绝
+        if len(pool) == 1:
+            return pool[0]
 
         strategy = self.load_balancer.strategy
         if strategy == "least_requests":
-            min_active = min(ep.active_requests / ep.weight for ep in matched)
-            candidates = [ep for ep in matched if ep.active_requests / ep.weight == min_active]
+            min_active = min(ep.active_requests / ep.weight for ep in pool)
+            candidates = [ep for ep in pool if ep.active_requests / ep.weight == min_active]
             if len(candidates) == 1:
                 return candidates[0]
             min_total = min(ep.total_requests / ep.weight for ep in candidates)
             finalists = [ep for ep in candidates if ep.total_requests / ep.weight == min_total]
             return random.choice(finalists)
         elif strategy == "round_robin":
-            total_weight = sum(ep.weight for ep in matched)
+            total_weight = sum(ep.weight for ep in pool)
             idx = self.load_balancer._rr_index % total_weight
             self.load_balancer._rr_index += 1
             cumulative = 0
-            for ep in matched:
+            for ep in pool:
                 cumulative += ep.weight
                 if idx < cumulative:
                     return ep
-            return matched[-1]
+            return pool[-1]
         else:
-            weights = [ep.weight for ep in matched]
-            return random.choices(matched, weights=weights, k=1)[0]
+            weights = [ep.weight for ep in pool]
+            return random.choices(pool, weights=weights, k=1)[0]
+
+    def _apply_html_cooldown(self, endpoint: CopilotEndpoint, api_type: str, status: int,
+                              upstream_ids: Optional[dict] = None) -> None:
+        """检测到 HTML 响应时统一入口：累加计数器 + 设置软熔断窗口 + 结构化日志。
+
+        - 累加全局 `upstream_html_events_total` 与 per-endpoint 计数（供 /metrics）
+        - `endpoint.html_soft_cooldown_until = now + COPILOT_HTML_SOFT_COOLDOWN`（0 = 关闭）
+        - 打一行 `kind=copilot_upstream_html` 结构化日志，带 upstream_ids 便于 Kusto 检索
+        """
+        self.upstream_html_events_total += 1
+        endpoint.upstream_html_events_total += 1
+        # 按上游 HTTP 状态分桶：200 (Cloudflare challenge) vs 4xx (拒绝) vs 5xx (上游错) 完全不同的处理线索
+        if status == 200:
+            bucket = "200"
+        elif 400 <= status < 500:
+            bucket = "4xx"
+        elif 500 <= status < 600:
+            bucket = "5xx"
+        else:
+            bucket = "other"
+        self.upstream_html_events_by_status[bucket] = (
+            self.upstream_html_events_by_status.get(bucket, 0) + 1
+        )
+        cooldown = COPILOT_HTML_SOFT_COOLDOWN
+        if cooldown > 0:
+            endpoint.html_soft_cooldown_until = time.time() + cooldown
+        ids_payload = upstream_ids or {}
+        logger.warning(
+            "[Copilot] upstream HTML response detected (endpoint=%s api=%s status=%s cooldown=%.1fs upstream_ids=%s)",
+            endpoint.name, api_type, status, cooldown, ids_payload,
+            extra={
+                "kind": "copilot_upstream_html",
+                "endpoint": endpoint.name,
+                "api_type": api_type,
+                "upstream_status": status,
+                "html_soft_cooldown_seconds": cooldown,
+                "upstream_ids": ids_payload,
+            },
+        )
 
     def can_handle(self, model: str) -> bool:
         """是否有任何健康端点可服务该模型（路由层用来决定是否优先 Copilot）"""
@@ -3329,12 +3543,63 @@ class CopilotProxy:
                         return True
         return False
 
-    async def _build_headers(self, endpoint: CopilotEndpoint, has_image: bool) -> dict:
+    @staticmethod
+    def _request_has_opaque_state(body: dict, api_type: str) -> bool:
+        """请求是否携带对特定上游账户/会话敏感的 opaque state。
+
+        handoff §7.2 已实证：同一 opaque reasoning state 在原账户 200，换另一
+        个已授权账户返 401；同账户下无状态请求切换到 B 仍 200。因此下面两类
+        请求一旦选定 endpoint 就必须钉住，任何切换点都要拒绝换 endpoint：
+
+        1. ``previous_response_id`` 存在且非空 —— Responses API 引用上一次
+           服务端保存的响应，仅原 endpoint 有该 session 状态。
+        2. ``input[*].content[*].encrypted_content`` 存在（Responses API 的
+           reasoning 加密状态）—— 只能被生成它的账户解密。
+
+        无状态请求（纯输入、无 previous/encrypted）保持原 failover。Chat
+        Completions 目前不走 opaque state 协议，一律返 False。
+        """
+        if not isinstance(body, dict):
+            return False
+        if api_type != "responses":
+            return False
+        # 1) previous_response_id
+        prid = body.get("previous_response_id")
+        if isinstance(prid, str) and prid.strip():
+            return True
+        # 2) 顶层 input 里任意 item.content 含 encrypted_content
+        input_items = body.get("input")
+        if isinstance(input_items, list):
+            for item in input_items:
+                if not isinstance(item, dict):
+                    continue
+                if "encrypted_content" in item and item.get("encrypted_content"):
+                    return True
+                content = item.get("content")
+                if isinstance(content, list):
+                    for c in content:
+                        if isinstance(c, dict) and c.get("encrypted_content"):
+                            return True
+        return False
+
+    def _note_stateful_pin(self, reason: str) -> None:
+        """累加 pinning 计数（换 endpoint 因 stateful 保护被拒绝时调）。"""
+        self.stateful_pinned_events[reason] = self.stateful_pinned_events.get(reason, 0) + 1
+
+    async def _build_headers(self, endpoint: CopilotEndpoint, has_image: bool,
+                              stream: bool = False) -> dict:
         token = await self.get_session_token(endpoint)
+        # 显式带上 Accept / Accept-Encoding / Accept-Language 三件套。真实 VS Code
+        # Copilot Chat 扩展会带这些字段，缺失即被 Cloudflare bot management 判为
+        # 客户端指纹异常概率显著上升；stream 请求另外用 Accept: text/event-stream
+        # 让上游按 SSE 协议协商（不至于返 chunked JSON 之类）。
         headers = {
             **COPILOT_HEADERS,
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
+            "Accept": "text/event-stream" if stream else "application/json",
+            "Accept-Encoding": "gzip, deflate",
+            "Accept-Language": "en-US,en;q=0.9",
             "Openai-Intent": "conversation-edits",
             "X-Initiator": "user",
         }
@@ -3399,15 +3664,37 @@ class CopilotProxy:
         last_error: Optional[Exception] = None
         start_time = time.time()
         has_image = self._has_image(body)
+        # 携带 opaque state 的请求首次选定后钉住，禁止跨 endpoint 重放（handoff §7.2）
+        is_stateful = self._request_has_opaque_state(body, api_type)
+        pinned_endpoint: Optional[CopilotEndpoint] = None
 
         # 流式请求注入 stream_options 以获取 usage（Copilot 兼容 OpenAI Chat 流约定）
         if stream and api_type == "chat" and "stream_options" not in body:
             body["stream_options"] = {"include_usage": True}
 
         for attempt in range(max_retries):
-            endpoint = self._select_endpoint(model)
+            endpoint = self._select_endpoint(model, pinned=pinned_endpoint if is_stateful else None)
             if not endpoint:
+                if is_stateful and pinned_endpoint is not None:
+                    # pinned endpoint 掉线 → 直接抛 503，让客户端知道要重新构造会话
+                    # 而不是我们静默换账户导致 401。
+                    self._note_stateful_pin("pinned_unavailable")
+                    raise HTTPException(
+                        status_code=503,
+                        detail={"error": {
+                            "message": (
+                                f"Copilot endpoint '{pinned_endpoint.name}' is temporarily "
+                                f"unavailable and this request carries opaque state "
+                                f"(previous_response_id or encrypted_content) that cannot be "
+                                f"replayed on another account. Retry after the endpoint recovers."
+                            ),
+                            "type": "upstream_error",
+                            "code": "stateful_pinned_endpoint_unavailable",
+                        }},
+                    )
                 raise HTTPException(status_code=404, detail={"error": {"message": f"No Copilot endpoint available for model '{model}'"}})
+            if is_stateful and pinned_endpoint is None:
+                pinned_endpoint = endpoint
 
             await self.load_balancer.on_request_start(endpoint)
             attempt_ended = False
@@ -3422,7 +3709,7 @@ class CopilotProxy:
                 attempt_ended = True
 
             try:
-                headers = await self._build_headers(endpoint, has_image)
+                headers = await self._build_headers(endpoint, has_image, stream=stream)
             except asyncio.CancelledError:
                 cleanup_task = asyncio.create_task(
                     end_attempt(success=False, is_client_error=True)
@@ -3479,6 +3766,8 @@ class CopilotProxy:
                     body_text = e.response.text
                 except Exception:
                     pass
+                upstream_ct = e.response.headers.get("content-type", "") if e.response is not None else ""
+                upstream_hdrs = e.response.headers if e.response is not None else None
                 if self._is_unsupported_model_error(status, body_text):
                     await end_attempt(success=False, is_client_error=True)
                     raise _UnsupportedModelError(f"{status}: {body_text[:200]}")
@@ -3492,13 +3781,21 @@ class CopilotProxy:
                     except Exception as refresh_err:
                         logger.error(f"[Copilot] forced refresh failed: {refresh_err}")
                         # fall through 到正常错误返回
+                # 早期 HTML 识别（4xx/5xx 都可能是 CDN 返 HTML）—— 触发软熔断
+                error_body = _build_upstream_error_detail(
+                    status, body_text, "Copilot", endpoint.name,
+                    content_type=upstream_ct, upstream_headers=upstream_hdrs,
+                    lb_request_id=request_id,
+                )
+                if error_body.get("error", {}).get("code") == "upstream_html_error":
+                    ids = error_body["error"].get("upstream_ids") or {}
+                    self._apply_html_cooldown(endpoint, api_type, status, upstream_ids=ids)
                 is_client_error = 400 <= status < 500 and status != 429
                 await end_attempt(success=False, is_client_error=is_client_error)
                 if status in (429, 500, 502, 503, 504):
                     logger.warning(f"[Copilot] {endpoint.name} returned {status}, retrying...")
                     await asyncio.sleep(min(2 ** attempt, 8))
                     continue
-                error_body = _build_upstream_error_detail(status, body_text, "Copilot", endpoint.name)
                 raise HTTPException(status_code=status, detail=error_body)
             except httpx.PoolTimeout as e:
                 # Local client saturation is not an upstream endpoint failure.
@@ -3543,7 +3840,9 @@ class CopilotProxy:
             except Exception:
                 body_text = ""
             detail = _build_upstream_error_detail(
-                last_error.response.status_code, body_text, "Copilot", endpoint.name if 'endpoint' in dir() and endpoint else "?"
+                last_error.response.status_code, body_text, "Copilot",
+                endpoint.name if 'endpoint' in dir() and endpoint else "?",
+                lb_request_id=request_id,
             )
             detail["error"]["message"] = "All Copilot retries exhausted. " + detail["error"].get("message", "")
             raise HTTPException(status_code=503, detail=detail)
@@ -3557,11 +3856,40 @@ class CopilotProxy:
             self.last_negotiated_http_version = response.http_version
         except Exception:  # noqa: BLE001
             pass
-        if response.status_code >= 400:
+        # 早期 content-type 校验：即使 status 是 200，Cloudflare "Just a moment"
+        # 挑战页也会返 text/html。此时 response.json() 会抛 JSONDecodeError 被上层
+        # 通用 except 兜底，客户端拿到的错误信息完全没有 CDN 上下文。这里显式识别
+        # 为 upstream_html_error，触发软熔断 + 结构化日志 + upstream_ids 追加。
+        content_type = response.headers.get("content-type", "")
+        is_html_ct = content_type.strip().lower().startswith("text/html")
+        if is_html_ct or response.status_code >= 400:
             body_text = response.text
-            if self._is_unsupported_model_error(response.status_code, body_text):
+            if response.status_code >= 400 and self._is_unsupported_model_error(response.status_code, body_text):
                 raise _UnsupportedModelError(f"{response.status_code}: {body_text[:200]}")
-            response.raise_for_status()
+            body_lower = (body_text or "").lstrip().lower()
+            is_html_body = (
+                body_lower.startswith("<!doctype")
+                or body_lower.startswith("<html")
+                or "<body" in body_lower[:200]
+            )
+            if is_html_ct or is_html_body:
+                upstream_detail = _build_upstream_error_detail(
+                    response.status_code, body_text, "Copilot", endpoint.name,
+                    content_type=content_type,
+                    upstream_headers=response.headers,
+                    lb_request_id=request_id,
+                )
+                ids = upstream_detail.get("error", {}).get("upstream_ids") or {}
+                self._apply_html_cooldown(endpoint, api_type, response.status_code, upstream_ids=ids)
+                logger.error(
+                    f"[Copilot] non-stream HTML error page ({response.status_code}, "
+                    f"content-type={content_type}): {(body_text or '')[:300].replace(chr(10), ' ')}"
+                )
+                # HTML challenge / 上游软故障统一按 502 抛，让客户端不误信 200 body。
+                # 保留 upstream_detail 的 error 结构 + upstream_ids 便于 debug。
+                raise HTTPException(status_code=502, detail=upstream_detail)
+            if response.status_code >= 400:
+                response.raise_for_status()
         elapsed = time.time() - start_time
         resp_json = response.json()
         usage = resp_json.get("usage", {}) or {}
@@ -3621,6 +3949,10 @@ class CopilotProxy:
         except Exception:
             body_bytes_size = -1
         has_image_cached = self._has_image(body)
+        # 携带 opaque state 的请求钉住 initial endpoint，禁止跨账户重放。
+        # handoff §7.2 已实证跨账户 previous_response_id / encrypted_content 会 401。
+        is_stateful = self._request_has_opaque_state(body, api_type)
+        stateful_pin: Optional[CopilotEndpoint] = endpoint if is_stateful else None
 
         def _sse_error_metadata() -> dict:
             """Build the `error.metadata` block embedded in SSE terminal errors.
@@ -3780,7 +4112,13 @@ class CopilotProxy:
                             except Exception:  # noqa: BLE001
                                 pass
 
-                    if response.status_code >= 400:
+                    # 早期 content-type 校验：即使 status 是 200，Cloudflare "Just a
+                    # moment" 挑战页也会返 text/html。之前 pump 会把 HTML 原字节透传
+                    # 给客户端 SSE 消费者，客户端 SDK 解析失败自己报 "HTML error page"。
+                    # 现在同 status>=400 分支合并成一条 HTML 路径，都触发软熔断。
+                    upstream_ct = response.headers.get("content-type", "") if response is not None else ""
+                    upstream_ct_is_html = upstream_ct.strip().lower().startswith("text/html")
+                    if response.status_code >= 400 or upstream_ct_is_html:
                         error_body = await response.aread()
                         try:
                             error_text = error_body.decode("utf-8") if isinstance(error_body, bytes) else str(error_body)
@@ -3793,15 +4131,21 @@ class CopilotProxy:
                             raise _UnsupportedModelError(f"{response.status_code}: {error_text[:200]}")
 
                         is_client_error = 400 <= response.status_code < 500 and response.status_code != 429
-                        # 规范化（HTML 不透传给客户端；JSON 直接用）
+                        # 规范化（HTML 不透传给客户端；JSON 直接用；带 upstream_ids）
                         upstream_detail = _build_upstream_error_detail(
-                            response.status_code, error_text, "Copilot", current_endpoint.name
+                            response.status_code, error_text, "Copilot", current_endpoint.name,
+                            content_type=upstream_ct,
+                            upstream_headers=response.headers,
+                            lb_request_id=request_id,
                         )
                         # 日志只截断 + 标注是否 HTML
                         log_snippet = error_text[:300].replace("\n", " ") if error_text else ""
                         is_html = upstream_detail.get("error", {}).get("code") == "upstream_html_error"
+                        if is_html:
+                            ids = upstream_detail["error"].get("upstream_ids") or {}
+                            proxy_self._apply_html_cooldown(current_endpoint, api_type, response.status_code, upstream_ids=ids)
                         logger.error(
-                            f"[Copilot] stream failed ({response.status_code}, "
+                            f"[Copilot] stream failed ({response.status_code}, ct={upstream_ct}, "
                             f"{'HTML error page' if is_html else 'JSON/text'}): {log_snippet}"
                         )
                         await end_current_request(success=False, is_client_error=is_client_error)
@@ -3811,7 +4155,7 @@ class CopilotProxy:
                             logger.warning(f"[Copilot] 401 from stream on {current_endpoint.name}, forcing session refresh and retrying")
                             try:
                                 await proxy_self.get_session_token(current_endpoint, force=True)
-                                current_headers = await proxy_self._build_headers(current_endpoint, proxy_self._has_image(body))
+                                current_headers = await proxy_self._build_headers(current_endpoint, proxy_self._has_image(body), stream=True)
                                 await start_current_request(current_endpoint)
                                 continue
                             except Exception as he:
@@ -3821,11 +4165,18 @@ class CopilotProxy:
                         if response.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1 and not sent_any_chunk:
                             logger.warning(f"[Copilot] {current_endpoint.name} returned {response.status_code}, retrying stream...")
                             await asyncio.sleep(min(2 ** attempt, 8))
-                            new_endpoint = proxy_self._select_endpoint(model)
+                            new_endpoint = proxy_self._select_endpoint(model, pinned=stateful_pin)
+                            # stateful 请求且 pinned 已 unavailable → new_endpoint 为 None → 跳过 retry
+                            if is_stateful and new_endpoint is None:
+                                proxy_self._note_stateful_pin("http_5xx")
+                                logger.warning(
+                                    f"[Copilot] stateful request pinned to {current_endpoint.name} "
+                                    f"but endpoint unavailable after {response.status_code}; failing fast"
+                                )
                             if new_endpoint:
                                 current_endpoint = new_endpoint
                                 try:
-                                    current_headers = await proxy_self._build_headers(current_endpoint, proxy_self._has_image(body))
+                                    current_headers = await proxy_self._build_headers(current_endpoint, proxy_self._has_image(body), stream=True)
                                 except Exception as he:
                                     logger.error(f"[Copilot] header build during retry failed: {he}")
                                     yield _sse_terminal_error(api_type, "upstream_header_build_failed", str(he))
@@ -4004,11 +4355,17 @@ class CopilotProxy:
                         and not (single_endpoint and is_upstream_stall)
                     ):
                         await asyncio.sleep(min(2 ** attempt, 8))
-                        new_endpoint = proxy_self._select_endpoint(model)
+                        new_endpoint = proxy_self._select_endpoint(model, pinned=stateful_pin)
+                        if is_stateful and new_endpoint is None:
+                            proxy_self._note_stateful_pin("pool_timeout")
+                            logger.warning(
+                                f"[Copilot] stateful request pinned to {current_endpoint.name} "
+                                f"but endpoint unavailable after PoolTimeout; failing fast"
+                            )
                         if new_endpoint:
                             current_endpoint = new_endpoint
                             try:
-                                current_headers = await proxy_self._build_headers(current_endpoint, has_image_cached)
+                                current_headers = await proxy_self._build_headers(current_endpoint, has_image_cached, stream=True)
                             except Exception as he:
                                 logger.error(f"[Copilot] header build during retry failed: {he}")
                                 yield _sse_terminal_error(api_type, "upstream_header_build_failed", str(he),
@@ -4076,11 +4433,17 @@ class CopilotProxy:
 
                     if not sent_any_chunk and attempt < max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt, 8))
-                        new_endpoint = proxy_self._select_endpoint(model)
+                        new_endpoint = proxy_self._select_endpoint(model, pinned=stateful_pin)
+                        if is_stateful and new_endpoint is None:
+                            proxy_self._note_stateful_pin("network_error")
+                            logger.warning(
+                                f"[Copilot] stateful request pinned to {current_endpoint.name} "
+                                f"but endpoint unavailable after network error; failing fast"
+                            )
                         if new_endpoint:
                             current_endpoint = new_endpoint
                             try:
-                                current_headers = await proxy_self._build_headers(current_endpoint, has_image_cached)
+                                current_headers = await proxy_self._build_headers(current_endpoint, has_image_cached, stream=True)
                             except Exception as he:
                                 logger.error(f"[Copilot] header build during retry failed: {he}")
                                 yield _sse_terminal_error(api_type, "upstream_header_build_failed", str(he),
@@ -4142,6 +4505,7 @@ class CopilotProxy:
         gs = self.global_stats
         uptime = time.time() - gs.start_time
         endpoints_stats = []
+        now_ts = time.time()
         for ep in self.load_balancer.endpoints:
             endpoints_stats.append({
                 "name": ep.name,
@@ -4160,6 +4524,10 @@ class CopilotProxy:
                 "model_stats": ep.model_stats,
                 "models": ep.models,  # 用 'models' 区别于 Azure 的 'deployments'
                 "session_token_expires_at": ep.session_token_expires_at,
+                # HTML 软熔断诊断字段
+                "upstream_html_events_total": ep.upstream_html_events_total,
+                "html_soft_cooldown_active": ep.html_soft_cooldown_until > now_ts,
+                "html_soft_cooldown_remaining_seconds": max(0.0, ep.html_soft_cooldown_until - now_ts),
             })
         total_active = sum(ep.active_requests for ep in self.load_balancer.endpoints)
         return {
@@ -4204,6 +4572,13 @@ class CopilotProxy:
                 "h2_package_available": self.H2_PACKAGE_AVAILABLE,
                 "h2_package_version": self.H2_PACKAGE_VERSION,
                 "last_negotiated_http_version": self.last_negotiated_http_version,
+                # 请求头版本（写死值 + env 是否覆盖了默认；OPS 排查"是不是我改了 env"最快）
+                "editor_version": COPILOT_EDITOR_VERSION,
+                "editor_plugin_version": COPILOT_EDITOR_PLUGIN_VERSION,
+                "user_agent": COPILOT_USER_AGENT,
+                # HTML 软熔断相关
+                "upstream_html_events_total": self.upstream_html_events_total,
+                "html_soft_cooldown_seconds": COPILOT_HTML_SOFT_COOLDOWN,
             },
             "endpoints": endpoints_stats,
         }
@@ -5542,6 +5917,9 @@ async def metrics():
         endpoint_active_samples = []
         endpoint_input_tokens_samples = []
         endpoint_output_tokens_samples = []
+        endpoint_html_events_samples = []
+        endpoint_html_cooldown_samples = []
+        endpoint_html_cooldown_remaining_samples = []
         for ep in copilot_proxy.load_balancer.endpoints:
             lbl = f'endpoint="{ep.name}"'
             token_expires_samples.append(f'copilot_session_token_expires_at_seconds{{{lbl}}} {ep.session_token_expires_at}')
@@ -5555,6 +5933,11 @@ async def metrics():
             endpoint_active_samples.append(f'copilot_endpoint_active_requests{{{lbl}}} {ep.active_requests}')
             endpoint_input_tokens_samples.append(f'copilot_endpoint_input_tokens_total{{{lbl}}} {ep.total_input_tokens}')
             endpoint_output_tokens_samples.append(f'copilot_endpoint_output_tokens_total{{{lbl}}} {ep.total_output_tokens}')
+            endpoint_html_events_samples.append(f'copilot_upstream_html_events_total{{{lbl}}} {ep.upstream_html_events_total}')
+            in_cooldown = 1 if ep.html_soft_cooldown_until > now else 0
+            endpoint_html_cooldown_samples.append(f'copilot_html_soft_cooldown_active{{{lbl}}} {in_cooldown}')
+            remaining = max(0, ep.html_soft_cooldown_until - now)
+            endpoint_html_cooldown_remaining_samples.append(f'copilot_html_soft_cooldown_remaining_seconds{{{lbl}}} {remaining}')
         emit("copilot_session_token_expires_at_seconds", "Unix epoch when current Copilot session token expires", "gauge", token_expires_samples)
         emit("copilot_session_token_remaining_seconds", "Seconds until current session token expires", "gauge", token_remaining_samples)
         emit("copilot_token_refresh_total", "Total successful token exchange calls", "counter", refresh_total_samples)
@@ -5566,6 +5949,40 @@ async def metrics():
         emit("copilot_endpoint_active_requests", "Currently in-flight requests per Copilot endpoint", "gauge", endpoint_active_samples)
         emit("copilot_endpoint_input_tokens_total", "Cumulative input tokens per Copilot endpoint", "counter", endpoint_input_tokens_samples)
         emit("copilot_endpoint_output_tokens_total", "Cumulative output tokens per Copilot endpoint", "counter", endpoint_output_tokens_samples)
+        emit("copilot_upstream_html_events_total",
+             "Times upstream returned an HTML page (CDN challenge / gateway error) per endpoint",
+             "counter", endpoint_html_events_samples)
+        emit("copilot_html_soft_cooldown_active",
+             "1 if endpoint is currently in the HTML soft-cooldown window (skipped by _select_endpoint)",
+             "gauge", endpoint_html_cooldown_samples)
+        emit("copilot_html_soft_cooldown_remaining_seconds",
+             "Remaining seconds before the endpoint exits HTML soft cooldown",
+             "gauge", endpoint_html_cooldown_remaining_samples)
+        # Aggregate (all-endpoint) counter — easier alert target than summing per-endpoint labels.
+        emit("copilot_upstream_html_events_all_total",
+             "Aggregate upstream HTML events across all Copilot endpoints",
+             "counter",
+             [f"copilot_upstream_html_events_all_total {copilot_proxy.upstream_html_events_total}"])
+        # Per-status-bucket breakdown so Grafana can distinguish Cloudflare "Just a moment"
+        # 200-HTML challenges from 4xx/5xx upstream service errors (different root causes).
+        html_status_samples = [
+            f'copilot_upstream_html_events_by_status_total{{status_bucket="{_escape_label(bucket)}"}} {count}'
+            for bucket, count in sorted(copilot_proxy.upstream_html_events_by_status.items())
+        ]
+        emit("copilot_upstream_html_events_by_status_total",
+             "Upstream HTML events broken down by upstream HTTP status bucket (200/4xx/5xx/other)",
+             "counter", html_status_samples)
+        # Stateful pinning: how many times _select_endpoint refused to switch endpoints
+        # because the request carries opaque state (previous_response_id / encrypted_content).
+        # A non-zero rate here proves the fix is doing its job — cross-account replay attempts
+        # that would otherwise 401 are now fail-fast at the LB layer.
+        pinned_samples = [
+            f'copilot_stateful_request_pinned_total{{reason="{_escape_label(reason)}"}} {count}'
+            for reason, count in sorted(copilot_proxy.stateful_pinned_events.items())
+        ]
+        emit("copilot_stateful_request_pinned_total",
+             "Cross-endpoint failovers refused because the request carries opaque session state",
+             "counter", pinned_samples)
         # Pool capacity gauges: expose configured upper bounds so scrapers / dashboards can alert on saturation
         emit("copilot_pool_max_connections", "Configured httpx max_connections for the Copilot shared client", "gauge",
              [f"copilot_pool_max_connections {CopilotProxy.POOL_MAX_CONNECTIONS}"])

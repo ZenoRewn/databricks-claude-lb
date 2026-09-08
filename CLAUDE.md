@@ -44,7 +44,7 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 - `MODEL_PRICING`: Anthropic 官方 API 定价（USD/MTok）
 - `get_databricks_model()`: 将 Claude 模型名映射到 Databricks 模型
   - `claude-*-sonnet-*` → `databricks-claude-sonnet-4-6`（默认），支持显式指定 4-5/4-6
-  - `claude-*-opus-*` → `databricks-claude-opus-4-7`（默认），支持显式指定 4-5/4-6/4-7
+  - `claude-*-opus-*` → `databricks-claude-opus-4-7`（默认），支持显式指定 4-5/4-6/4-7/5（`claude-opus-5*` 直通 Databricks `databricks-claude-opus-5`；正则 `opus[-_.]?5(?:[-_.]|$)` 优先于 `opus-*-*` 分支）
   - `claude-*-haiku-*` → `databricks-claude-haiku-4-5`
 - `get_model_pricing()` / `calculate_cost()`: 按模型名子串匹配定价并计算成本
 
@@ -73,7 +73,7 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 - `_normal_request()`: 普通 JSON 响应处理
 - `_record_usage()`: 记录 token 用量到内存统计 + `usage_store`
 - 请求路径: `{endpoint.api_base}/anthropic/v1/messages`
-- Thinking 参数自动转换: 新模型（Opus 4.6+、Sonnet 4.6+）使用 `adaptive`（移除多余 `budget_tokens`）；旧模型将 `adaptive` 转为 `enabled` + 自动计算 `budget_tokens`
+- Thinking 参数自动转换: 由模块级 `supports_adaptive_thinking(databricks_model)` 判定。**黑名单策略**——只有 `opus-4-5` / `sonnet-4-5` 走 `enabled` + `budget_tokens`；其它模型（含 Opus 4.6/4.7、Sonnet 4.6、Opus 5 及未来更高版本）默认走 `adaptive`（移除多余 `budget_tokens`）。这样 Anthropic 后续发新模型无需改代码。旧模型分支保留 max_tokens 与 budget_tokens 冲突时的自动调整
 
 ### Azure OpenAI 代理 (AzureOpenAIProxy)
 - `proxy_responses()`: Responses API 代理，URL: `{endpoint}/openai/v1/responses`
@@ -84,7 +84,7 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 ### GitHub Copilot 代理 (CopilotProxy)
 - `proxy_chat_completions()`: URL `{session_base_url}/chat/completions`，OpenAI 风格
 - `proxy_responses()`: URL `{session_base_url}/responses`，OpenAI Responses 风格（GPT-5 系列）
-- 必带 headers (`COPILOT_HEADERS` 常量): `Editor-Version: vscode/1.95.3`、`Editor-Plugin-Version: copilot-chat/0.22.4`、`Copilot-Integration-Id: vscode-chat`、`User-Agent: GitHubCopilotChat/0.22.4`、`Openai-Organization: github-copilot`、`Openai-Intent: conversation-edits`、`X-Initiator: user`。模仿 VS Code Copilot Chat 扩展，**这些值写死且必须保留**，否则上游会 401/403
+- 必带 headers (`COPILOT_HEADERS` 常量): `Editor-Version: vscode/1.104.0`（默认）、`Editor-Plugin-Version: copilot-chat/0.30.0`（默认）、`Copilot-Integration-Id: vscode-chat`（写死）、`User-Agent: GitHubCopilotChat/0.30.0`（默认）、`Openai-Organization: github-copilot`（写死）、`Openai-Intent: conversation-edits`、`X-Initiator: user`。前三项版本号由 env `COPILOT_EDITOR_VERSION` / `COPILOT_EDITOR_PLUGIN_VERSION` / `COPILOT_USER_AGENT` 覆盖，允许运维随 VS Code / Copilot Chat 官方版本自行滚动，无需改代码。业务请求另外按 stream/non-stream 附上 `Accept: text/event-stream` 或 `Accept: application/json`，并无条件加 `Accept-Encoding: gzip, deflate` + `Accept-Language: en-US,en;q=0.9` —— 真实 VS Code Copilot Chat 扩展会带这些字段，缺失即被 Cloudflare bot management 判为客户端指纹异常。模仿 VS Code Copilot Chat 扩展，**这些字段必须保留**，否则上游会 401/403 或返 CDN 挑战页 HTML
 - 视觉请求自动加 `Copilot-Vision-Request: true`（检测 messages.content 中是否含 `image_url`）
 - Auth Header: `Authorization: Bearer {short_lived_session_token}`
 
@@ -113,7 +113,28 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 - **`/health/ready`**：检查依赖就绪 — 至少 1 个 ADB endpoint 可用 + 至少 1 个 Copilot endpoint token 有效（K8s readinessProbe）
 - **`/metrics`**：Prometheus 文本格式，除 token/circuit/provider 指标外，还暴露 `copilot_stream_connections_active`、`copilot_stream_connection_oldest_seconds`、`copilot_stream_upstream_idle_max_seconds`、`copilot_stream_disconnects_detected_total`、`copilot_stream_forced_releases_total`、`copilot_pool_timeout_total` 等连接生命周期指标
 - **JSON 日志**：`LOG_FORMAT=json` 切换；字段 `ts`/`level`/`logger`/`message`，AKS Log Analytics 可直接 KQL 解析；接管 `uvicorn`/`uvicorn.error`/`uvicorn.access`/`httpx` logger 统一格式
-- **环境变量控制**：除日志/token 刷新变量外，连接监控支持 `COPILOT_STREAM_HIGH_WATERMARK=400`、`COPILOT_STREAM_OVERLOAD_GRACE=30`、`COPILOT_STREAM_DISCONNECT_GRACE=15`、`COPILOT_STREAM_MONITOR_INTERVAL=5`；httpx 池另有 `COPILOT_POOL_MAX_CONNECTIONS=500`、`COPILOT_POOL_MAX_KEEPALIVE=200`、`COPILOT_POOL_KEEPALIVE_EXPIRY=30`、`COPILOT_POOL_ACQUIRE_TIMEOUT=20`（默认从 60→20，配合"单端点 upstream_stall 快速失败"给客户端更快 error 让 Codex 自己 retry；恢复旧值设 `60`）、`COPILOT_POOL_READ_TIMEOUT`（默认无上限；设 `None`/`0`/空 = 无上限，设正数则强制封顶，仅在极端诊断场景使用）；SSE 心跳间隔 `STREAM_HEARTBEAT_INTERVAL=15`；PoolTimeout 触发时的 DNS+TCP 探针 `COPILOT_UPSTREAM_PROBE_TIMEOUT=3` / `COPILOT_UPSTREAM_PROBE_CACHE_TTL=5`
+- **环境变量控制**：除日志/token 刷新变量外，连接监控支持 `COPILOT_STREAM_HIGH_WATERMARK=400`、`COPILOT_STREAM_OVERLOAD_GRACE=30`、`COPILOT_STREAM_DISCONNECT_GRACE=15`、`COPILOT_STREAM_MONITOR_INTERVAL=5`；httpx 池另有 `COPILOT_POOL_MAX_CONNECTIONS=500`、`COPILOT_POOL_MAX_KEEPALIVE=200`、`COPILOT_POOL_KEEPALIVE_EXPIRY=30`、`COPILOT_POOL_ACQUIRE_TIMEOUT=20`（默认从 60→20，配合"单端点 upstream_stall 快速失败"给客户端更快 error 让 Codex 自己 retry；恢复旧值设 `60`）、`COPILOT_POOL_READ_TIMEOUT`（默认无上限；设 `None`/`0`/空 = 无上限，设正数则强制封顶，仅在极端诊断场景使用）；SSE 心跳间隔 `STREAM_HEARTBEAT_INTERVAL=15`；PoolTimeout 触发时的 DNS+TCP 探针 `COPILOT_UPSTREAM_PROBE_TIMEOUT=3` / `COPILOT_UPSTREAM_PROBE_CACHE_TTL=5`；请求头版本号 `COPILOT_EDITOR_VERSION=vscode/1.104.0` / `COPILOT_EDITOR_PLUGIN_VERSION=copilot-chat/0.30.0` / `COPILOT_USER_AGENT=GitHubCopilotChat/0.30.0`；HTML 上游诊断软熔断 `COPILOT_HTML_SOFT_COOLDOWN=30`（秒；0 = 关闭）
+
+#### 上游 HTML 挑战页识别 + 软熔断
+
+Cloudflare / GHCP CDN 偶发会给单条请求返 `Content-Type: text/html`（"Just a moment..." 挑战页），有时甚至 status=200。旧版 LB 只识别 `status ≥ 400` 的 HTML，pump 会把 200-with-HTML 原样透传给客户端 SSE 消费者，客户端 SDK 解析失败自己报 "HTML error page"。
+
+- **早期 content-type 校验**：`_stream_response` 与 `_normal_request` 在拿到 upstream response headers 后立即检查 `Content-Type`。凡 `text/html*`（无论 status），一律走 `_build_upstream_error_detail` 的 `upstream_html_error` 分支，生成规范化 JSON 错误 + `_apply_html_cooldown` 触发软熔断。
+- **软熔断窗口 30s**（`COPILOT_HTML_SOFT_COOLDOWN`）：命中的 endpoint 在窗口内被 `_select_endpoint` 优先跳过；所有 endpoint 都在冷却时降级到"最小活跃"选一个而不是拒绝服务；不动 `total_errors` 也不置 `circuit_open`。
+- **上游诊断 header 记录**：`_extract_upstream_ids` 抽 `cf-ray` / `x-github-request-id` / `x-request-id` / `server` / `x-served-by` / `x-cache` 六个字段，塞进结构化日志 (`kind=copilot_upstream_html`) 与 SSE error message 尾部（客户端可见），运维拿这些去找 GitHub Support 反馈最有效。
+- **Metrics**：`copilot_upstream_html_events_total{endpoint}` (per-endpoint counter)、`copilot_upstream_html_events_all_total` (aggregate)、`copilot_upstream_html_events_by_status_total{status_bucket}` (按上游 HTTP 桶拆分 200/4xx/5xx/other，用来区分 Cloudflare 200-HTML 挑战页 vs 上游服务错误)、`copilot_html_soft_cooldown_active{endpoint}` (gauge 0/1)、`copilot_html_soft_cooldown_remaining_seconds{endpoint}` (gauge)。
+- **SSE error 结构化 upstream_ids**：除 6 个上游诊断 header，还额外挂 `lb_request_id`（即本 LB 生成的 X-Request-Id），运维在客户端错误面板 → LB 结构化日志一次跳转就能完成关联，不需要靠 message 前缀 `[req=…]` 手动扒。
+
+#### 有状态请求（opaque state）跨账户重放保护
+
+Handoff §7.2 实证：同一 Responses opaque reasoning state（`previous_response_id` / `input[*].encrypted_content`）在原账户 200，换另一账户 401。而 LB 在 5xx / PoolTimeout / 网络错误 / HTML cooldown 时会自动切 endpoint，一旦客户端带着 opaque state 走到备份 endpoint 就必然 401。修复：
+
+- **`_request_has_opaque_state(body, api_type)`**：检测 `previous_response_id` 或 `input[*].content[*].encrypted_content`（Chat 协议返 False）
+- **`_select_endpoint(model, *, pinned=None)`**：pinned 非空时仅当 pinned 仍在可用池内才返回它（**忽略 HTML cooldown**——宁可再踩一次挑战页也不换账户），否则返 None
+- **`_proxy` 层**：stateful 请求首次选中后钉住，后续 `_select_endpoint` 传 `pinned=first_endpoint`；pinned 掉线时抛 503 `stateful_pinned_endpoint_unavailable` 让客户端重构会话，绝不静默换账户
+- **`_stream_response` 内 3 处换 endpoint 分支**（5xx retry / PoolTimeout retry / 网络错误 retry）同样传 `pinned=stateful_pin`；无法换端点时 `_note_stateful_pin(reason)` 计数 + 明确 SSE error 让客户端 retry
+- **无状态请求维持原 failover** —— pinning 不影响普通请求的正常端点切换
+- **Metrics**：`copilot_stateful_request_pinned_total{reason}`，reason ∈ `{http_5xx, pool_timeout, network_error, pinned_unavailable}`；非零就意味着 pinning 成功挡下了会 401 的跨账户重放
 
 #### PoolTimeout 诊断（`upstream_connect_stalled` vs `local_pool_saturated`）
 
