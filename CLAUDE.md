@@ -142,7 +142,12 @@ Handoff §7.2 实证：同一 Responses opaque reasoning state（`previous_respo
 - 单 Copilot endpoint + `classification == upstream_connect_stalled` 场景**不重试**：所有 endpoint 共享同一个 `httpx.AsyncClient`，重试还是打同一个 pool，只会让用户多等一个 `POOL_ACQUIRE_TIMEOUT` — 直接给客户端 error，Codex 自己 retry 得更快
 - `local_pool_saturated` 分支（本地池已到 `POOL_MAX_CONNECTIONS`）仍走原退避 + 换端点重试逻辑
 
-详细 AKS 部署步骤、Token rotation 流程、监控告警建议见 `docs/AKS.md`。常见客户端 / 上游异常排查见 `docs/TROUBLESHOOTING.md`（含 macOS 系统代理拦截 localhost、CC 32MB 限制、ADB 4MB / GHCP 模型 API 约束等）。
+详细 AKS 部署步骤、Token rotation 流程、监控告警建议见 `docs/AKS.md`。常见客户端 / 上游异常排查见 `docs/TROUBLESHOOTING.md`（含 macOS 系统代理拦截 localhost、CC 32MB 限制、ADB 4MB / GHCP 模型 API 约束、token exchange 池隔离等）。
+
+**设计契约文档**（生产分支合入 2026-09-08）：
+- `docs/STREAM_OWNERSHIP.md`：streaming response 所有权、pool timeout 语义、shielded cleanup 契约 —— 说明 `_finish_cleanup` / `_close_stream_resources` / `_OwnedResponseStream` 三层保护如何确保 ASGI 取消与 upstream close join。
+- `docs/RESILIENCE.md`：本地 admission、CLOSED/OPEN/HALF_OPEN 熔断状态机、`RequestAttempt` per-lease identity、POST replay 禁令、cross-provider fallback 边界。**stateful pinning 与 admission 组合语义**：pinned endpoint 必须通过 circuit（不能 bypass HALF_OPEN 锁），HTML cooldown 对 pin 无效，POST replay 禁令覆盖 pinning（`sent_any_chunk=True` 后一律不重试）。
+- `docs/STREAM_PROTOCOL.md`：WHATWG SSE 完整帧解析、`PER_PENDING_EVENT` / `PER_PROCESS_TOTAL_RETAINED_STREAM_BUFFER` 字节预算、Responses JSON `type` discriminator 优先于 event header、gzip incremental decompression、Copilot endpoint `api_types` 契约。**api_types 与 pinning 的组合**：pinned endpoint 若不支持当前 api_type 视为不可用（返 None、抛 503），不允许静默换 account。
 
 ### 流式代理健壮性（`_stream_request` / `_stream_response`）
 - **httpx 客户端**: Databricks/Azure 保持 `200/50` 与 `pool=30s`；Copilot 独立使用 `500/200` 与 `pool=60s`。三者 `read` 默认都为 `None`，长 thinking 不能用整体 read timeout 误杀。Copilot 的 `read` 可通过 `COPILOT_POOL_READ_TIMEOUT` 强制封顶（罕见场景需要），设为 `None`/`0`/空表示无上限
