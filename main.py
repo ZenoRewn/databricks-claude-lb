@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Dict, Optional
 from dataclasses import dataclass, field
 from contextlib import aclosing, closing, asynccontextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 import yaml
@@ -42,7 +42,8 @@ class _JsonLogFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         payload = {
-            "ts": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+            # Python 3.12+ 弃用 utcnow()；用 timezone-aware datetime 输出保持 "...Z" wire 格式
+            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -6770,7 +6771,15 @@ async def stats_history(days: int = 7):
 
 
 @app.delete("/stats/history")
-async def delete_history(keep_days: int = 30):
+async def delete_history(
+    request: Request,
+    keep_days: int = 30,
+    x_api_key: Optional[str] = Header(None, alias="x-api-key"),
+):
+    # Auth: 删除持久化用量数据，防止误操作 / 未授权破坏
+    actual_key = _extract_api_key(request, x_api_key)
+    if not _verify_lb_api_key(actual_key):
+        raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
     if not usage_store:
         return {"error": "Usage data persistence is not configured"}
     deleted = await usage_store.cleanup(keep_days)
@@ -6778,7 +6787,14 @@ async def delete_history(keep_days: int = 30):
 
 
 @app.post("/reset")
-async def reset():
+async def reset(
+    request: Request,
+    x_api_key: Optional[str] = Header(None, alias="x-api-key"),
+):
+    # Auth: 清空内存 stats（circuit / counters）——运维操作，不给匿名调用
+    actual_key = _extract_api_key(request, x_api_key)
+    if not _verify_lb_api_key(actual_key):
+        raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
     for ep in proxy.load_balancer.endpoints:
         proxy.load_balancer.reset_circuit(ep)
         ep.total_errors = 0
