@@ -114,6 +114,10 @@ class LBSettings:
     # ---- Copilot upstream probe ----
     copilot_upstream_probe_timeout: float
     copilot_upstream_probe_cache_ttl: float
+    # ---- OpenTelemetry (P3.1) ----
+    otel_enabled: bool                 # OTEL_ENABLED default false
+    otel_service_name: str             # OTEL_SERVICE_NAME
+    otel_exporter_otlp_endpoint: str   # empty = ConsoleSpanExporter
 
     @classmethod
     def load(cls) -> "LBSettings":
@@ -143,6 +147,9 @@ class LBSettings:
             copilot_stream_monitor_interval=_env_float("COPILOT_STREAM_MONITOR_INTERVAL", 5.0),
             copilot_upstream_probe_timeout=_env_float("COPILOT_UPSTREAM_PROBE_TIMEOUT", 3.0),
             copilot_upstream_probe_cache_ttl=_env_float("COPILOT_UPSTREAM_PROBE_CACHE_TTL", 5.0),
+            otel_enabled=_env_bool("OTEL_ENABLED", False),
+            otel_service_name=_env_str("OTEL_SERVICE_NAME", "databricks-claude-lb"),
+            otel_exporter_otlp_endpoint=_env_str("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
         )
 
     def as_dict(self) -> dict:
@@ -5380,6 +5387,14 @@ usage_store: Optional[UsageDataStore] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global proxy, azure_proxy, copilot_proxy, usage_store
+    # P3.1: OpenTelemetry tracing — opt-in via OTEL_ENABLED=true. Must run before
+    # FastAPIInstrumentor sees any traffic, i.e. inside lifespan startup.
+    try:
+        from otel_setup import setup_tracing
+        setup_tracing(app)
+    except Exception as e:
+        logger.warning("[OTel] setup_tracing failed: %s: %s (LB continues without tracing)", type(e).__name__, e)
+
     config_path = os.getenv("CONFIG_PATH", "config.yaml")
     proxy, azure_proxy, copilot_proxy, storage_config = load_config(config_path)
 

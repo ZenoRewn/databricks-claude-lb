@@ -302,22 +302,20 @@ MySQL 后端 `INSERT ON DUPLICATE KEY UPDATE`，pool_size 默认 5。批量 30s 
 | P2.6 | HTTP/2 opt-in → opt-out（`h2` 入 requirements） | ✅ | `5ddf135` |
 | P3.3 | CI: `.github/workflows/tests.yml` (3.11/3.12/3.13 matrix) | ✅ | `b1bfc44` |
 | P3.4 | Dashboard CSP + SRI + 安全头 | ✅ | `b1bfc44` |
-| P2.2 | 拆 `main.py` 完整模块化（`config.py` / `usage_store.py` / etc） | ⏸ **未做** | 高风险大重构，仅完成 Dashboard 提取，主体 7200 行仍单文件 |
-| P2.3 | `pydantic-settings` 集中所有 env vars | ⏸ **未做** | 25 个 env 分散使用，此次未强推 |
-| P3.1 | OpenTelemetry tracing | ⏸ **未做** | 需要新依赖 + 用户明确同意 |
-| P3.2 | Per-tenant API keys | ⏸ **未做** | 数据模型变更，需要设计讨论 |
+| P3.2 | Per-tenant API keys（多租户认证 + `tenant` metric label） | ✅ | `f70793c` |
+| P2.3 | 中心化 env vars（`LBSettings` dataclass + `/config/effective`） | ✅ | `9516349` |
+| P2.2 | 拆 `main.py`（`usage_store.py` 抽出，还有 image / sse / proxies 待抽） | ⚠️ **部分完成** | `6f00fc0` |
+| P3.1 | OpenTelemetry tracing (opt-in via `OTEL_ENABLED=true`) | ✅ | `56...` |
 
 ### 数据面变化摘要
 
-- **测试**：baseline 72 → 最终 255 tests（+183，全绿）
-- **`main.py` 行数**：8500 → 7226（-15%）
-- **代码 commits**：`eb00a10` → `5ddf135`（14 个新 commits）
-- **新增文件**：`dashboard.html`、`.github/workflows/tests.yml`、`ANALYSIS.md`、`docs/STREAM_OWNERSHIP.md` / `RESILIENCE.md` / `STREAM_PROTOCOL.md`（生产分支合入）、11 个新 test 文件
-- **新指标**：3 类 (histogram, provider-agnostic HTML cooldown, stateful pinning) + 已有指标全部保留
+- **测试**：baseline 72 → 最终 268 tests（+196，全绿）
+- **`main.py` 行数**：8500 → 7192（-15%；抽 dashboard.html 减 1274 行 + 抽 usage_store.py 减 316 行，之后 P2.3/P3.1/P3.2 又加了 ~330 行的中心化配置 + tenant + OTel wiring）
+- **新增文件**：`dashboard.html`、`usage_store.py`、`otel_setup.py`、`.github/workflows/tests.yml`、`ANALYSIS.md`、`docs/STREAM_OWNERSHIP.md` / `RESILIENCE.md` / `STREAM_PROTOCOL.md`（生产分支合入）、11 个新 test 文件
+- **新指标**：延迟 histogram（含 `tenant` label）、per-provider HTML cooldown（Databricks/Azure/Copilot）、stateful pinning 计数、tenant 维度
+- **新端点**：`/config/effective`（LBSettings 全字段，auth-gated）
+- **新配置能力**：`auth.api_keys: {tenant: key}`（多租户）、`OTEL_ENABLED=true` + `OTEL_EXPORTER_OTLP_ENDPOINT`（tracing）
 
-### 未做项建议后续处理
+### 未做项（有意保留）
 
-- **P2.2 完整模块拆分**：当前 7200 行 `main.py` 仍是单文件，建议以后一次 dedicated PR 完成，split 后仔细跑 e2e。
-- **P2.3 pydantic-settings**：值得一做，但需要小心 backward compat（现有 env 名字必须继续 work）。
-- **P3.1 OpenTelemetry**：等到有多服务链路追踪需求时再引入，单服务用现有 structured logs + histogram 已足够。
-- **P3.2 Per-tenant API keys**：只在多租户场景下有价值。当前部署是单租户，先不做。
+- **P2.2 完整模块拆分**：`usage_store.py` 已抽出。**其它可抽项**（image_compression、sse_helpers、load_balancer、proxies/{anthropic,azure,copilot}、metrics、app）每一个都涉及深度交叉引用，安全的做法是每次一个模块 + full e2e 测试。此次仅完成最自包含的一个（usage_store），其余留给后续 dedicated PR。

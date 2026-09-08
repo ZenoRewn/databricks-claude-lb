@@ -459,6 +459,41 @@ class LatencyHistogramTests(unittest.TestCase):
         self.assertEqual(len([l for l in text.splitlines() if not l.startswith("#")]), 0)
 
 
+class OpenTelemetrySetupTests(unittest.TestCase):
+    """P3.1: OTel setup 是否 opt-in、缺 packages 时是否优雅降级."""
+
+    def test_setup_returns_false_when_disabled(self):
+        import os
+        from otel_setup import setup_tracing
+        os.environ.pop("OTEL_ENABLED", None)
+        # 假 app —— setup 不会碰到 FastAPI instrumentor
+        self.assertFalse(setup_tracing(object()))
+
+    def test_setup_returns_true_when_enabled_and_packages_present(self):
+        import os
+        try:
+            import opentelemetry  # noqa
+        except ImportError:
+            self.skipTest("opentelemetry packages not installed locally")
+        os.environ["OTEL_ENABLED"] = "true"
+        try:
+            from otel_setup import setup_tracing
+            # 用真正的 FastAPI app（instrumentor 会 attach middleware）
+            from fastapi import FastAPI
+            app = FastAPI()
+            ok = setup_tracing(app)
+            self.assertTrue(ok)
+        finally:
+            os.environ.pop("OTEL_ENABLED", None)
+
+    def test_get_tracer_returns_noop_when_packages_missing(self):
+        # 即使真装了包，get_tracer 也能 gracefully 用；这里主要看它不 raise。
+        from otel_setup import get_tracer
+        t = get_tracer()
+        with t.start_as_current_span("test-span") as span:
+            pass  # no-op or real span both fine
+
+
 class LBSettingsTests(unittest.TestCase):
     """P2.3: LBSettings dataclass 集中所有 env vars."""
 
