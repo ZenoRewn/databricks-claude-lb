@@ -43,10 +43,10 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 - `DATABRICKS_MODELS`: Databricks 模型名常量映射
 - `MODEL_PRICING`: Anthropic 官方 API 定价（USD/MTok）
 - `get_databricks_model()`: 将 Claude 模型名映射到 Databricks 模型
-  - `claude-*-sonnet-*` → `databricks-claude-sonnet-4-6`（默认），支持显式指定 4-5/4-6
-  - `claude-*-opus-*` → `databricks-claude-opus-4-7`（默认），支持显式指定 4-5/4-6/4-7/5（`claude-opus-5*` 直通 Databricks `databricks-claude-opus-5`；正则 `opus[-_.]?5(?:[-_.]|$)` 优先于 `opus-*-*` 分支）
+  - `claude-*-sonnet-*` → `databricks-claude-sonnet-4-6`（默认），支持显式 4-5/4-6/5（`claude-sonnet-5*` 直通 `databricks-claude-sonnet-5`；正则 `sonnet[-_.]?5(?:[-_.]|$)` 优先于 `sonnet-*-*`）
+  - `claude-*-opus-*` → `databricks-claude-opus-4-7`（默认），支持显式 4-5/4-6/4-7/4-8/5（`claude-opus-5*` 直通 `databricks-claude-opus-5`；正则 `opus[-_.]?5(?:[-_.]|$)` 优先于 `opus-*-*`）
   - `claude-*-haiku-*` → `databricks-claude-haiku-4-5`
-- `get_model_pricing()` / `calculate_cost()`: 按模型名子串匹配定价并计算成本
+- `get_model_pricing()` / `calculate_cost()`: 按模型名子串匹配定价并计算成本。定价与 Anthropic / OpenAI 2026-09-08 官方文档对齐（`MODEL_PRICING` 头部注释注明数据源）。新加：Sonnet 5、Opus 4.8/4.1、o4-mini、o3-pro、gpt-5-pro、gpt-5.3-codex、gpt-5.6-cyber、gpt-5.5-pro、gpt-5.4-{mini,nano,pro}、gpt-5.2-pro；修正：gpt-5.5/5.4/5.2/5.6-* 的 input/output 单价。
 
 ### 请求兼容性处理
 - `strip_cache_control_extras()`: 清理 `cache_control` 中 Databricks 不支持的额外字段（如 `scope`），保留 `type: ephemeral`
@@ -180,10 +180,34 @@ Handoff §7.2 实证：同一 Responses opaque reasoning state（`previous_respo
 - `expand_env_vars()`: 支持 `${VAR_NAME}` 环境变量语法
 - `resolve_github_token()`: Copilot 端点的 token 三级回退解析（config > 本项目 cache > copilot-lb cache）
 - 存储配置优先级: `usage_storage` > `usage_data_dir` > 默认 `./usage_data`
+- **`LBSettings` dataclass**（模块级 `LB_SETTINGS` 单例）：中心化所有 env vars（含默认值 + 类型），启动时一次性加载。`GET /config/effective`（auth-gated）返回全部字段用于运维 introspection。旧的散点 `os.getenv(...)` 调用点仍在（作为 backing store），LBSettings 是 introspection 层。
 
-### Dashboard 前端（单文件内嵌）
-- Dashboard HTML/CSS/JS 全部内嵌在 `DASHBOARD_HTML` 字符串常量中（`main.py` 内），不引入构建系统
-- **设计 token**: `:root` 定义深色主题 CSS 变量（`--card-bg`、`--tooltip-bg`、`--chart-grid`、`--brand-gradient` 等），`:root[data-theme="light"]` 覆盖为浅色；所有 CSS 均通过 `var(--xxx)` 引用，禁止直接硬编码 rgba 色值
+### 多租户认证（`auth.api_keys`）
+- 兼容两种配置：
+  - 旧：`auth.api_key: "single-key"` → 内部注册为 tenant `"default"`
+  - 新：`auth.api_keys: {tenant-a: key-a, tenant-b: key-b}` → 每 key 记名到租户
+  - 两者可共存（旧 key 依然做 `default`，新 dict 额外注册）
+- 中心化查表：`API_KEY_TO_TENANT: Dict[str, str]` 由 `_register_api_keys()` 在 `load_config()` 里构建；`_lookup_tenant(key)` 返 tenant 名或 None
+- Handler（`/v1/messages` / `/v1/responses` / `/v1/chat/completions`）拿到 tenant 后：
+  1. 写 `request.state.tenant`（middleware 可读）
+  2. 调 `_CURRENT_TENANT.set(...)` —— `contextvars.ContextVar` 沿 await 链自动传播
+  3. `LatencyHistogram.observe(..., tenant=_CURRENT_TENANT.get())` 把 tenant 变成 histogram label
+- 空 key 从来不匹配（proxy.verify_api_key 里 `bool(key) and key == self.api_key`），防止 auth bypass
+
+### OpenTelemetry Tracing（opt-in）
+- 通过 `otel_setup.py` 提供，`setup_tracing(app)` 在 `lifespan` 里调用
+- 默认关闭：`OTEL_ENABLED=true` 才启用；未装 `opentelemetry-*` packages 时 log WARNING + 继续跑（graceful degrade）
+- Env 变量走标准 OTel 契约：`OTEL_SERVICE_NAME`、`OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_RESOURCE_ATTRIBUTES`
+- Auto-instruments FastAPI（server span per request）+ httpx（client span per upstream call）
+- 排除 `/health*` `/metrics` 减少高基数噪音
+
+### Dashboard 前端（单文件抽出到 `dashboard.html`）
+- `dashboard.html`（1286+ 行）作为独立文件；`main.py` 通过 `_load_dashboard_html()` 加载
+- **设计 token**: `:root` 定义 CSS 变量。旧的 `--card-bg`/`--tooltip-bg` 与新的 BoardUI 对齐命名 `--text-primary`/`--separator-border`/`--border-focus-ring` 共存。禁止硬编码 rgba
+- **半径 scale**：`--radius-md/-xl/-2xl/-3xl` = 12/16/20/24px（4px grid）
+- **动效 tokens**：`--motion-hover 150ms`、`--motion-entrance 250ms`、`--ease-out cubic-bezier(0.16, 1, 0.3, 1)`
+- **复合排版**：`.text-title-1-medium` 等单类携带 size+weight+line-height+letter-spacing
+- **动效尊重**：`@media (prefers-reduced-motion: reduce)` 折起所有动画
 - **主题切换**: hero 区 `#themeToggle` 按钮；`initTheme()` 先读 `localStorage['lb-theme']`，未设置则回退到 `prefers-color-scheme`；`setTheme(t)` 写 `data-theme` 属性 + localStorage + 调用 `applyChartTheme()`
 - **Chart.js 主题同步**: 创建图表时用 `cssVar()` 读当前 CSS 变量作为初始 tooltip/grid/border 颜色；切主题时 `applyChartTheme()` 更新 `Chart.defaults` 并 walk `charts` 单例字典，刷新每个实例的 `plugins.tooltip/legend.labels/scales.*.grid/ticks/title` 颜色及 doughnut `dataset.borderColor`，然后 `update('none')` 无动画重绘
 - **Badge / 输入框强调色**: 使用 `color-mix(in srgb, var(--accent) 12%, transparent)` 让强调色在两主题下自动衰减为合适的背景透明度
@@ -202,11 +226,12 @@ Handoff §7.2 实证：同一 Responses opaque reasoning state（`previous_respo
 | `/metrics` | GET | 不需要 | Prometheus 文本格式 metrics（K8s / Azure Monitor 抓取） |
 | `/admin/copilot/reload` | POST | 需要 | 运维端点：从源重读所有 Copilot endpoint 的 long-lived token + 强制刷新 session（K8s Secret rotation 后立刻生效） |
 | `/admin/copilot/reset-pool` | POST | 需要 | 运维端点：重建共享 httpx.AsyncClient，逐出所有 keepalive/半开连接 |
+| `/config/effective` | GET | 需要 | 返回 `LBSettings` 全部字段（25 项 env 生效值），运维 introspection 用 |
 | `/stats` | GET | 不需要 | 端点统计（含成本估算、Azure OpenAI、GitHub Copilot） |
 | `/stats/history` | GET | 不需要 | 历史用量数据（`?days=7`，含每日成本） |
-| `/stats/history` | DELETE | 不需要 | 清理历史数据（`?keep_days=30`） |
-| `/stats/dashboard` | GET | 不需要 | 可视化监控面板（四标签页：Anthropic / Azure / GitHub Copilot / 历史，支持深色/浅色主题切换） |
-| `/reset` | POST | 不需要 | 重置内存统计（持久化数据保留） |
+| `/stats/history` | DELETE | **需要** | 清理历史数据（`?keep_days=30`）—— P0.3 加 auth |
+| `/stats/dashboard` | GET | 不需要 | 可视化监控面板（四标签页：Anthropic / Azure / GitHub Copilot / 历史，支持深色/浅色主题切换）；response 头带 CSP + X-Content-Type-Options: nosniff |
+| `/reset` | POST | **需要** | 重置内存统计（持久化数据保留）—— P0.3 加 auth |
 
 ## 配置文件
 
@@ -218,7 +243,12 @@ load_balancer:
   circuit_breaker_timeout: 60     # 熔断器恢复超时（秒）
 
 auth:
-  api_key: your-key               # 客户端认证密钥
+  # 二选一 or 共存：
+  api_key: your-key               # 旧配置：单 key（默认租户名 "default"）
+  # api_keys:                     # 新配置：多租户（P3.2）
+  #   team-a: key-a               # tenant 名 -> api key
+  #   team-b: ${TEAM_B_KEY}       # 支持 ${ENV_VAR}
+  # /metrics 里 proxy_request_latency_seconds{tenant="..."} 会按 tenant 拆分
 
 endpoints:
   - name: workspace-1
@@ -267,9 +297,40 @@ github_copilot:
 
 ## 环境变量
 
+> **提示**：所有 env 在 `LBSettings` dataclass 里定义（`load()` classmethod），运行时通过 `GET /config/effective` 可以看当前 effective 值。
+
+**基础**
 - `CONFIG_PATH`: 配置文件路径（默认 `config.yaml`）
 - `ANTHROPIC_BASE_URL`: Claude Code 需设为 `http://localhost:8000`
-- `ANTHROPIC_API_KEY`: Claude Code 需设为与 `config.yaml` 中 `api_key` 一致的值
+- `ANTHROPIC_API_KEY`: Claude Code 需设为与 `config.yaml` 中 `api_key`（或 `api_keys.*` 中任一 key）一致的值
 - `AZURE_KEY_*`: Azure OpenAI API 密钥（按区域配置）
 - `GITHUB_COPILOT_TOKEN_*`: GitHub OAuth long-lived token（可选；不设也能从 device-flow 缓存读）
 - `MYSQL_PASSWORD`: MySQL 密码（如使用 MySQL 存储后端）
+
+**日志 / 流**
+- `LOG_FORMAT`: `json` 或 `text`（默认 text）
+- `LOG_LEVEL`: `INFO` / `DEBUG` / `WARNING`（默认 INFO）
+- `STREAM_HEARTBEAT_INTERVAL`: SSE 心跳间隔秒（默认 15）
+
+**图片压缩**
+- `IMG_ADMISSION_ENABLED`: 图片入 admission gate 总开关（默认 true）
+- `IMG_COMPRESS_CONCURRENCY`: 并发 PIL 压缩上限（默认 2）
+- `IMG_MAX_COUNT`: 单请求图片张数上限（默认 50）
+- `IMG_MAX_TOTAL_PIXELS`: 单请求总像素上限（默认 2 亿）
+
+**Copilot / GHCP**
+- `COPILOT_EDITOR_VERSION` / `COPILOT_EDITOR_PLUGIN_VERSION` / `COPILOT_USER_AGENT`: 请求头版本，随 VS Code 官方滚动
+- `COPILOT_HTML_SOFT_COOLDOWN`: HTML 挑战页软熔断窗口秒（默认 30；`0` 关闭）
+- `COPILOT_HTTP2`: 是否启用 HTTP/2（默认 **true**；`false` 强制 HTTP/1.1）—— 需要 `h2` 包（已在 requirements.txt）
+- `COPILOT_POOL_MAX_CONNECTIONS` / `COPILOT_POOL_MAX_KEEPALIVE` / `COPILOT_POOL_KEEPALIVE_EXPIRY`
+- `COPILOT_POOL_ACQUIRE_TIMEOUT`: 池获取超时（默认 20；旧为 60）
+- `COPILOT_POOL_READ_TIMEOUT`: 读超时（默认无上限；`None`/`0`/`""` = 无上限）
+- `COPILOT_REFRESH_INTERVAL` / `COPILOT_REFRESH_THRESHOLD`: 后台 token 刷新扫间隔 / 剩余阈值
+- `COPILOT_STREAM_HIGH_WATERMARK` / `COPILOT_STREAM_OVERLOAD_GRACE` / `COPILOT_STREAM_DISCONNECT_GRACE` / `COPILOT_STREAM_MONITOR_INTERVAL`
+- `COPILOT_UPSTREAM_PROBE_TIMEOUT` / `COPILOT_UPSTREAM_PROBE_CACHE_TTL`
+
+**Observability (OpenTelemetry, opt-in)**
+- `OTEL_ENABLED`: 主开关（默认 `false`）—— 打开需要装 `opentelemetry-api opentelemetry-sdk opentelemetry-instrumentation-fastapi opentelemetry-instrumentation-httpx opentelemetry-exporter-otlp-proto-http`
+- `OTEL_SERVICE_NAME`: 服务名（默认 `databricks-claude-lb`）
+- `OTEL_EXPORTER_OTLP_ENDPOINT`: OTLP collector 地址（如 `http://otel-col:4318`）；未设则用 `ConsoleSpanExporter`（本地调试）
+- `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_RESOURCE_ATTRIBUTES`: 标准 OTel 变量都自动生效

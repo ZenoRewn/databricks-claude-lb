@@ -217,9 +217,11 @@ Dashboard 包含四个标签页：
 
 | Claude 模型 | Databricks 模型 |
 |------------|-----------------|
-| claude-*-sonnet-* | databricks-claude-sonnet-4-6（默认），支持显式指定 4-5/4-6 |
-| claude-*-opus-* | databricks-claude-opus-4-7（默认），支持显式指定 4-5/4-6/4-7 |
-| claude-*-haiku-* | databricks-claude-haiku-4-5 |
+| claude-*-sonnet-* | `databricks-claude-sonnet-4-6`（默认），支持显式 4-5 / 4-6 / **5** |
+| claude-*-opus-* | `databricks-claude-opus-4-7`（默认），支持显式 4-5 / 4-6 / 4-7 / **4-8** / **5** |
+| claude-*-haiku-* | `databricks-claude-haiku-4-5` |
+
+> **Opus 5 / Sonnet 5 保底**：只要请求里出现 `opus-5` 或 `sonnet-5`（不管前后缀是 `claude-opus-5-latest`、`claude-opus-5-20260101` 还是裸 `opus-5`），LB 保证映射到 `databricks-claude-opus-5` / `databricks-claude-sonnet-5`，**永远不会被降级到 4-x**。回归测试 `test_opus_5_all_variants_bypass_downgrade` 锁定这个保证。
 
 ### Azure OpenAI
 

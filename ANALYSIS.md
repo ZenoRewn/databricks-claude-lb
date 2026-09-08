@@ -319,3 +319,148 @@ MySQL 后端 `INSERT ON DUPLICATE KEY UPDATE`，pool_size 默认 5。批量 30s 
 ### 未做项（有意保留）
 
 - **P2.2 完整模块拆分**：`usage_store.py` 已抽出。**其它可抽项**（image_compression、sse_helpers、load_balancer、proxies/{anthropic,azure,copilot}、metrics、app）每一个都涉及深度交叉引用，安全的做法是每次一个模块 + full e2e 测试。此次仅完成最自包含的一个（usage_store），其余留给后续 dedicated PR。
+
+---
+
+## 8. 2026-09-08 追加执行（模型 / 定价 / Dashboard / 清理）
+
+用户后续追加 4 个任务，全部完成：
+
+| 编号 | 项目 | 状态 | Commit |
+|---|---|---|---|
+| T1 | 确保 `claude-opus-5` / `opus-5` 走 opus-5，绝不降级到 4-7 | ✅ | `bb6b819`（补 10 变体回归测试） |
+| T2 | 补齐 Databricks / Azure OpenAI / Copilot 最新模型价格 | ✅ | `bb6b819`（Sonnet 5 / Opus 4.8 / o4-mini / o3-pro / gpt-5-pro / gpt-5.6-cyber 等，共修正 6 项 + 新增 11 项） |
+| T3 | 参考 BoardUI Skill 优化 Dashboard 视觉 | ✅ | `87b998b`（语义 token + 复合排版类 + 动效 tokens + 焦点环 + prefers-reduced-motion） |
+| T4 | 清理无用文件 + 文档更新 | ✅ | 本 commit |
+
+### T2 定价修正详情
+
+**Anthropic**（2026-09-08 官方 https://claude.com/pricing）：
+- `sonnet-5` **新增**：$2 / $10 / cache-write $2.50 / cache-read $0.20
+- `opus-4-8` **新增**：$5 / $25 / $6.25 / $0.50（2026-09 legacy tier）
+- `opus-4-1` **新增**：$15 / $75 / $18.75 / $1.50（更老的高价 tier）
+- `opus-5` 与 4-7 定价一致（Anthropic 页面亦如此）
+
+**OpenAI / Copilot**（2026-09-08 官方 https://developers.openai.com/api/docs/pricing）：
+- **修正**：`gpt-5.6-sol` 5/30 → 4/20；`gpt-5.6-terra` 2.5/15 → 2/12；`gpt-5.6-luna` 1/6 → 0.20/1.20；`gpt-5.5` 1.25/10 → 5/30；`gpt-5.4` 1.25/10 → 2.5/15；`gpt-5.2` 1.25/10 → 1.75/14
+- **新增**：`o4-mini`（之前 catalog 里有 name 但无 pricing → 静默返 None）、`o3-pro`、`gpt-5-pro`、`gpt-5.3-codex`、`gpt-5.6-cyber`、`gpt-5.5-pro`、`gpt-5.4-{mini,nano,pro}`、`gpt-5.2-pro`
+- 全部 GPT-5.x `cache_write` 归 0（OpenAI 不单独收 cache-write 费）
+- `/models` 默认 catalog 相应扩充 8 个新 ID
+
+### T3 Dashboard 优化详情
+
+Skill `boardui` 指向的是 Next.js + Tailwind v4 + React 组件库，与本项目单文件 vanilla HTML 架构不兼容。取其**设计原则**移植到当前 dashboard：
+
+- **语义 token 别名**：`--text-primary/-secondary/-tertiary/-placeholder`、`--separator-border`、`--border-button-default`、`--border-focus-ring`
+- **半径 scale**（BoardUI 4px grid）：`--radius-md/-xl/-2xl/-3xl` = 12/16/20/24px。`.chart-card` 上到 rounded-3xl；`.table-wrap` / `.info-box` 到 rounded-2xl
+- **动效 tokens**：`--motion-hover 150ms` + `--motion-entrance 250ms` + `--ease-out cubic-bezier(0.16, 1, 0.3, 1)`
+- **复合排版**：`.text-title-1-medium`、`.text-title-2-medium`、`.text-headline-medium`、`.text-body-medium/-regular`、`.text-caption-1-semibold` —— 单类携带 size + weight + line-height + letter-spacing
+- **焦点环**：`.card` / `.btn` / input `focus-visible` 都用 `--border-focus-ring` 上 2px 环，符合 WCAG 2.4.11
+- **动效尊重**：`@media (prefers-reduced-motion: reduce)` 把所有 animation duration 折到 1ms，禁 brand shimmer 与 refresh ring 过渡
+
+### T4 清理清单
+
+- 删除 `smoke-config.yaml`（会话中我为冒烟测试临时创建的，未 commit）
+- 删除 `tests/fixtures/heartbeat_config.yaml`（远古 commit 4c9f368 遗留，无 test 引用）
+- 清理 `/tmp/lb-*.log`、`/tmp/lb-smoke-usage`、`/tmp/dash.html`、`/tmp/smoke-multi.yaml`
+
+---
+
+## 9. 明确未完成 / 未做项（Task 0：给下一位维护者的备忘）
+
+**说明**：以下都是明确保留的**技术债 / 后续工作**，不是遗漏。每项都写明为什么不做以及后续该如何切入。
+
+### 9.1 P2.2 模块化拆分 —— 剩余部分
+
+**现状**：main.py 目前 7226 行（相对最初 8500 行 -15%）。已完成的抽出：
+- `dashboard.html`（1286 行的 UI blob）
+- `usage_store.py`（320 行 usage 持久化）
+- `otel_setup.py`（125 行 OTel 初始化）
+
+**未抽出**（按优先级降序）：
+1. `image_compression.py`（约 400 行）—— 相对自包含，只依赖 PIL + logger。**推荐第一个继续做**。
+2. `sse_helpers.py`（约 600 行）—— `_framed_sse` / `_SSEFramer` / `_SSEObservation` / `_parse_sse_event_block`；依赖 `_STREAM_BUFFER_BUDGET` 全局，需要小心 module boundary。
+3. `metrics.py`（约 350 行）—— `/metrics` 输出逻辑 + `LatencyHistogram` + `_render_prom` 相关。相对独立。
+4. `load_balancer.py`（约 300 行）—— `LoadBalancer` + `RequestAttempt`。要处理 `AsyncMock(wraps=...)` 测试 fixture 的兼容。
+5. `proxies/{claude,azure,copilot}.py`（各约 1000-1500 行）—— **最重的一块**，涉及 `client` httpx 生命周期、`background_refresh_loop`、`connection_monitor_loop`、多个类间共享的 helper 函数。建议一次只抽一个 proxy，全 e2e 跑通再抽下一个。
+6. `app.py`（约 300 行）—— FastAPI app + middleware + lifespan + 路由。放到最后。
+
+**为什么这次没做完**：全模块化拆分需要至少一整天投入 + 真实压测确认，本会话每个 chunk 都需要 pytest zero-regression + 手工 smoke。累积风险随抽出模块数量指数上升。
+
+**建议入手方式**：单独一个 branch，每次 PR 抽一个模块，跑全套 tests + 本地冒烟 + `python -m unittest discover tests/fixtures/revision2`（forensic suite）。合并前先 review `main.py` diff 里的 `import` 变化。
+
+### 9.2 OpenTelemetry —— 生产验证
+
+**现状**：`otel_setup.py` 已加，`OTEL_ENABLED=false` 默认。3 个 test 覆盖 opt-in / opt-out / graceful degrade。
+
+**未做**：
+- 未在真实生产 K8s 部署里实测（本地 ConsoleSpanExporter 只验证了 wiring）
+- 未确认 sampling 配置对 Copilot 高并发场景是否合理（默认 100% sampling → 集群规模上可能太贵，需要 `OTEL_TRACES_SAMPLER=parentbased_traceidratio` + ratio env 调节）
+- 未 wire 自定义 span attributes（比如把 `tenant` / `provider` 放到 span 属性里）
+
+**建议**：先在 K8s dev cluster 上打开一天，看 span rate + collector 负载，再决定是否要 sampling / attributes tuning。
+
+### 9.3 P3.2 Per-tenant API keys —— 后续增强
+
+**现状**：`auth.api_keys: {tenant: key}` 配置 + `_lookup_tenant()` + `_CURRENT_TENANT` contextvar + histogram 加 `tenant` label 都到位。
+
+**未做**：
+- 每 tenant 的独立 quota / rate limit（当前所有 tenant 共享 GHCP quota）
+- tenant 级别 endpoint 亲和（比如 tenant-a 只用 gh-account-1）
+- tenant 到 endpoint 的路由策略（当前所有 tenant 都走同一 `_select_endpoint`）
+- 结构化日志字段 `tenant`（当前只在 histogram label 上）
+
+**建议**：等实际有多租户部署需求时再扩展。当前功能已足够对使用量做 tenant 拆分观测。
+
+### 9.4 CI 优化
+
+**现状**：`.github/workflows/tests.yml` 跑 pytest 于 Python 3.11/3.12/3.13。
+
+**未做**：
+- 无 lint (ruff / black) 步骤
+- 无 mypy 静态类型检查（代码里有部分 type hint 但不完整）
+- 无 CodeQL / security scan
+- 无 coverage 上报
+- 无 Docker image build & push 到 registry
+- 无 K8s manifest lint
+
+**建议**：分阶段引入。首先加 ruff（很快、几乎无 false positive）。
+
+### 9.5 Dashboard
+
+**做了**：BoardUI 设计 token + typography + 动效 + a11y
+
+**未做**：
+- 未引入真正的 BoardUI 组件（需要 Next.js/React 迁移 —— 与当前 vanilla HTML 单文件架构不兼容，跳过）
+- 未加 KPI delta 指示器（"今日 vs 昨日" 增减箭头 + %），需要 JS 记住上一个 tick 的值
+- 未加 sparkline mini-chart on KPI cards（需要额外 canvas 逻辑）
+- 未做 dashboard 的 mobile-first breakpoint 优化
+
+**建议**：如果最终要迁 Next.js/React，可以直接用 BoardUI 的 `stat-cards` 组件；否则以上都是 JS 增量增强。
+
+### 9.6 K8s 配置
+
+**现状**：ConfigMap 里明文存 Databricks / GHCP token（handoff 文件已指出）
+
+**未做**：
+- 迁到 Secret 而不是 ConfigMap
+- 引入 SealedSecrets / Vault
+- readiness probe / liveness probe 参数调优（现有配置以 `/health` 为通用探针；`/health/live` 与 `/health/ready` 分立后 K8s manifest 还没显式配）
+
+**建议**：单独一个 dedicated PR，与 dev-ops 协作。本代码库暂不动 manifest。
+
+### 9.7 pydantic-settings 深度整合
+
+**现状**：`LBSettings` dataclass 已提供 introspection；`os.getenv(...)` 散点仍然是 backing store。
+
+**未做**：把每个 `os.getenv(...)` 调用点替换为 `LB_SETTINGS.xxx`，让 LBSettings 变成唯一的读取路径。
+
+**建议**：机械替换，风险低但需一次性做完 (~25 个替换点)。测试后可能触发一些 test fixture 内 `os.environ.pop(...)` 调整。
+
+### 9.8 依赖包中的 opentelemetry-*
+
+**现状**：不在 `requirements.txt` 里 —— 只有开启 `OTEL_ENABLED=true` 才需要装。运行时 import fail 会 graceful degrade。
+
+**未做**：加一个 `requirements-otel.txt` extras 文件，或者在 README 里给 `pip install -r requirements.txt opentelemetry-*` 一键装的示例。
+
+**建议**：加 extras 文件是干净做法。
