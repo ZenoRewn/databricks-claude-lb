@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import unittest
 
 import main
@@ -572,11 +573,23 @@ class OpenTelemetrySetupTests(unittest.TestCase):
 
     def test_setup_returns_true_when_enabled_and_packages_present(self):
         import os
-        try:
-            import opentelemetry  # noqa
-        except ImportError:
-            self.skipTest("opentelemetry packages not installed locally")
+        # `import opentelemetry` 是不够的 —— 它是 namespace package，装了任意一个
+        # otel 发行包（例如 azure-monitor-opentelemetry 传递带入 opentelemetry-api）
+        # 就 import 成功，而 setup_tracing() 真正需要下面这几个子模块。用 namespace
+        # 做 guard 会让「装了一部分 otel 包」的机器跳不过去、直接断言失败。
+        for mod in ("opentelemetry.trace",
+                    "opentelemetry.sdk.resources",
+                    "opentelemetry.sdk.trace",
+                    "opentelemetry.sdk.trace.export",
+                    "opentelemetry.instrumentation.fastapi",
+                    "opentelemetry.instrumentation.httpx"):
+            try:
+                importlib.import_module(mod)
+            except ImportError:
+                self.skipTest(f"opentelemetry tracing deps incomplete: missing {mod}")
+
         os.environ["OTEL_ENABLED"] = "true"
+        app = None
         try:
             from otel_setup import setup_tracing
             # 用真正的 FastAPI app（instrumentor 会 attach middleware）
@@ -586,6 +599,30 @@ class OpenTelemetrySetupTests(unittest.TestCase):
             self.assertTrue(ok)
         finally:
             os.environ.pop("OTEL_ENABLED", None)
+            # setup_tracing 会全局打补丁（HTTPXClientInstrumentor().instrument()
+            # patch 掉整个 httpx，且自己从不撤销），不还原会把 instrumentation
+            # 状态和一个仍在后台导出 span 的 BatchSpanProcessor 泄漏给后续测试。
+            try:
+                from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+                HTTPXClientInstrumentor().uninstrument()
+            except Exception:
+                pass
+            if app is not None:
+                try:
+                    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+                    FastAPIInstrumentor.uninstrument_app(app)
+                except Exception:
+                    pass
+            # BatchSpanProcessor 的后台线程若不 shutdown，进程退出时会拿已关闭的
+            # exporter 报 "Exception while exporting Span"。
+            try:
+                from opentelemetry import trace
+                provider = trace.get_tracer_provider()
+                shutdown = getattr(provider, "shutdown", None)
+                if callable(shutdown):
+                    shutdown()
+            except Exception:
+                pass
 
     def test_get_tracer_returns_noop_when_packages_missing(self):
         # 即使真装了包，get_tracer 也能 gracefully 用；这里主要看它不 raise。

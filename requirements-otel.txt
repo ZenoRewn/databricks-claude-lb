@@ -1,0 +1,29 @@
+# OpenTelemetry tracing —— **可选依赖，故意不并入 requirements.txt**
+#
+# 为什么单独一份：
+#   - tracing 默认关闭（OTEL_ENABLED 未设 = false），绝大多数部署不需要
+#   - 这 5 个包连带 protobuf / grpc 相关传递依赖会明显增大镜像
+#   - otel_setup.py 对缺包做了优雅降级（打一条 WARNING 后继续跑），所以
+#     不装它们不会影响 LB 任何功能
+#
+# ⚠️ 容器场景：默认镜像**不含**这些包。只把 OTEL_ENABLED=true 设进
+# Deployment 是不会生效的（启动时打一条 WARNING 然后静默禁用 tracing）。
+# 要在 K8s 里真正用上 tracing，必须重建镜像：
+#
+#   # Dockerfile 里 requirements.txt 那行之后追加：
+#   COPY requirements-otel.txt .
+#   RUN pip install --no-cache-dir -r requirements-otel.txt
+#
+# 然后再设 OTEL_ENABLED=true + OTEL_EXPORTER_OTLP_ENDPOINT。
+#
+# 本地开发直接装即可：
+#   pip install -r requirements-otel.txt
+#
+# 版本下限跟随 otel 1.x 稳定线；api/sdk 与 instrumentation 大版本需匹配，
+# 升级时请整组一起升。
+
+opentelemetry-api>=1.25.0
+opentelemetry-sdk>=1.25.0
+opentelemetry-instrumentation-fastapi>=0.46b0
+opentelemetry-instrumentation-httpx>=0.46b0
+opentelemetry-exporter-otlp-proto-http>=1.25.0

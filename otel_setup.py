@@ -4,6 +4,13 @@ Optional runtime dependency — if the opentelemetry-* packages are not
 installed, `setup_tracing()` returns immediately (no-op) and the LB
 continues without traces.
 
+⚠️ The deps live in `requirements-otel.txt`, deliberately NOT in
+`requirements.txt`, so **the default Docker image does not contain them**.
+Setting `OTEL_ENABLED=true` on a stock image only logs a WARNING and leaves
+tracing disabled; enabling it in a container requires rebuilding the image
+with `requirements-otel.txt` installed. See that file's header for the exact
+Dockerfile lines.
+
 Env vars respected (all standard OTel):
 - OTEL_ENABLED             — master switch (default `false`; opt-in to keep
                               startup fast when no collector is deployed)
@@ -57,12 +64,18 @@ def setup_tracing(app) -> bool:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
     except ImportError as e:
+        # 两种环境两种修法，必须都说清楚 —— 只说 "pip install" 会把容器场景
+        # 的人带到错路上（在 running pod 里 pip install 无效/会被重建冲掉，
+        # 真实动作是把依赖并进镜像重新构建）。
         logger.warning(
-            "[OTel] OTEL_ENABLED=true but opentelemetry packages are missing (%s). "
-            "Install: pip install opentelemetry-api opentelemetry-sdk "
-            "opentelemetry-instrumentation-fastapi opentelemetry-instrumentation-httpx "
-            "opentelemetry-exporter-otlp-proto-http. Tracing DISABLED.",
-            type(e).__name__,
+            "[OTel] OTEL_ENABLED=true but opentelemetry packages are missing (%s: %s). "
+            "Tracing DISABLED. Fix depends on where you run: "
+            "(1) local/venv — `pip install -r requirements-otel.txt`; "
+            "(2) container/K8s — the default image intentionally ships WITHOUT these "
+            "packages; add `COPY requirements-otel.txt .` + "
+            "`RUN pip install --no-cache-dir -r requirements-otel.txt` to the Dockerfile "
+            "and rebuild/push the image. Setting OTEL_ENABLED alone can never work there.",
+            type(e).__name__, e,
         )
         return False
 
