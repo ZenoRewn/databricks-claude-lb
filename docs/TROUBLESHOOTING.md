@@ -234,6 +234,8 @@ python main.py --copilot-login --endpoint gh-account-1
 
 SSE 流提前断开，客户端拼接到一半挂了。Codex Desktop / OpenAI JS SDK / OpenAI Python SDK 有时会具体报 `stream disconnected before completion: stream closed before response.completed`（Responses API 客户端 SDK 自己在 SSE EOF 后没看到 `response.completed` 事件时抛出）。
 
+> ⚠️ **若错误后半句是 `input item does not belong to this connection`，看 [第 14 节](#14-codex-报-input-item-does-not-belong-to-this-connection含-input-item-id)**。那是**两个叠加的问题**：本节的断流是**因**，第 14 节的会话中毒是**果** —— 断流让 Codex 留下半成品 item 并持续回放其 GHCP connection-bound id，于是该会话此后每轮都失败。只按本节查断流会漏掉「为什么新会话好、旧会话永久坏」。
+
 ### 真因链（按发生概率排序）
 
 1. **LB 内部曾经缺 `saw_completion = False` 初始化**（Copilot 侧 `_stream_response`）。上游至少吐了 1 个 chunk 但没有任何 `data: {"type":"response.completed"...}` payload 时，LB 触发 `UnboundLocalError` → `finally` 只关 response、不 yield 任何终止事件 → 客户端观察到 socket 直接断。**已修复**（v2026-09 修复：初始化 + Azure/Copilot 两侧对齐）。
@@ -390,6 +392,10 @@ KQL / Loki 直接过：`ContainerLog | where LogEntry contains "copilot_pool_tim
 - 出错的请求 body 里能看到 `previous_response_id` 非空，或 `input[*].content[*].encrypted_content` 存在
 - 同一账户重发**无状态**探测（不带这些字段）→ 恢复 200
 
+> 与 [第 14 节](#14-codex-报-input-item-does-not-belong-to-this-connection含-input-item-id) 的区别：本节是**跨账户**重放 opaque state（换 endpoint 触发，单账户下不成立），靠 pinning 解决；第 14 节是**同账户内** item id 所属 connection 已消亡，与账户数无关，靠剥离 `input[*].id` 解决。错误文案带 `does not belong to this connection` 的一律看第 14 节。
+>
+> 补充实测（2026-09-09）：GHCP **不支持 `previous_response_id`**，带上直接 400 `previous_response_id is not supported`，所以 Copilot 路径上实际起作用的 opaque state 只有 `encrypted_content`。
+
 ### 真因
 
 Handoff §7.2 实证：同一 Responses opaque reasoning state 只能被生成它的账户/会话解密。LB 在 5xx / PoolTimeout / 网络错误 / HTML cooldown 时会**自动 failover** 到另一 Copilot endpoint —— 备份 endpoint 上没有那个 session 状态，上游立刻返 401，客户端看不到"其实是我们换账户了"。
@@ -453,3 +459,82 @@ Handoff §7.2 实证：同一 Responses opaque reasoning state 只能被生成�
 - 取舍：每次刷新增加一次短连接/TLS 建连成本；刷新低频且有缓存/锁，优先选易于清理、不会被旧池污染的短生命周期 client，而非引入另一个共享常驻池。
 
 回归测试：`python -m unittest discover -s tests -v`。`test_copilot_token_exchange.py` 仅用合成 token、MockTransport 和 localhost；真实单槽 httpcore 池被未结束的流占满时，先验证共享 GET 触发 PoolTimeout，再验证隔离刷新成功且不关闭原流，无需真实凭据或访问 GitHub。
+
+---
+
+## 14. Codex 报 `input item does not belong to this connection`（含 "input item ID"）
+
+### 症状
+
+Codex APP / codex-cli 在多轮对话中报（常与前半句同时出现）：
+
+```
+stream disconnected before completion: [req=164f73752ca9867d4932ace454e868ca]
+input item does not belong to this connection
+```
+
+特征：**一旦出现，这个会话往后每一轮都失败**；新开会话正常。上游原文形态是
+
+```json
+{"error":{"code":"bad_request","type":"websocket_error",
+          "message":"input item ID does not belong to this connection"}}
+```
+
+### 真因（2026-09-09 直连 GHCP Enterprise 上游实测 + 上游 issue 交叉印证）
+
+GHCP 给 Responses output item 铸造的 `id` **不是** OpenAI 的 `msg_xxx` 短 id，而是 **424~428 字符的签名不透明 blob**，并且被密码学校验：
+
+| 实验 | 结果 |
+|---|---|
+| 篡改 id 任意 20 字符 | 400（验签失败后落到通用 schema「max length 64」） |
+| id 与 `encrypted_content` 错配 | 400 `invalid_request_body` |
+| 换 session token / 换 HTTP 连接 / 跨 response 混合 item / 8 分钟旧 id | 全部 200（**不是**这些维度） |
+
+这个 blob 绑在 GHCP 服务端某个 "connection" 上。connection 消亡后，客户端仍在回放的旧 id 就成了 orphan，被永久拒绝。上游印证：
+
+- `github/copilot-cli#2147` — GitHub 官方结论：*"stale WebSocket state being reused after a reconnection"*
+- `github/copilot-cli#4505` — 中断后恢复旧会话触发；该会话永久失败，连 `/fork` 都救不回
+- `caozhiyuan/copilot-api#235` — 与本 LB 同形态的代理，多实例分流下 `/responses` 多轮几乎必挂
+
+**LB 在其中的角色是「制造 orphan」**：我们每一次中途断流都会让 Codex 留下半成品 item 并持续回放其 id ——
+`stream_truncated_no_completion` / `PoolTimeout` / 换端点重试 / HTML 软熔断 / HTTP/2 `ConnectionTerminated`。
+所以那条错误里的两句话是**因→果**：前半句（断流）造成后半句（会话中毒）。
+
+### 解决（已内置，默认开启）
+
+LB 在转发前一律剥掉 `input[*].id`（`CopilotProxy._strip_input_item_ids`），因此不存在可被拒绝的 orphan id。
+**只剥 item 顶层 `id`**，`call_id` 与 `encrypted_content` 原样保留。实测代价为零：
+
+- reasoning item 剥 id 后上下文不丢（保留 `encrypted_content`）
+- `function_call` 回路正常（配对靠 `call_id`，与 `id` 无关）
+- **prompt cache 不受影响** —— `cached_tokens` 与保留 id 完全相同
+
+另有兜底：若上游仍以该错误拒绝且尚未发出任何 SSE 帧，就地剥 id 重试一次（剥离幂等，最多一次）。
+
+### 排查命令
+
+```bash
+# 1) 剥离是否在工作（分子/分母 = 客户端平均每请求回放多少个 id）
+curl -s $LB/metrics | grep copilot_input_item_ids_stripped
+
+# 2) detected 必须恒为 0。非 0 = 仍有 id 漏到上游，要查别的 id 通道
+curl -s $LB/metrics | grep copilot_orphaned_item_id_events_total
+
+# 3) 找造成中毒的那次断流（用客户端错误里的 req= 值）
+kubectl -n <ns> logs deploy/claude-lb | \
+  jq -c 'select(.kind=="copilot_stream_end" and .request_id=="<req 值>")'
+
+# 4) 断流总量趋势 —— 这是根源，剥离只是让它不再升级为会话中毒
+curl -s $LB/metrics | grep -E "stream_truncated_no_completion_total|pool_timeout_total|upstream_html_events_all"
+```
+
+### 临时关闭（仅排查用）
+
+```bash
+COPILOT_STRIP_INPUT_ITEM_IDS=false    # 恢复原样透传
+```
+
+### 注意
+
+剥离**不会**削弱跨账户重放保护：statefulness 由 `previous_response_id` / `encrypted_content` 判定，与 `id` 无关，
+`copilot_stateful_request_pinned_total` 的语义不变（有回归测试锁住这条不变量）。

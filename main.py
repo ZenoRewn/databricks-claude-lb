@@ -96,6 +96,10 @@ class LBSettings:
     copilot_user_agent: str            # COPILOT_USER_AGENT=GitHubCopilotChat/0.30.0
     # ---- Copilot HTML cooldown ----
     copilot_html_soft_cooldown: float  # COPILOT_HTML_SOFT_COOLDOWN=30 (0=off)
+    # ---- Copilot Responses input item id 剥离 ----
+    # COPILOT_STRIP_INPUT_ITEM_IDS default true —— 设 false 恢复原样透传，
+    # 仅用于排查「怀疑剥离本身造成问题」的场景。
+    copilot_strip_input_item_ids: bool
     # ---- Copilot HTTP client / pool ----
     copilot_http2: bool                # COPILOT_HTTP2 default true
     copilot_pool_max_connections: int  # COPILOT_POOL_MAX_CONNECTIONS
@@ -133,6 +137,7 @@ class LBSettings:
             copilot_editor_plugin_version=_env_str("COPILOT_EDITOR_PLUGIN_VERSION", "copilot-chat/0.30.0"),
             copilot_user_agent=_env_str("COPILOT_USER_AGENT", "GitHubCopilotChat/0.30.0"),
             copilot_html_soft_cooldown=_env_float("COPILOT_HTML_SOFT_COOLDOWN", 30.0),
+            copilot_strip_input_item_ids=_env_bool("COPILOT_STRIP_INPUT_ITEM_IDS", True),
             copilot_http2=_env_bool("COPILOT_HTTP2", True),
             copilot_pool_max_connections=_env_int("COPILOT_POOL_MAX_CONNECTIONS", 500),
             copilot_pool_max_keepalive=_env_int("COPILOT_POOL_MAX_KEEPALIVE", 200),
@@ -3475,6 +3480,15 @@ class CopilotProxy:
         # reason ∈ {"http_5xx", "pool_timeout", "network_error", "generic_error",
         # "html_cooldown", "auth_refresh"}
         self.stateful_pinned_events: Dict[str, int] = {}
+        # `input[*].id` 主动剥离的累计个数 / 请求数。默认开启（见
+        # _strip_input_item_ids 的实测依据）；两个计数一起看能算出「客户端平均
+        # 每请求回放多少个 connection-bound id」。
+        self.input_item_ids_stripped_total = 0
+        self.input_item_ids_stripped_requests_total = 0
+        # 兜底路径：即使已主动剥离，上游仍以「item id 不属于本 connection」拒绝
+        # 的次数（key = "detected" / "recovered" / "unrecoverable"）。detected 恒
+        # 为 0 才说明主动剥离完全奏效；非 0 说明还有别的 id 通道需要排查。
+        self.orphaned_item_id_events: Dict[str, int] = {}
 
     def _record_truncation(self, model: str, api_type: str) -> None:
         """Bucket a silent-truncation event by (model, api_type) for Prometheus."""
@@ -4196,6 +4210,71 @@ class CopilotProxy:
         return False
 
     @staticmethod
+    def _strip_input_item_ids(body: dict, api_type: str) -> int:
+        """剥掉 Responses 请求里 ``input[*].id``，返回剥掉的个数。
+
+        为什么必须剥（2026-09-09 直连 GHCP Enterprise 上游实测）：
+
+        GHCP 给 Responses output item 铸造的 ``id`` **不是** OpenAI 那种
+        ``msg_xxx`` 短 id，而是 424~428 字符的签名不透明 blob，并且被
+        密码学校验 —— 篡改任意 20 字符即 400（验签失败后落到通用 schema
+        的「max length 64」分支）。这个 blob 绑定在 GHCP 服务端的一个
+        "connection" 上；该 connection 消亡后，客户端仍在回放的旧 id 会被
+        永久拒绝：
+
+            {"code":"bad_request","type":"websocket_error",
+             "message":"input item ID does not belong to this connection"}
+
+        上游多个仓库交叉印证同一结论：github/copilot-cli#2147 的官方根因是
+        "stale WebSocket state being reused after a reconnection"；#4505 记录
+        中断后恢复旧会话会让该会话**永久失败**（连 /fork 都救不回，新会话正常）；
+        caozhiyuan/copilot-api#235 是和本 LB 同形态的代理，多实例分流下
+        /responses 多轮几乎必挂。
+
+        对 LB 的意义：我们自己每一次中途断流（silent truncation / PoolTimeout /
+        换端点 / HTML 软熔断）都会让 Codex 留下半成品 item 并持续回放其 id，
+        于是「一次断流」升级成「该会话此后每轮都失败」。客户端报的
+        ``stream disconnected before completion`` 与 ``input item does not
+        belong to this connection`` 同时出现，正是因→果关系。
+
+        实测「剥掉 id」的代价为零（4 个维度逐个验证）：
+          - message item：200
+          - reasoning item 剥 id、保留 ``encrypted_content``：200 且上下文不丢
+          - function_call 回路：200，配对靠 ``call_id``（与 ``id`` 无关）
+          - prompt cache：``cached_tokens`` 与保留 id 完全相同（4063/4066）
+
+        因此只剥 item 顶层 ``id``；``call_id`` 与 ``encrypted_content`` 一律保留
+        （实测二者互相绑定，错配会 400，所以绝不能只动其中一个）。
+        Chat Completions 协议没有这个字段，直接返回 0。
+        """
+        if api_type != "responses" or not isinstance(body, dict):
+            return 0
+        items = body.get("input")
+        if not isinstance(items, list):
+            return 0
+        stripped = 0
+        for item in items:
+            if isinstance(item, dict) and item.pop("id", None) is not None:
+                stripped += 1
+        return stripped
+
+    # 上游拒绝 orphaned item id 时的原文特征。GHCP 大小写不稳定（issue 里同时
+    # 出现 "input item ID does not belong" 与 "input item does not belong"），
+    # 故统一 lower() 后只匹配这个不含 ID/id 的稳定子串。
+    _ORPHANED_ITEM_ID_MARKER = "does not belong to this connection"
+
+    @classmethod
+    def _is_orphaned_item_id_error(cls, status: int, body_text: str) -> bool:
+        """上游是否因「item id 不属于本 connection」而拒绝本请求。
+
+        只在 400/401 上判定：issue 里两种状态码都出现过
+        （copilot-cli 报 400，NousResearch/hermes-agent#32716 报 401）。
+        """
+        if status not in (400, 401):
+            return False
+        return cls._ORPHANED_ITEM_ID_MARKER in (body_text or "").lower()
+
+    @staticmethod
     def _request_has_opaque_state(body: dict, api_type: str) -> bool:
         """请求是否携带对特定上游账户/会话敏感的 opaque state。
 
@@ -4323,6 +4402,22 @@ class CopilotProxy:
         # 流式请求注入 stream_options 以获取 usage（Copilot 兼容 OpenAI Chat 流约定）
         if stream and api_type == "chat" and "stream_options" not in body:
             body["stream_options"] = {"include_usage": True}
+
+        # `input[*].id` 是绑在 GHCP 服务端 connection 上的签名 blob；一旦那个
+        # connection 消亡，客户端回放旧 id 会让该会话此后每轮都被 400 拒绝
+        # （详见 _strip_input_item_ids 的 docstring 与实测数据）。在这里一次性
+        # 剥掉，让 LB 对「上一次断流是谁造成的」完全免疫。放在 is_stateful 之后
+        # 是有意的：statefulness 只看 previous_response_id / encrypted_content，
+        # 不看 id，所以剥离不会改变 pinning 判定。
+        if LB_SETTINGS.copilot_strip_input_item_ids:
+            n_stripped = self._strip_input_item_ids(body, api_type)
+            if n_stripped:
+                self.input_item_ids_stripped_total += n_stripped
+                self.input_item_ids_stripped_requests_total += 1
+                logger.debug(
+                    "[Copilot] stripped %d connection-bound input item id(s) "
+                    "(model=%s request_id=%s)", n_stripped, model, request_id,
+                )
 
         for attempt in range(max_retries):
             if attempt >= max_retries:
@@ -4539,6 +4634,31 @@ class CopilotProxy:
             body_text = response.text
             if response.status_code >= 400 and self._is_unsupported_model_error(response.status_code, body_text):
                 raise _UnsupportedModelError(f"{response.status_code}: {body_text[:200]}")
+            # 兜底：上游拒绝 orphaned input item id。非流式还没写出任何字节，
+            # 就地剥掉 id 重发一次是安全的（同 endpoint、同 headers）。剥离幂等，
+            # 所以最多重发一次；n==0 说明拒绝另有原因，照常往下走报错。
+            if self._is_orphaned_item_id_error(response.status_code, body_text):
+                self.orphaned_item_id_events["detected"] = (
+                    self.orphaned_item_id_events.get("detected", 0) + 1)
+                n = self._strip_input_item_ids(body, api_type)
+                if n:
+                    self.orphaned_item_id_events["recovered"] = (
+                        self.orphaned_item_id_events.get("recovered", 0) + 1)
+                    logger.warning(
+                        "[Copilot] upstream rejected orphaned input item id(s) on non-stream "
+                        "request; stripped %d and retrying once (endpoint=%s request_id=%s)",
+                        n, endpoint.name, request_id,
+                    )
+                    return await self._normal_request(
+                        endpoint, url, body, headers, model, api_type, start_time,
+                        request_id=request_id,
+                    )
+                self.orphaned_item_id_events["unrecoverable"] = (
+                    self.orphaned_item_id_events.get("unrecoverable", 0) + 1)
+                logger.error(
+                    "[Copilot] orphaned-item-id rejection but request carries no "
+                    "input[*].id to strip — cause is elsewhere (request_id=%s)", request_id,
+                )
             body_lower = (body_text or "").lstrip().lower()
             is_html_body = (
                 body_lower.startswith("<!doctype")
@@ -4818,6 +4938,37 @@ class CopilotProxy:
                             f"[Copilot] stream failed ({response.status_code}, ct={upstream_ct}, "
                             f"{'HTML error page' if is_html else 'JSON/text'}): {log_snippet}"
                         )
+                        # 兜底：上游因「item id 不属于本 connection」拒绝。主动剥离
+                        # （_proxy 里）正常情况下已让这里恒不触发；真触发说明还有别
+                        # 的 id 通道，此时就地剥掉再试一次总比把 poisoned 会话原样
+                        # 甩回客户端好。安全性：这是 4xx 且 not sent_any_chunk，
+                        # 尚未提交任何 SSE 帧，符合 RESILIENCE.md 的 POST replay 约束。
+                        if (not sent_any_chunk
+                                and proxy_self._is_orphaned_item_id_error(response.status_code, error_text)):
+                            proxy_self.orphaned_item_id_events["detected"] = (
+                                proxy_self.orphaned_item_id_events.get("detected", 0) + 1)
+                            n = proxy_self._strip_input_item_ids(body, api_type)
+                            if n:
+                                proxy_self.orphaned_item_id_events["recovered"] = (
+                                    proxy_self.orphaned_item_id_events.get("recovered", 0) + 1)
+                                logger.warning(
+                                    "[Copilot] upstream rejected orphaned input item id(s); "
+                                    "stripped %d and retrying once (endpoint=%s request_id=%s)",
+                                    n, current_endpoint.name, request_id,
+                                )
+                                # 与 401 auth repair 同形：同 endpoint、同 lease、只改
+                                # body 后原地重试，因此不 end_current_request（loop 头
+                                # 不会重新 start，提前 end 会让下一轮跑在无 lease 状态）。
+                                # 天然只会重试一次 —— 剥离是幂等的，下一轮
+                                # _strip_input_item_ids 返回 0，走不进这个分支。
+                                continue
+                            # 已经没有 id 可剥 → 拒绝来自别处，不掩盖，照常报错
+                            proxy_self.orphaned_item_id_events["unrecoverable"] = (
+                                proxy_self.orphaned_item_id_events.get("unrecoverable", 0) + 1)
+                            logger.error(
+                                "[Copilot] orphaned-item-id rejection but request carries no "
+                                "input[*].id to strip — cause is elsewhere (request_id=%s)", request_id,
+                            )
                         if response.status_code == 401 and attempt == 0 and not sent_any_chunk:
                             try:
                                 await proxy_self.get_session_token(current_endpoint, force=True)
@@ -6676,6 +6827,28 @@ async def metrics():
         emit("copilot_stateful_request_pinned_total",
              "Cross-endpoint failovers refused because the request carries opaque session state",
              "counter", pinned_samples)
+        # Connection-bound `input[*].id` stripping. GHCP mints ~424-char signed item ids
+        # scoped to a server-side connection; replaying one after that connection is gone
+        # gets the conversation permanently rejected with "input item ID does not belong to
+        # this connection". We strip them on every Responses request, so:
+        #   *_stripped_total / *_stripped_requests_total — how many ids clients replay
+        #   copilot_orphaned_item_id_events_total{stage="detected"} — MUST stay 0. Non-zero
+        #     means an id reached upstream anyway and there is another id channel to find.
+        emit("copilot_input_item_ids_stripped_total",
+             "Connection-bound input[*].id fields removed from Copilot Responses requests",
+             "counter",
+             [f"copilot_input_item_ids_stripped_total {copilot_proxy.input_item_ids_stripped_total}"])
+        emit("copilot_input_item_ids_stripped_requests_total",
+             "Copilot Responses requests that carried at least one connection-bound input item id",
+             "counter",
+             [f"copilot_input_item_ids_stripped_requests_total {copilot_proxy.input_item_ids_stripped_requests_total}"])
+        orphan_samples = [
+            f'copilot_orphaned_item_id_events_total{{stage="{_escape_label(stage)}"}} {count}'
+            for stage, count in sorted(copilot_proxy.orphaned_item_id_events.items())
+        ]
+        emit("copilot_orphaned_item_id_events_total",
+             "Upstream rejections of orphaned input item ids (detected should stay 0)",
+             "counter", orphan_samples)
         # Pool capacity gauges: expose configured upper bounds so scrapers / dashboards can alert on saturation
         emit("copilot_pool_max_connections", "Configured httpx max_connections for the Copilot shared client", "gauge",
              [f"copilot_pool_max_connections {CopilotProxy.POOL_MAX_CONNECTIONS}"])

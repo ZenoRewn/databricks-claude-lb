@@ -120,6 +120,10 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         proxy.upstream_html_events_by_status = {}
         # 状态亲和 pinning 计数（handoff §7.2 防跨账户 opaque state 401）
         proxy.stateful_pinned_events = {}
+        # GHCP connection-bound input[*].id 剥离计数（见 tests/test_copilot_input_item_ids.py）
+        proxy.input_item_ids_stripped_total = 0
+        proxy.input_item_ids_stripped_requests_total = 0
+        proxy.orphaned_item_id_events = {}
         # Fields introduced when we added the DNS+TCP upstream probe on PoolTimeout.
         # We stub out the probe so tests never actually touch the network — otherwise
         # a sandboxed CI would hang on getaddrinfo for the placeholder host.

@@ -125,6 +125,27 @@ Cloudflare / GHCP CDN 偶发会给单条请求返 `Content-Type: text/html`（"J
 - **Metrics**：`copilot_upstream_html_events_total{endpoint}` (per-endpoint counter)、`copilot_upstream_html_events_all_total` (aggregate)、`copilot_upstream_html_events_by_status_total{status_bucket}` (按上游 HTTP 桶拆分 200/4xx/5xx/other，用来区分 Cloudflare 200-HTML 挑战页 vs 上游服务错误)、`copilot_html_soft_cooldown_active{endpoint}` (gauge 0/1)、`copilot_html_soft_cooldown_remaining_seconds{endpoint}` (gauge)。
 - **SSE error 结构化 upstream_ids**：除 6 个上游诊断 header，还额外挂 `lb_request_id`（即本 LB 生成的 X-Request-Id），运维在客户端错误面板 → LB 结构化日志一次跳转就能完成关联，不需要靠 message 前缀 `[req=…]` 手动扒。
 
+#### GHCP connection-bound `input[*].id` 剥离（修 "input item does not belong to this connection"）
+
+**2026-09-09 直连 GHCP Enterprise 上游实测的结论**：GHCP 给 Responses output item 铸造的 `id` **不是** OpenAI 的 `msg_xxx` 短 id，而是 **424~428 字符的签名不透明 blob**，且被密码学校验 —— 篡改任意 20 字符即 400（验签失败后落到通用 schema 的「max length 64」分支）。这个 blob 绑定在 GHCP 服务端某个 "connection" 上；该 connection 消亡后，客户端仍在回放的旧 id 会让**整个会话永久被拒**：
+
+```json
+{"code":"bad_request","type":"websocket_error",
+ "message":"input item ID does not belong to this connection"}
+```
+
+上游多仓库交叉印证：`github/copilot-cli#2147` 官方根因是 "stale WebSocket state being reused after a reconnection"；`#4505` 记录中断后恢复旧会话使该会话永久失败（`/fork` 也救不回，新会话正常）；`caozhiyuan/copilot-api#235` 是与本 LB 同形态的代理，多实例分流下 `/responses` 多轮几乎必挂。
+
+**对 LB 的意义**：我们自己每一次中途断流（silent truncation / PoolTimeout / 换端点 / HTML 软熔断 / HTTP/2 `ConnectionTerminated`）都会让 Codex 留下半成品 item 并持续回放其 id ——「一次断流」于是升级成「该会话此后每轮都失败」。客户端同时看到的 `stream disconnected before completion` 与 `input item does not belong to this connection` 正是**因→果**关系。
+
+**实现**：
+- `CopilotProxy._strip_input_item_ids(body, api_type)`：在 `_proxy` 里对所有 Responses 请求剥掉 `input[*].id`。**只剥 item 顶层 `id`**；`call_id` 与 `encrypted_content` 一律保留（实测二者互相密码学绑定，错配会 400）。幂等、对 Chat 协议返 0
+- 放在 `is_stateful` 计算**之后**：statefulness 只看 `previous_response_id` / `encrypted_content`，不看 `id`，所以剥离不改变 pinning 判定（有回归测试锁住）
+- 兜底：`_is_orphaned_item_id_error(status, body)` 识别 400/401 + `does not belong to this connection`（上游大小写不稳定，故只匹配这个稳定子串）。命中且 `not sent_any_chunk` 时就地剥 id 重试一次 —— 流式沿用 401 auth-repair 的「同 endpoint、同 lease」形状，非流式递归一次。因剥离幂等，天然最多重试一次
+- 开关 `COPILOT_STRIP_INPUT_ITEM_IDS`（默认 **true**）；`false` 恢复原样透传，仅用于排查
+- **实测代价为零**（逐维度验证）：message ✅ / reasoning 剥 id 保留 `encrypted_content` 上下文不丢 ✅ / `function_call` 回路靠 `call_id` 正确配对 ✅ / **prompt cache `cached_tokens` 与保留 id 完全相同**（4063/4066）✅
+- **Metrics**：`copilot_input_item_ids_stripped_total`、`copilot_input_item_ids_stripped_requests_total`（两者相除 = 客户端平均每请求回放多少个 id）、`copilot_orphaned_item_id_events_total{stage="detected|recovered|unrecoverable"}`。**`detected` 恒为 0 才说明主动剥离完全奏效**；非 0 说明还有别的 id 通道要查
+
 #### 有状态请求（opaque state）跨账户重放保护
 
 Handoff §7.2 实证：同一 Responses opaque reasoning state（`previous_response_id` / `input[*].encrypted_content`）在原账户 200，换另一账户 401。而 LB 在 5xx / PoolTimeout / 网络错误 / HTML cooldown 时会自动切 endpoint，一旦客户端带着 opaque state 走到备份 endpoint 就必然 401。修复：
@@ -330,6 +351,7 @@ github_copilot:
 **Copilot / GHCP**
 - `COPILOT_EDITOR_VERSION` / `COPILOT_EDITOR_PLUGIN_VERSION` / `COPILOT_USER_AGENT`: 请求头版本，随 VS Code 官方滚动
 - `COPILOT_HTML_SOFT_COOLDOWN`: HTML 挑战页软熔断窗口秒（默认 30；`0` 关闭）
+- `COPILOT_STRIP_INPUT_ITEM_IDS`: 是否剥掉 Responses 请求的 `input[*].id`（默认 **true**）。GHCP 的 item id 绑在服务端 connection 上，回放已失效的 id 会让会话永久 400；`false` 恢复原样透传，仅排查用
 - `COPILOT_HTTP2`: 是否启用 HTTP/2（默认 **true**；`false` 强制 HTTP/1.1）—— 需要 `h2` 包（已在 requirements.txt）
 - `COPILOT_POOL_MAX_CONNECTIONS` / `COPILOT_POOL_MAX_KEEPALIVE` / `COPILOT_POOL_KEEPALIVE_EXPIRY`
 - `COPILOT_POOL_ACQUIRE_TIMEOUT`: 池获取超时（默认 20；旧为 60）
