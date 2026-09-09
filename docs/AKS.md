@@ -188,7 +188,8 @@ kubectl logs -n claude-lb -l app=claude-lb -f
 # 期望日志（JSON 格式）：
 #   {"ts":"...","level":"INFO","logger":"main","message":"Loaded Databricks endpoint: ..."}
 #   {"ts":"...","level":"INFO","logger":"main","message":"[Copilot] resolved token for 'gh-account-1' from /home/app/.config/..."}
-#   {"ts":"...","level":"INFO","logger":"main","message":"[Copilot] session token cached for gh-account-1: base=..., expires in 1800s"}
+#   {"ts":"...","level":"INFO","logger":"main","message":"[Copilot] session token cached for gh-account-1: base=..., expires in 86340s"}
+#     ↑ expires_in 由上游 expires_at 决定；本账户实测 ≈86400s（24h）。别按固定值断言
 #   {"ts":"...","level":"INFO","logger":"main","message":"[Copilot] background refresh started: interval=300s, threshold=600s"}
 ```
 
@@ -246,7 +247,7 @@ kubectl -n ingress-nginx get cm ingress-nginx-controller -o yaml | grep -E "body
 
 ## 四、Token 自动刷新机制（核心）
 
-### Session token（30 min）— 全自动
+### Session token（TTL 由上游决定，本账户实测 ≈24h）— 全自动
 
 | 触发点 | 行为 |
 |---|---|
@@ -302,7 +303,9 @@ kubectl -n ingress-nginx get cm ingress-nginx-controller -o yaml | grep -E "body
 |---|---|
 | `copilot_session_token_remaining_seconds` | < 120 持续 5 min → P2 告警（后台刷新失效） |
 | `copilot_token_refresh_failed_total` | rate 5min > 0 → P2 告警 |
-| `copilot_endpoint_circuit_open` | == 1 → P1 告警（token 失效，需重新登录 + rotate Secret） |
+| `copilot_endpoint_circuit_open` | == 1 → P1 告警（**先看下一行判断是不是真凭证问题**；熔断后一次干净的最小请求即可恢复，见 `docs/TROUBLESHOOTING.md` 第 15 节） |
+| `copilot_upstream_401_total{scope="endpoint"}` | increase 5min > 0 → P1（真凭证/席位问题，需重新登录 + rotate Secret）。`scope="request"` 单独涨**不要告警** —— 那是客户端在回放坏状态，账户是好的 |
+| `copilot_orphaned_item_id_events_total{stage="detected"}` | **> 0 → P2**（`67e91cd` 的金丝雀，必须恒 0；非 0 说明还有别的 `input[*].id` 通道，见第 14 节）。此指标现在健康态下有 `0` 序列，**不需要再写 `absent()`** |
 | `databricks_endpoint_circuit_open` | == 1 持续 5 min → P2 告警（单 endpoint 不影响整体） |
 | `copilot_endpoint_errors_total` | rate 5min > 0.1 req/s → P3 监控 |
 | `copilot_stream_connections_active` | > 400 持续 30s → P2；结合 forced release / PoolTimeout 判断 |

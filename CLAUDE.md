@@ -93,10 +93,11 @@ docker run -p 8000:8000 -v $(pwd)/config.yaml:/app/config.yaml -v $(pwd)/usage_d
 - **Long-lived OAuth token**（GitHub 端基本不过期，除非用户撤销）：
   - 来源优先级 = config.yaml `github_token` > 本项目 device-flow 缓存 `~/.config/databricks-claude-lb/copilot-auth-<name>.json` > 兼容 copilot-lb 旧缓存 `~/.config/copilot-lb/auth.json`
   - **运行时按需重读**：`resolve_github_token()` 返回 `(token, source_dict)`，`source_dict` 记录可重读的来源（`env` / `file` / `literal`）。`reload_github_token(endpoint)` 从源重读，配合 K8s Secret rotation：mounted secret 文件被 kubelet 异步同步（约 1 min 周期），**Pod 内自动 pick up，零重启**
-- **Short-lived Copilot session token**（约 30 min 过期）：
+- **Short-lived Copilot session token**：**TTL 由上游 `expires_at` 决定，不要假定固定值**。2026-09-09 对本账户三次独立交换实测均 ≈ **24 h（86400 s）**（旧文档写「30 min」是错的，已订正）。以 `copilot_session_token_remaining_seconds` 为准
   - 从 long-lived token 调 `https://api.github.com/copilot_internal/v2/token` 交换
   - **内存缓存** + 过期前 60 s 自动刷新；并发请求由 per-endpoint `asyncio.Lock` 串行化
-  - **后台主动刷新 task**（`background_refresh_loop`）：每 `COPILOT_REFRESH_INTERVAL`（默认 300s）秒扫一遍，剩 ≤`COPILOT_REFRESH_THRESHOLD`（默认 600s）就主动刷新；即使长时间无请求也保持新鲜
+  - **后台主动刷新 task**（`background_refresh_loop`）：每 `COPILOT_REFRESH_INTERVAL`（默认 300s）秒扫一遍，剩 ≤`COPILOT_REFRESH_THRESHOLD`（默认 600s）就主动刷新；即使长时间无请求也保持新鲜。在 24 h TTL 下这等于**每天刷新 1 次**，属正常 —— 别照「30 min TTL」的假设去调这两个值
+  - **不持久化是有意的**：session token 只在内存（`CopilotEndpoint.session_token`）。TTL 既然是 24 h，重启代价 = 每 endpoint 一次 HTTP GET；把短期凭证落盘是负收益。且**实测 session token 轮换不会使 opaque state 失效**（见 `docs/TROUBLESHOOTING.md` 第 15 节），所以重启也不会让客户端手里的会话状态作废
   - **请求级 401 自愈**：上游 `/chat/completions`、`/responses` 返回 401 → `force=True` 重刷 session token → 同 endpoint 重试一次（`_proxy` 和 `_stream_response` 内都做了）
   - **token-exchange 401 自愈**：`get_session_token()` 收到 401 → `_LongLivedTokenInvalidError` → 调 `reload_github_token()` 从源重读 long-lived token → 再交换一次；仍失败则该 endpoint 进熔断池（`circuit_open=True` + readiness probe 反映）
 - Device Flow CLI: `python main.py --copilot-login --endpoint <name>` 使用 VS Code 公开 client_id `Iv1.b507a08c87ecfe98` 走标准 GitHub Device Flow，token 写入 0600 权限文件
@@ -155,7 +156,39 @@ Handoff §7.2 实证：同一 Responses opaque reasoning state（`previous_respo
 - **`_proxy` 层**：stateful 请求首次选中后钉住，后续 `_select_endpoint` 传 `pinned=first_endpoint`；pinned 掉线时抛 503 `stateful_pinned_endpoint_unavailable` 让客户端重构会话，绝不静默换账户
 - **`_stream_response` 内 3 处换 endpoint 分支**（5xx retry / PoolTimeout retry / 网络错误 retry）同样传 `pinned=stateful_pin`；无法换端点时 `_note_stateful_pin(reason)` 计数 + 明确 SSE error 让客户端 retry
 - **无状态请求维持原 failover** —— pinning 不影响普通请求的正常端点切换
-- **Metrics**：`copilot_stateful_request_pinned_total{reason}`，reason ∈ `{http_5xx, pool_timeout, network_error, pinned_unavailable}`；非零就意味着 pinning 成功挡下了会 401 的跨账户重放
+- **Metrics**：`copilot_stateful_request_pinned_total{reason}`，reason ∈ `{http_5xx, network_error, pinned_unavailable, pool_acquire_timeout}`（即 `_STATEFUL_PIN_REASONS`，与 `_note_stateful_pin` 的四个调用点一一对应；旧文档写的 `pool_timeout` 不存在）；非零就意味着 pinning 成功挡下了会 401 的跨账户重放
+
+#### 上游 401 按来源分类（防一个坏会话熔断整个账户）
+
+`CopilotProxy._classify_upstream_failure(status, request_is_stateful=...)` 取代了 Copilot 两处的原地 `is_client_error` 字面量（`_proxy` 与 `_stream_response`，**仅此两处**）。除 401 外所有状态码行为逐位不变。
+
+**为什么要分**（2026-09-09 实测）：401 被排除在 `is_client_error` 之外 ⇒ `failed=True` ⇒ `consecutive_errors += 1` ⇒ 连续 5 次打开 **endpoint 级**熔断。而一个 Copilot endpoint 承载该账户全部模型，所以「一个会话持续 401」会升级成「该账户所有模型下线」。实测计数关系：一个持续 401 的请求贡献 **1** 次（首次 401 走 auth repair 的 `continue`，在 `end_current_request` 之前，不计数）；第 5 个请求打开熔断；熔断后 `_select_endpoint` 对任意模型、任意 api_type 都返 `None`。
+
+**判据 = `_request_has_opaque_state`**：
+
+| 401 来源 | 分类 | 处理 |
+|---|---|---|
+| 请求携带 opaque state（跨账户重放、失效 item id） | request-scoped | 中性，不计入 `consecutive_errors` |
+| 无 opaque state（凭证/席位坏了） | endpoint-scoped | 照旧计数 → 照旧熔断 |
+
+**为什么这个判据对而不只是够用**：`_select_endpoint` 对 stateful 请求返 `pinned if pinned in matched else None`，`matched` 已排除熔断端点 —— 所以**对 stateful 请求熔断只有害无益**：杀掉该会话唯一可能服务的 endpoint 并带走该账户其他全部流量，而 failover 本来就被 pinning 禁止，熔断换不来任何可用性。
+
+**覆盖不会变窄**：seat/policy 被撤时 `_exchange_token` 仍成功 ⇒ `auth_unhealthy` 恒 False ⇒ `_mark_endpoint_unhealthy` 永不触发 ⇒ **只有计数能熔断它**。但那种情况下**所有**请求都 401，包括每个新会话第一轮和全部 Chat Completions 流量（`_request_has_opaque_state` 对 chat 恒返 False），这些是无状态的，照旧计数。（对比：long-lived token 真失效时 `_mark_endpoint_unhealthy` 会**直接** `_open()`，实测 `circuit_open=True` 而 `consecutive_errors=0`，不依赖计数，因此本改动不影响它。）
+
+**403 / 429 不动**：429 是服务端过载，403 多为 Cloudflare bot management，两者确是 endpoint 级信号。无任何实测到的 request-scoped 403 实例，证据不足就不改。
+
+- 开关 `COPILOT_STATEFUL_401_NEUTRAL`（默认 **true**）；`false` 恢复旧行为，仅回退排查用
+- **Metrics**：`copilot_upstream_401_total{scope="request|endpoint"}`。`request` 高而 `endpoint` 为 0 = 客户端在回放坏状态、账户是好的；`endpoint` 持续增长 = 真凭证/席位问题
+- **ADB / Azure 那 4 处不要改**：401 在那里确等于 `dapi` token / `api-key` 坏 = endpoint 不健康，计数是对的。`tests/test_copilot_401_circuit_scope.py::OtherProvidersMustNotBePatchedTests` 有结构守卫锁住调用点数量
+
+#### dict 驱动的 label 指标必须有零样本
+
+`orphaned_item_id_events` / `stateful_pinned_events` / `upstream_html_events_by_status` / `upstream_401_events` 都是运行期事件填充的 dict，健康态下为空。直接按 dict 生成样本会导致 `/metrics` 里**只有 HELP/TYPE、零条 sample** —— 运维分不清「零事件」和「LB 没部署」，只能写 `absent()`；尤其 `orphaned_item_id_events` 是 `67e91cd` 的金丝雀（要求恒 0），没有 0 序列就等于没有金丝雀。
+
+- `_labeled_counter_samples(name, label, counts, known)` 在 **exposition 层**补零，已知 label 全集是模块级常量 `_ORPHANED_ITEM_ID_STAGES` / `_STATEFUL_PIN_REASONS` / `_UPSTREAM_HTML_BUCKETS` / `_UPSTREAM_401_SCOPES`
+- **只补零，不给 dict 播种**：在 `__init__` 里播种会改变 dict 自身语义并打破既有断言（如 `assertNotIn("unrecoverable", ...)`、`assertEqual(upstream_html_events_by_status, {"5xx": 1})`）
+- 未预置的新 label 仍会照常出现（补零在 `merged.update(counts)` 之前），所以加了新 reason 忘了更新常量只会少一条零样本，不会吞掉真实计数
+- `stream_truncated_no_completion_by_model` 的 label 是开放的模型名集合，**不预置**
 
 #### PoolTimeout 诊断（`upstream_connect_stalled` vs `local_pool_saturated`）
 
@@ -256,7 +289,7 @@ Handoff §7.2 实证：同一 Responses opaque reasoning state（`previous_respo
 | `/metrics` | GET | 不需要 | Prometheus 文本格式 metrics（K8s / Azure Monitor 抓取） |
 | `/admin/copilot/reload` | POST | 需要 | 运维端点：从源重读所有 Copilot endpoint 的 long-lived token + 强制刷新 session（K8s Secret rotation 后立刻生效） |
 | `/admin/copilot/reset-pool` | POST | 需要 | 运维端点：重建共享 httpx.AsyncClient，逐出所有 keepalive/半开连接 |
-| `/config/effective` | GET | 需要 | 返回 `LBSettings` 全部字段（25 项 env 生效值），运维 introspection 用 |
+| `/config/effective` | GET | 需要 | 返回 `LBSettings` 全部字段（30 项 env 生效值），运维 introspection 用 |
 | `/stats` | GET | 不需要 | 端点统计（含成本估算、Azure OpenAI、GitHub Copilot） |
 | `/stats/history` | GET | 不需要 | 历史用量数据（`?days=7`，含每日成本） |
 | `/stats/history` | DELETE | **需要** | 清理历史数据（`?keep_days=30`）—— P0.3 加 auth |
@@ -352,6 +385,7 @@ github_copilot:
 - `COPILOT_EDITOR_VERSION` / `COPILOT_EDITOR_PLUGIN_VERSION` / `COPILOT_USER_AGENT`: 请求头版本，随 VS Code 官方滚动
 - `COPILOT_HTML_SOFT_COOLDOWN`: HTML 挑战页软熔断窗口秒（默认 30；`0` 关闭）
 - `COPILOT_STRIP_INPUT_ITEM_IDS`: 是否剥掉 Responses 请求的 `input[*].id`（默认 **true**）。GHCP 的 item id 绑在服务端 connection 上，回放已失效的 id 会让会话永久 400；`false` 恢复原样透传，仅排查用
+- `COPILOT_STATEFUL_401_NEUTRAL`: 携带 opaque state 的请求收到上游 401 时是否视为 request-scoped（默认 **true** = 不计入 endpoint `consecutive_errors`）。防「一个坏会话把整个账户熔断」；`false` 恢复旧行为（所有 401 都计数），仅回退排查用
 - `COPILOT_HTTP2`: 是否启用 HTTP/2（默认 **true**；`false` 强制 HTTP/1.1）—— 需要 `h2` 包（已在 requirements.txt）
 - `COPILOT_POOL_MAX_CONNECTIONS` / `COPILOT_POOL_MAX_KEEPALIVE` / `COPILOT_POOL_KEEPALIVE_EXPIRY`
 - `COPILOT_POOL_ACQUIRE_TIMEOUT`: 池获取超时（默认 20；旧为 60）

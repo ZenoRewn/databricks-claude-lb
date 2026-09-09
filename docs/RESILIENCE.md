@@ -47,6 +47,38 @@ No readiness check, TCP reachability probe, or successful token exchange counts
 as a successful inference. Token refresh can clear an auth-invalid indicator but
 cannot clear the inference circuit or cumulative errors.
 
+### Which upstream 401s are eligible failures (Copilot only)
+
+An upstream 401 is not one thing. On Copilot it is either a broken credential
+(endpoint-scoped) or a request carrying state the upstream will not accept
+(request-scoped: cross-account opaque-state replay, or a connection-bound
+`input[*].id` whose connection is gone). `CopilotProxy._classify_upstream_failure`
+splits them on `_request_has_opaque_state`: **a 401 on a stateful request is
+neutral to the streak; a 401 on a stateless request is an eligible failure.**
+
+This is the same design as pinning, seen from the other side. `_select_endpoint`
+returns `pinned if pinned in matched else None`, and `matched` already excludes
+circuited endpoints — so for a stateful request, opening the breaker can only
+hurt: it kills the one endpoint that conversation can ever use and takes the rest
+of that account's traffic with it, while failover was already forbidden for that
+request. Counting buys no availability.
+
+Coverage does not narrow. A revoked seat still exchanges tokens successfully, so
+`auth_unhealthy` never sets and `_mark_endpoint_unhealthy` never fires — only the
+streak can trip that case. But a revoked seat 401s *everything*, including every
+first turn and all Chat Completions traffic (`_request_has_opaque_state` is always
+False for chat), and those are stateless, so they still count. A genuinely invalid
+long-lived token is separate and faster: `_mark_endpoint_unhealthy` calls `_open()`
+directly, with `consecutive_errors` untouched.
+
+403 and 429 remain eligible failures regardless of statefulness: 429 is server
+overload and 403 is typically CDN bot management, both endpoint-level signals.
+
+Databricks and Azure keep the original inline predicate at all four of their
+call sites — there a 401 really does mean the endpoint's own credential
+(`dapi` token / `api-key`) is bad, so counting it is correct. The kill switch
+`COPILOT_STATEFUL_401_NEUTRAL=false` restores the legacy behaviour.
+
 ## Compatibility and metrics
 
 Existing endpoint `total_errors`, `total_requests`, `active_requests`,
@@ -72,6 +104,26 @@ Local usage-record failures are reported as an aggregate and exception **type**,
 not retried or misrepresented as upstream inference failure. Usage persistence
 is best-effort on this request path; a failure may leave partial usage totals and
 requires operational attention. Payload/model/tool/context processing is unchanged.
+
+`copilot_upstream_401_total{scope="request|endpoint"}` exposes the 401 split above.
+A high `request` with `endpoint` at 0 means clients are replaying state the
+upstream rejects while the account itself is fine; a climbing `endpoint` means a
+real credential or seat problem, and the streak will trip the breaker as before.
+
+### Label counters carry a zero baseline
+
+`copilot_orphaned_item_id_events_total`, `copilot_stateful_request_pinned_total`,
+`copilot_upstream_html_events_by_status_total`, and `copilot_upstream_401_total`
+are backed by dicts that are empty on a healthy process. Rendering samples straight
+from those dicts emitted HELP/TYPE with **no sample line at all**, so a healthy
+scrape carried no `0` series and an operator could not distinguish "no events" from
+"metric never shipped" — worst of all for the `stage="detected"` canary, which is
+required to stay 0. `_labeled_counter_samples` now fills the known label set with
+zeros at exposition time, so alerts can be written as `> 0` rather than `absent()`.
+The dicts themselves are **not** pre-seeded, so their runtime semantics are
+unchanged, and labels outside the known set still appear. Model-labelled counters
+such as `copilot_stream_truncated_no_completion_by_model_total` have an open label
+domain and are deliberately not pre-seeded.
 
 ## Routing and retries
 

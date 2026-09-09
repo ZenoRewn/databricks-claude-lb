@@ -395,6 +395,8 @@ KQL / Loki 直接过：`ContainerLog | where LogEntry contains "copilot_pool_tim
 > 与 [第 14 节](#14-codex-报-input-item-does-not-belong-to-this-connection含-input-item-id) 的区别：本节是**跨账户**重放 opaque state（换 endpoint 触发，单账户下不成立），靠 pinning 解决；第 14 节是**同账户内** item id 所属 connection 已消亡，与账户数无关，靠剥离 `input[*].id` 解决。错误文案带 `does not belong to this connection` 的一律看第 14 节。
 >
 > 补充实测（2026-09-09）：GHCP **不支持 `previous_response_id`**，带上直接 400 `previous_response_id is not supported`，所以 Copilot 路径上实际起作用的 opaque state 只有 `encrypted_content`。
+>
+> 熔断归属（2026-09-09 起）：本节这类 401 是 **request-scoped**，已**不再计入** endpoint `consecutive_errors` —— 否则一个坏会话能把整个账户熔断，见 [第 15 节](#15-一个账户下所有模型突然不可用401-熔断污染)。
 
 ### 真因
 
@@ -538,3 +540,143 @@ COPILOT_STRIP_INPUT_ITEM_IDS=false    # 恢复原样透传
 
 剥离**不会**削弱跨账户重放保护：statefulness 由 `previous_response_id` / `encrypted_content` 判定，与 `id` 无关，
 `copilot_stateful_request_pinned_total` 的语义不变（有回归测试锁住这条不变量）。
+
+本节的金丝雀 `copilot_orphaned_item_id_events_total{stage="detected"}` 此前在健康态下**没有 0 序列**
+（空 dict → 无 sample），现已修好，告警可直接写 `> 0`，见 [第 15 节](#15-一个账户下所有模型突然不可用401-熔断污染)末尾。
+
+另外：会话被永久毒化的原因**不是** LB 重启换 session token —— 那条假设已被实测否证，见
+[第 16 节](#16-重启会让客户端手里的会话状态失效--实测不成立)。
+
+---
+
+## 15. 一个账户下**所有模型**突然不可用（401 熔断污染）
+
+### 症状
+
+某个 Copilot 账户下**全部**模型同时不可用，而不只是出问题的那个会话：
+
+```
+503  {"error":{"message":"No available Copilot endpoint for model ..."}}
+```
+
+`/metrics` 上同时看到：
+
+```
+copilot_endpoint_circuit_open{endpoint="..."} 1
+copilot_endpoint_consecutive_errors{endpoint="..."} 5
+```
+
+日志里通常是同一批 401 反复出现，而 token exchange 一切正常（`copilot_token_refresh_failed_total` 不涨）。
+
+### 机制（2026-09-09 实测）
+
+401 曾被排除在 `is_client_error` 之外 ⇒ `failed=True` ⇒ `consecutive_errors += 1` ⇒ 连续 5 次打开
+**endpoint 级**熔断。而一个 Copilot endpoint 承载该账户全部模型，所以「一个会话持续 401」会升级成
+「该账户所有模型下线」。实测的计数关系：
+
+| 实测项 | 结果 |
+|---|---|
+| 一个持续 401 的请求（流式与非流式都一样） | 上游被调 2 次，`consecutive_errors` 只 +1 |
+| 为什么只 +1 | 首次 401 走 auth repair 的 `continue`，位置在 `end_current_request` **之前**，不计数 |
+| 阈值 5 | 第 5 个这样的请求打开熔断 |
+| 爆炸半径 | 熔断后 `_select_endpoint` 对**任意**模型、**任意** api_type 都返 `None` |
+
+所以「5 个请求 × 每个 2 条 401 日志 = 10 条日志，而 `consecutive_errors=5`」不是巧合，是这个结构的必然结果。
+
+### 现在的行为
+
+`_classify_upstream_failure` 把 401 按来源分开（详见 CLAUDE.md 的「上游 401 按来源分类」一节）：
+
+| 401 来源 | 分类 | 熔断 |
+|---|---|---|
+| 请求携带 opaque state（跨账户重放 / 失效 item id） | request-scoped | **不计数** |
+| 无 opaque state（凭证、席位、策略） | endpoint-scoped | 照旧计数 → 照旧熔断 |
+
+判据是 `_request_has_opaque_state`。这与 pinning 是同一设计的两面：`_select_endpoint` 对 stateful 请求
+只返回 pinned endpoint，而 pinned 必须通过 circuit —— 所以对 stateful 请求熔断**只有害无益**（杀掉该会话
+唯一可能服务的 endpoint 并带走该账户其他全部流量，而 failover 本来就被 pinning 禁止）。
+
+### 诊断
+
+```bash
+# 1. 401 到底算在谁头上
+curl -s $LB/metrics | grep copilot_upstream_401_total
+#   scope="request" 高 + scope="endpoint" 为 0  → 客户端在回放坏状态，账户是好的
+#   scope="endpoint" 持续增长                    → 真凭证/席位问题，熔断是对的
+
+# 2. 熔断现状与恢复倒计时
+curl -s $LB/metrics | grep -E 'copilot_endpoint_(circuit_open|consecutive_errors)'
+
+# 3. 区分「long-lived token 失效」（走另一条更快的路）
+curl -s $LB/metrics | grep copilot_token_refresh_failed_total
+#   涨 → _mark_endpoint_unhealthy 会直接 _open()，与 consecutive_errors 无关
+
+# 4. 已熔断时怎么恢复：一次干净的最小请求打到 HALF_OPEN 试探槽即可
+curl -s $LB/v1/chat/completions -H "Authorization: Bearer $LB_KEY" \
+  -H 'content-type: application/json' \
+  -d '{"model":"gpt-5.6-sol","messages":[{"role":"user","content":"ok"}]}'
+```
+
+### 临时关闭（仅排查用）
+
+```bash
+COPILOT_STATEFUL_401_NEUTRAL=false    # 恢复旧行为：所有 401 都计入熔断
+```
+
+### 已知次要交互（记录，未修）
+
+`_stream_response` 的重试循环只有一个 `for attempt in range(max_retries)`，而**剥离分支与 401 auth repair
+分支都用 `continue`**，两者都会推进 `attempt`。所以若一次请求的首个失败是 orphan-401，剥离重试后
+`attempt` 已经是 1；此时若紧接着撞上真正的 session token 过期 401，`attempt == 0` 不成立 →
+**拿不到那次免费的 auth repair**，直接落到计数分支。
+
+后果有限：该请求会以一次 `endpoint`-scoped 计数失败，客户端重试即可（下一次请求 `attempt` 从 0 开始，
+auth repair 恢复可用）。概率也低——需要「orphan-401 命中」与「token 恰好在同一请求内过期」同时发生，
+而主动剥离已让前者在正常情况下恒不触发。若 `copilot_upstream_401_total{scope="endpoint"}` 与
+`copilot_orphaned_item_id_events_total{stage="detected"}` **同时**非零，可以怀疑踩到了这条。
+
+### 顺带修好的：金丝雀指标此前「缺失 ≠ 零」
+
+`copilot_orphaned_item_id_events_total` / `copilot_stateful_request_pinned_total` /
+`copilot_upstream_html_events_by_status_total` / `copilot_upstream_401_total` 由运行期事件填充的 dict 驱动，
+健康态下 dict 是空的，于是 `/metrics` 里**只有 HELP/TYPE、零条 sample**。第 14 节要求 `stage="detected"`
+**恒为 0**，可当时根本没有 0 序列可看 —— 只能靠 `absent()` 猜「零事件」还是「LB 没部署」。现已在 exposition
+层补零，**告警可以直接写 `> 0`**：
+
+```promql
+copilot_orphaned_item_id_events_total{stage="detected"} > 0    # 第 14 节的金丝雀
+copilot_upstream_401_total{scope="endpoint"} > 0               # 真凭证问题
+```
+
+---
+
+## 16. 「重启会让客户端手里的会话状态失效」—— 实测不成立
+
+### 结论
+
+**Copilot session token 轮换不会使 opaque state 失效。** 所以 LB 重启（或后台刷新换 token）不会让 Codex
+手里的会话作废，也不会因此产生 401。曾经有过相反的假设，2026-09-09 打真实 GHCP 上游否证了它。
+
+### 实验
+
+Turn 1 拿到一个带 **424 字符 item id + 5324 字符 `encrypted_content`** 的 reasoning item，并在提示里埋一个
+暗号。Turn 2 用**全新交换的 session token** + **全新 httpx client**（新 TCP/TLS 连接，模拟进程重启）回放
+完整历史并追问暗号：
+
+| Turn 2 组合 | 结果 |
+|---|---|
+| 新 session token + 保留 `id` | **200**，答出暗号 |
+| 新 session token + 剥掉 `id`（LB 现行为） | **200**，答出暗号 |
+| 旧 session token + 保留 `id`（对照） | **200**，答出暗号 |
+
+三次独立交换的 TTL 实测均 ≈ **86400 s（24 h）**，不是旧文档写的 30 min。
+
+### 推论
+
+- **不持久化 session token 是有意的**：TTL 既然 24 h，重启代价 = 每 endpoint 一次 HTTP GET；把短期凭证
+  落盘是负收益。以 `copilot_session_token_remaining_seconds` 为准，别假定固定 TTL
+- **`COPILOT_REFRESH_INTERVAL=300` / `COPILOT_REFRESH_THRESHOLD=600` 在 24 h TTL 下 = 每天刷新 1 次**，
+  这是正常的，不要照「30 min TTL」的假设去调
+- 真正值得做的是让 **long-lived** 凭证跨重启存活（挂 `copilot-cache` secret 到
+  `/home/app/.config/databricks-claude-lb`，repo manifest 已就绪，收敛步骤见 `docs/AKS.md`）
+- 会话被永久毒化的原因**不是**重启换 token，而是第 14 节的 connection-bound `input[*].id`

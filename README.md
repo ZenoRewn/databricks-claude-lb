@@ -19,7 +19,7 @@
   - GitHub Copilot（`/v1/chat/completions`、`/v1/responses`）— 多账号 + Device Flow 登录 + token 自动刷新
   - Azure OpenAI（`/v1/chat/completions`、`/v1/responses`）— 多区域 + 按 deployment 路由
 - **自动路由** - `claude-*` 永远走 Databricks；其他模型 **GHCP 优先 → Azure fallback**
-- **GHCP token 自愈** - long-lived OAuth + 30 min session token 双层模型；后台定时刷新 + 401 自愈 + 配合 K8s Secret rotation 零重启生效
+- **GHCP token 自愈** - long-lived OAuth + 短期 session token 双层模型（session TTL 由上游 `expires_at` 决定，本账户实测 ≈24h）；后台定时刷新 + 401 自愈 + 配合 K8s Secret rotation 零重启生效
 - **图片自动压缩** - >200KB base64 image → ≤1280px JPEG q=82，让 Chrome fullPage 截图（30MB 级）也能塞进 ADB 4MB 上限；并有解码前软上限保护（张数/总像素/并发，防 OOM，见 docs/TROUBLESHOOTING.md）
 - **上游错误规范化** - 自动把上游 HTML 错误页（CDN "Connection Closed" 之类）转成结构化 JSON，避免泄露给客户端
 - **负载均衡** - `least_requests`（默认）/ `round_robin` / `random`
@@ -273,7 +273,7 @@ github_copilot:
    - 由 `python main.py --copilot-login --endpoint <name>` 写入
 3. **兼容 copilot-lb 旧缓存**：`~/.config/copilot-lb/auth.json`（无 name 区分，全局共用）
 
-> 任一来源拿到 token 后，每次请求自动用它去 `https://api.github.com/copilot_internal/v2/token` 交换 30 min 短期 session token。后台定时任务（默认 300 s 扫一遍，剩 ≤600s 主动刷新）+ 请求级 401 自愈让你**永远不需要手动刷新短期 token**。
+> 任一来源拿到 token 后，每次请求自动用它去 `https://api.github.com/copilot_internal/v2/token` 交换短期 session token。**TTL 以上游返回的 `expires_at` 为准，不要假定固定值** —— 2026-09-09 实测本账户 ≈24h（旧文档写 30 min 是错的）。后台定时任务（默认 300 s 扫一遍，剩 ≤600s 主动刷新）+ 请求级 401 自愈让你**永远不需要手动刷新短期 token**；当前 TTL 下实际约每天刷新一次。
 
 ### Device Flow 登录步骤
 

@@ -19,7 +19,7 @@ import uuid
 import zlib
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from contextlib import aclosing, closing, asynccontextmanager
 import contextvars
@@ -100,6 +100,11 @@ class LBSettings:
     # COPILOT_STRIP_INPUT_ITEM_IDS default true —— 设 false 恢复原样透传，
     # 仅用于排查「怀疑剥离本身造成问题」的场景。
     copilot_strip_input_item_ids: bool
+    # ---- Copilot 上游 401 的熔断归属 ----
+    # COPILOT_STATEFUL_401_NEUTRAL default true —— 携带 opaque state 的请求收到
+    # 401 时视为 request-scoped（中性，不计入 endpoint consecutive_errors）。
+    # 设 false 恢复旧行为（所有 401 都计数），仅用于回退排查。
+    copilot_stateful_401_neutral: bool
     # ---- Copilot HTTP client / pool ----
     copilot_http2: bool                # COPILOT_HTTP2 default true
     copilot_pool_max_connections: int  # COPILOT_POOL_MAX_CONNECTIONS
@@ -138,6 +143,7 @@ class LBSettings:
             copilot_user_agent=_env_str("COPILOT_USER_AGENT", "GitHubCopilotChat/0.30.0"),
             copilot_html_soft_cooldown=_env_float("COPILOT_HTML_SOFT_COOLDOWN", 30.0),
             copilot_strip_input_item_ids=_env_bool("COPILOT_STRIP_INPUT_ITEM_IDS", True),
+            copilot_stateful_401_neutral=_env_bool("COPILOT_STATEFUL_401_NEUTRAL", True),
             copilot_http2=_env_bool("COPILOT_HTTP2", True),
             copilot_pool_max_connections=_env_int("COPILOT_POOL_MAX_CONNECTIONS", 500),
             copilot_pool_max_keepalive=_env_int("COPILOT_POOL_MAX_KEEPALIVE", 200),
@@ -2003,6 +2009,34 @@ def _upstream_html_status_bucket(status: int) -> str:
     return "other"
 
 
+# ---- dict 驱动的 label 指标：已知 label 全集 ----
+# 这些计数器由运行期事件填充，健康态下 dict 是空的。若直接按 dict 生成样本，
+# Prometheus 里就只剩 HELP/TYPE 而**一条 sample 都没有** —— 运维分不清「零事件」
+# 和「LB 没部署 / 指标没发出来」，只能写 absent()。尤其 orphaned_item_id_events
+# 是 67e91cd 的金丝雀（要求恒 0），没有 0 序列就等于没有金丝雀。
+# 因此在 exposition 层用这些常量补零（见 _labeled_counter_samples）。
+# 注意：**只补零，不给 dict 播种** —— 若在 __init__ 里播种，dict 自身语义就变了，
+# 现有断言（如 assertNotIn("unrecoverable", ...)）会被打破。
+_ORPHANED_ITEM_ID_STAGES = ("detected", "recovered", "unrecoverable")
+_STATEFUL_PIN_REASONS = ("http_5xx", "network_error", "pinned_unavailable",
+                         "pool_acquire_timeout")
+_UPSTREAM_HTML_BUCKETS = ("200", "4xx", "5xx", "other")
+_UPSTREAM_401_SCOPES = ("endpoint", "request")
+
+
+def _labeled_counter_samples(name: str, label: str, counts: dict,
+                             known: tuple) -> List[str]:
+    """把 {label_value: count} 渲染成 Prometheus 样本行，已知 label 缺失时补 0。
+
+    未预置的 label 仍会照常出现（`merged.update(counts)` 在补零之后），所以新增
+    一个 reason/stage 而忘了更新常量只会少一条零样本，不会把真实计数吞掉。
+    """
+    merged = {key: 0 for key in known}
+    merged.update(counts or {})
+    return [f'{name}{{{label}="{_escape_label(str(key))}"}} {value}'
+            for key, value in sorted(merged.items())]
+
+
 def _note_upstream_html(proxy, endpoint, provider_label: str, api_type: str, status: int,
                         upstream_ids: Optional[dict] = None) -> None:
     """Provider-agnostic HTML 检测入口（P1.3：三条 proxy 统一）：
@@ -3477,8 +3511,8 @@ class CopilotProxy:
         # 对应 session 会直接 401（handoff §7.2 实证）。首次选定 endpoint 后，
         # 后续所有切换点都传 pinned=first_endpoint 给 _select_endpoint；被拒绝的
         # 切换按 reason 分类累加进这个 dict，供 /metrics 观测 pinning 生效频次。
-        # reason ∈ {"http_5xx", "pool_timeout", "network_error", "generic_error",
-        # "html_cooldown", "auth_refresh"}
+        # reason 取值即 _STATEFUL_PIN_REASONS（与 _note_stateful_pin 的四个调用点
+        # 一一对应；改动那些调用点时同步改常量，否则新 reason 拿不到零样本）。
         self.stateful_pinned_events: Dict[str, int] = {}
         # `input[*].id` 主动剥离的累计个数 / 请求数。默认开启（见
         # _strip_input_item_ids 的实测依据）；两个计数一起看能算出「客户端平均
@@ -3489,6 +3523,9 @@ class CopilotProxy:
         # 的次数（key = "detected" / "recovered" / "unrecoverable"）。detected 恒
         # 为 0 才说明主动剥离完全奏效；非 0 说明还有别的 id 通道需要排查。
         self.orphaned_item_id_events: Dict[str, int] = {}
+        # 上游 401 按熔断归属分类的次数（key = _UPSTREAM_401_SCOPES）。见
+        # _classify_upstream_failure：request-scoped 不计入 endpoint 健康度。
+        self.upstream_401_events: Dict[str, int] = {}
 
     def _record_truncation(self, model: str, api_type: str) -> None:
         """Bucket a silent-truncation event by (model, api_type) for Prometheus."""
@@ -4275,6 +4312,49 @@ class CopilotProxy:
         return cls._ORPHANED_ITEM_ID_MARKER in (body_text or "").lower()
 
     @staticmethod
+    def _classify_upstream_failure(status: int, *, request_is_stateful: bool) -> bool:
+        """返回 `is_client_error` —— True = 中性，不计入 endpoint 健康度。
+
+        除 401 外的所有状态码行为与本方法引入前逐位相同（429 是服务端过载、
+        403 多为 Cloudflare bot management，两者确是 endpoint 级信号）。
+
+        **401 在 Copilot 上语义歧义**，2026-09-09 实测把两种来源分开了：
+
+        - *endpoint-scoped*：凭证/席位层面坏了。一部分已由更快的独立路径覆盖 ——
+          `get_session_token(force=True)` 若发现 long-lived token 失效，
+          `_mark_endpoint_unhealthy()` 会**直接** `_open()`（实测 `circuit_open=True`
+          而 `consecutive_errors=0`），不依赖计数。但「token 交换成功、inference
+          持续 401」（seat/policy 被撤）时 `auth_unhealthy` 恒 False，那条路永不
+          触发，**只有计数能熔断它**，所以这类 401 必须继续计数。
+        - *request-scoped*：请求自己携带的状态不被接受 —— 跨账户重放 opaque
+          state（handoff §7.2 实证 401）、connection-bound item id 失效
+          （`_is_orphaned_item_id_error`，在调用点更早处已被剥离+重试拦掉）。
+          endpoint 本身是健康的。
+
+        判据用 `_request_has_opaque_state`。为什么它对而不只是「够用」：
+        `_select_endpoint` 对 stateful 请求返 `pinned if pinned in matched else None`，
+        而 `matched` 已排除熔断端点 —— 所以**对 stateful 请求熔断只有害无益**：
+        它杀掉该会话唯一可能服务的 endpoint，并顺带带走该账户其他全部流量，
+        而 failover 本来就被 pinning 禁止，熔断换不来任何可用性。
+
+        覆盖不会因此变窄：seat 被撤会让**所有**请求 401，包括每个新会话的第一轮
+        以及全部 Chat Completions 流量（`_request_has_opaque_state` 对 chat 恒
+        返 False）。这些是无状态的 → 照旧计数 → 照旧在阈值处熔断。
+        """
+        if (status == 401 and request_is_stateful
+                and LB_SETTINGS.copilot_stateful_401_neutral):
+            return True
+        return 400 <= status < 500 and status not in (401, 403, 429)
+
+    def _note_upstream_401(self, scope: str) -> None:
+        """记录一次上游 401 及其归属（scope ∈ {"request", "endpoint"}）。
+
+        `request` 高但 `endpoint` 为 0 = 客户端在回放坏状态，账户是好的；
+        `endpoint` 持续增长 = 真的凭证/席位问题，会走到熔断。
+        """
+        self.upstream_401_events[scope] = self.upstream_401_events.get(scope, 0) + 1
+
+    @staticmethod
     def _request_has_opaque_state(body: dict, api_type: str) -> bool:
         """请求是否携带对特定上游账户/会话敏感的 opaque state。
 
@@ -4548,8 +4628,14 @@ class CopilotProxy:
                     if error_body.get("error", {}).get("code") == "upstream_html_error":
                         ids = error_body["error"].get("upstream_ids") or {}
                         self._apply_html_cooldown(endpoint, api_type, status, upstream_ids=ids)
-                    # 401/403 归入非 client-error（会计入 circuit）；仅 4xx 中的其他状态是纯 client 错
-                    is_client_error = 400 <= status < 500 and status not in (401, 403, 429)
+                    # 403/429 归入非 client-error（会计入 circuit）；401 按来源分类
+                    # （见 _classify_upstream_failure：stateful 请求的 401 是
+                    # request-scoped，不该污染 endpoint 健康度）；仅 4xx 中的其他
+                    # 状态是纯 client 错。
+                    is_client_error = self._classify_upstream_failure(
+                        status, request_is_stateful=is_stateful)
+                    if status == 401:
+                        self._note_upstream_401("request" if is_client_error else "endpoint")
                     await end_attempt(success=False, is_client_error=is_client_error)
                     if _retry_rejected_response(e.response, attempt, max_retries):
                         logger.warning(f"[Copilot] {endpoint.name} returned {status}, retrying...")
@@ -4920,7 +5006,12 @@ class CopilotProxy:
                             await end_current_request(success=False, is_client_error=True)
                             raise _UnsupportedModelError(f"{response.status_code}: {error_text[:200]}")
 
-                        is_client_error = 400 <= response.status_code < 500 and response.status_code not in (401, 403, 429)
+                        # 401 按来源分类：stateful 请求的 401 是 request-scoped，
+                        # 不该把整个账户熔断（见 _classify_upstream_failure）。
+                        # 只在下面真正 end_current_request 时才记账 —— 中间的剥离
+                        # 分支与 auth repair 分支都会 continue 跳过它。
+                        is_client_error = proxy_self._classify_upstream_failure(
+                            response.status_code, request_is_stateful=is_stateful)
                         # 规范化（HTML 不透传给客户端；JSON 直接用；带 upstream_ids）
                         upstream_detail = _build_upstream_error_detail(
                             response.status_code, error_text, "Copilot", current_endpoint.name,
@@ -4979,6 +5070,9 @@ class CopilotProxy:
                                 continue
                             except Exception as he:
                                 logger.warning("Copilot stream auth repair failed: %s", type(he).__name__)
+                        if response.status_code == 401:
+                            proxy_self._note_upstream_401(
+                                "request" if is_client_error else "endpoint")
                         await end_current_request(success=False, is_client_error=is_client_error)
 
                         if _retry_rejected_response(response, attempt, max_retries) and not sent_any_chunk:
@@ -6809,10 +6903,9 @@ async def metrics():
              [f"copilot_upstream_html_events_all_total {copilot_proxy.upstream_html_events_total}"])
         # Per-status-bucket breakdown so Grafana can distinguish Cloudflare "Just a moment"
         # 200-HTML challenges from 4xx/5xx upstream service errors (different root causes).
-        html_status_samples = [
-            f'copilot_upstream_html_events_by_status_total{{status_bucket="{_escape_label(bucket)}"}} {count}'
-            for bucket, count in sorted(copilot_proxy.upstream_html_events_by_status.items())
-        ]
+        html_status_samples = _labeled_counter_samples(
+            "copilot_upstream_html_events_by_status_total", "status_bucket",
+            copilot_proxy.upstream_html_events_by_status, _UPSTREAM_HTML_BUCKETS)
         emit("copilot_upstream_html_events_by_status_total",
              "Upstream HTML events broken down by upstream HTTP status bucket (200/4xx/5xx/other)",
              "counter", html_status_samples)
@@ -6820,10 +6913,9 @@ async def metrics():
         # because the request carries opaque state (previous_response_id / encrypted_content).
         # A non-zero rate here proves the fix is doing its job — cross-account replay attempts
         # that would otherwise 401 are now fail-fast at the LB layer.
-        pinned_samples = [
-            f'copilot_stateful_request_pinned_total{{reason="{_escape_label(reason)}"}} {count}'
-            for reason, count in sorted(copilot_proxy.stateful_pinned_events.items())
-        ]
+        pinned_samples = _labeled_counter_samples(
+            "copilot_stateful_request_pinned_total", "reason",
+            copilot_proxy.stateful_pinned_events, _STATEFUL_PIN_REASONS)
         emit("copilot_stateful_request_pinned_total",
              "Cross-endpoint failovers refused because the request carries opaque session state",
              "counter", pinned_samples)
@@ -6842,13 +6934,21 @@ async def metrics():
              "Copilot Responses requests that carried at least one connection-bound input item id",
              "counter",
              [f"copilot_input_item_ids_stripped_requests_total {copilot_proxy.input_item_ids_stripped_requests_total}"])
-        orphan_samples = [
-            f'copilot_orphaned_item_id_events_total{{stage="{_escape_label(stage)}"}} {count}'
-            for stage, count in sorted(copilot_proxy.orphaned_item_id_events.items())
-        ]
+        orphan_samples = _labeled_counter_samples(
+            "copilot_orphaned_item_id_events_total", "stage",
+            copilot_proxy.orphaned_item_id_events, _ORPHANED_ITEM_ID_STAGES)
         emit("copilot_orphaned_item_id_events_total",
              "Upstream rejections of orphaned input item ids (detected should stay 0)",
              "counter", orphan_samples)
+        # 上游 401 的熔断归属。scope="request" 高而 "endpoint" 为 0 = 客户端在回放
+        # 坏状态，账户是好的（这类 401 不再污染 endpoint 健康度）；"endpoint" 持续
+        # 增长 = 真凭证/席位问题，会照旧走到熔断。详见 _classify_upstream_failure。
+        emit("copilot_upstream_401_total",
+             "Upstream 401s by circuit-breaker scope (request=neutral, endpoint=counted)",
+             "counter",
+             _labeled_counter_samples("copilot_upstream_401_total", "scope",
+                                      copilot_proxy.upstream_401_events,
+                                      _UPSTREAM_401_SCOPES))
         # Pool capacity gauges: expose configured upper bounds so scrapers / dashboards can alert on saturation
         emit("copilot_pool_max_connections", "Configured httpx max_connections for the Copilot shared client", "gauge",
              [f"copilot_pool_max_connections {CopilotProxy.POOL_MAX_CONNECTIONS}"])

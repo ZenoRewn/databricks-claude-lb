@@ -124,6 +124,8 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         proxy.input_item_ids_stripped_total = 0
         proxy.input_item_ids_stripped_requests_total = 0
         proxy.orphaned_item_id_events = {}
+        # 上游 401 的熔断归属计数（见 tests/test_copilot_401_circuit_scope.py）
+        proxy.upstream_401_events = {}
         # Fields introduced when we added the DNS+TCP upstream probe on PoolTimeout.
         # We stub out the probe so tests never actually touch the network — otherwise
         # a sandboxed CI would hang on getaddrinfo for the placeholder host.
@@ -1270,6 +1272,12 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("copilot_stream_pump_queue_full_events_total 0", body)
         # read_timeout gauge exports -1 sentinel for unlimited (default: None).
         self.assertRegex(body, r"copilot_pool_read_timeout_seconds -1|copilot_pool_read_timeout_seconds \d")
+        # Same rule applies to the dict-backed label counters: an empty dict used to
+        # emit HELP/TYPE with no sample at all, so a healthy scrape carried no 0 series
+        # and ops could not tell "no events" from "metric never shipped".
+        # Full per-label coverage lives in tests/test_copilot_401_circuit_scope.py.
+        self.assertIn('copilot_orphaned_item_id_events_total{stage="detected"} 0', body)
+        self.assertIn('copilot_upstream_401_total{scope="endpoint"} 0', body)
 
 
 class AzureRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
