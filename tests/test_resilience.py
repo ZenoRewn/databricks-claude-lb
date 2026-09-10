@@ -1,5 +1,4 @@
 """Deterministic breaker/accounting regressions; no provider network or lifespan."""
-import asyncio
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 import httpx

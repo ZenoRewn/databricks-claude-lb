@@ -74,6 +74,87 @@ directly, with `consecutive_errors` untouched.
 403 and 429 remain eligible failures regardless of statefulness: 429 is server
 overload and 403 is typically CDN bot management, both endpoint-level signals.
 
+### Bounded opaque-state recovery is a permitted replay
+
+Not counting those 401s stops one poisoned session from taking an account down,
+but it does not save the request. Measured 2026-09-10 in production: 6 unique
+Copilot requests ended in an unrecoverable 401 (6 of 381 at the last check), `recovered`
+was structurally pinned at 0, and `detected`/`unrecoverable` were double-incremented
+because the rejection then fell through into 401 auth repair — spending a forced
+`copilot_internal/v2/token` exchange that provably cannot help (token rotation
+does not invalidate opaque state). Those six were a bounded historical episode
+rather than a steady failure rate — across three scrapes the orphan counters did not
+move at all while traffic grew from ~95 to 218 to 381 requests. What makes them worth fixing is that each
+one permanently kills that conversation with no way out, not their frequency.
+Full evidence and the measured-vs-inferred split are in `docs/OPAQUE_STATE.md`.
+
+`_OpaqueStateRecovery` now walks a ladder: re-strip `input[*].id`, then drop
+`encrypted_content` from reasoning items, then return a structured
+`orphaned_conversation_state` error. Two properties matter for this document.
+
+**It does not weaken the POST replay ban.** The ladder only fires on an explicit
+`400`/`401` upstream rejection with no downstream bytes committed — streaming
+requires `not sent_any_chunk`, buffered has produced nothing. That is a
+*definite* upstream refusal, not the ambiguous execution of RFC 9110 15.6.4, so
+the earlier prohibition (read/write failure, remote protocol failure, malformed
+2xx, internal exception must not replay POST) is untouched. Retries stay on the
+same endpoint and the same lease; no account substitution is introduced, so
+stateful pinning still holds.
+
+**The budget is explicit, not inferred from idempotence.** The outer attempt
+loop, 401 auth repair, and `_normal_request` recursion are three composable
+retry channels; payload idempotence only guarantees a given rung will not fire
+twice in a row, never a bound on total upstream calls. One `_OpaqueStateRecovery`
+per client request is threaded through all three, `MAX_RUNGS = 2`. Measured
+bounds: three upstream calls streaming (the `for attempt in range(3)` loop is the
+hard ceiling), four buffered (original + one auth repair + two rungs, recursion
+depth two), and two in the production shape. The 401 auth-repair budget is
+likewise now a per-request one-shot flag rather than `attempt == 0`, because a
+recovery `continue` advances `attempt` and used to consume it.
+
+**Loop invariant: every `continue` in the streaming attempt loop requires a
+following iteration to consume the repaired request.** The three endpoint-switch
+paths (5xx, PoolTimeout, network error) already carry `attempt < max_retries - 1`.
+The two in-place repairs used to be bounded incidentally — strip-ids was
+idempotent and auth repair was pinned to `attempt == 0` — which happened to leave
+one iteration spare. Raising the ladder to two rungs and decoupling auth repair
+from `attempt` destroyed that coincidence: three in-place repairs could consume
+all three iterations, and since the loop body *is* the last statement of the
+async generator, exhausting it returned **no terminal event at all** — HTTP 200
+with zero bytes, which is precisely the silent truncation that poisons a Codex
+session per the orphaned-item-id mechanism. Both in-place repairs now carry the
+same guard, and a post-loop backstop emits `retry_budget_exhausted` if the
+invariant is ever broken again, incrementing
+`copilot_stream_retry_budget_exhausted_total` — a must-stay-zero canary that ships
+with a zero baseline so it can be alerted on with `> 0` rather than grepped for. The regression test raises `MAX_RUNGS` rather
+than asserting the literal 2, so it locks the invariant instead of the constant.
+
+**This invariant is cross-provider and load-bearing.** All three streaming
+generators (`ClaudeProxy._stream_request`, `AzureOpenAIProxy._stream_response`,
+`CopilotProxy._stream_response`) share the same shape: the `for attempt in
+range(max_retries)` loop *is* the final statement of the async generator, so
+falling out of it yields no terminal event at all — HTTP 200 with an empty SSE
+body. Audited 2026-09-10: every `continue` in the Databricks and Azure loops is
+gated by `_retry_rejected_response(...)` or an explicit `attempt < max_retries - 1`,
+so neither can exhaust today; only Copilot carries the post-loop backstop, because
+only Copilot has in-place repairs that are not endpoint switches. Anyone adding a
+`continue` to any of the three must carry the guard — a missing one is a silent
+failure, not a loud one.
+
+`copilot_opaque_state_recovery_total{outcome="succeeded"}` increments only after
+a valid terminal event (streaming `response.completed`) or a real returned
+response (buffered). An upstream that accepts the rewritten request but then
+truncates the stream is not a success; that case stays visible in
+`copilot_stream_truncated_no_completion_*`.
+
+Legacy `copilot_orphaned_item_id_events_total{stage}` is retained under the
+no-rename/no-delete rule, but `unrecoverable` now increments only once, after
+the ladder is exhausted, and the documented canary is corrected: **`recovered`**,
+not `detected`, is the signal that another id channel exists. Production
+disproved the old reading — `detected=12` alongside a log line stating
+`no input[*].id to strip`, because what upstream rejected was the *ownership* of
+a reasoning blob, which proactive id stripping cannot prevent.
+
 Databricks and Azure keep the original inline predicate at all four of their
 call sites — there a 401 really does mean the endpoint's own credential
 (`dapi` token / `api-key`) is bad, so counting it is correct. The kill switch
@@ -113,7 +194,8 @@ real credential or seat problem, and the streak will trip the breaker as before.
 ### Label counters carry a zero baseline
 
 `copilot_orphaned_item_id_events_total`, `copilot_stateful_request_pinned_total`,
-`copilot_upstream_html_events_by_status_total`, and `copilot_upstream_401_total`
+`copilot_upstream_html_events_by_status_total`, `copilot_upstream_401_total`,
+`copilot_opaque_state_rejections_total`, and `copilot_opaque_state_recovery_total`
 are backed by dicts that are empty on a healthy process. Rendering samples straight
 from those dicts emitted HELP/TYPE with **no sample line at all**, so a healthy
 scrape carried no `0` series and an operator could not distinguish "no events" from
@@ -221,15 +303,50 @@ would not. The LB holds **no cross-request session state for Copilot**:
 Consequence: **with a single Copilot account, any replica can serve any turn.**
 Routing is replica-agnostic.
 
-**With two or more Copilot accounts this changes.** `least_requests` would split
-consecutive turns of one conversation across accounts, and cross-account
-`encrypted_content` returns 401. Replicas share no memory, so the fix must be
-*stateless and deterministic* — e.g. a consistent hash over a stable session key
-so every replica maps a given conversation to the same account. This is a
-**prerequisite for adding a second Copilot account**, independent of replica
-count (it is already a latent issue at `replicas=1` for the same reason). Not
-implemented; `copilot_stateful_request_pinned_total{reason}` staying at 0 is
-consistent with single-account operation.
+**With two or more Copilot accounts this changes, and it is now measured rather
+than predicted.** Two real GHCP accounts (`api.enterprise.*` and `api.business.*`,
+different deployments), model `gpt-6-astra`: replaying account A's reasoning
+`encrypted_content` to account B returns 401 `input item does not belong to this
+connection` — **both directions, three repetitions, 24/24 deterministic**. With
+`least_requests` splitting consecutive turns of one conversation, that 401 is a
+*certainty* once a second account exists, not a risk.
+
+**Implemented 2026-09-10: stateless deterministic session affinity.**
+`_session_affinity_key` reads Codex's `prompt_cache_key` (measured stable across
+six client retries and across turns of one session; it equals Codex's
+`session_id`/`thread_id`), and `_affinity_index` maps it with **blake2b** —
+deliberately not Python's `hash()`, which is salted per process and would give
+different answers on different replicas, defeating the entire point.
+
+Two properties matter. The hash is taken over the **configured eligible** endpoint
+set, not the currently-available one: hashing over the available set would reshuffle
+*every* session whenever any endpoint trips, manufacturing a cross-account replay
+for all of them; hashing over the configured set only moves the sessions that were
+mapped to the tripped endpoint. And affinity applies to **every** Responses request,
+not just the ones already carrying opaque state — turn 1 is stateless but mints the
+state that turn 2 replays, so waiting for statefulness is too late.
+
+Affinity and pinning compose rather than compete: pinning forbids switching
+*within* one HTTP request, affinity brings the *next* request back to the same
+account. Pinning wins when both apply.
+
+**With a single account the whole mechanism is a no-op** (the affinity branch is
+only reached when more than one endpoint is eligible), so it is on by default with
+zero effect on current production. Kill switch `COPILOT_SESSION_AFFINITY`.
+
+End-to-end validation with both real accounts and real codex-cli 0.145.0, three
+turns of one conversation:
+
+| | affinity on | affinity off |
+|---|---|---|
+| requests per account | 3 / 0 | 3 / 3 |
+| `copilot_opaque_state_requests_total` | **0** | **3** |
+| `copilot_opaque_state_recovery_total{succeeded}` | 0 | **3** |
+| turns completed | 3/3 | 6/6 |
+
+So affinity removes the failure at the root, and the recovery ladder catches what
+slips through — with the answer still correct after the reasoning chain was dropped
+and the request replayed on the other account.
 
 ### The real blocker was usage persistence
 

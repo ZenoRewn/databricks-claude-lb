@@ -154,7 +154,7 @@ class TransportCloseTests(OwnershipTests):
                     if error_body:
                         peer.status = b'400 Bad Request'
                     peer.allow_headers.set()
-                    upstream = await self.wait(proxy.client.completed_headers.get())
+                    await self.wait(proxy.client.completed_headers.get())
                     reading = None
                     if error_body:
                         reading = asyncio.create_task(anext(response.body_iterator))

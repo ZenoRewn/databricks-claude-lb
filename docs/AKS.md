@@ -305,11 +305,16 @@ kubectl -n ingress-nginx get cm ingress-nginx-controller -o yaml | grep -E "body
 | `copilot_token_refresh_failed_total` | rate 5min > 0 → P2 告警 |
 | `copilot_endpoint_circuit_open` | == 1 → P1 告警（**先看下一行判断是不是真凭证问题**；熔断后一次干净的最小请求即可恢复，见 `docs/TROUBLESHOOTING.md` 第 15 节） |
 | `copilot_upstream_401_total{scope="endpoint"}` | increase 5min > 0 → P1（真凭证/席位问题，需重新登录 + rotate Secret）。`scope="request"` 单独涨**不要告警** —— 那是客户端在回放坏状态，账户是好的 |
-| `copilot_orphaned_item_id_events_total{stage="detected"}` | **> 0 → P2**（`67e91cd` 的金丝雀，必须恒 0；非 0 说明还有别的 `input[*].id` 通道，见第 14 节）。此指标现在健康态下有 `0` 序列，**不需要再写 `absent()`** |
+| `copilot_orphaned_item_id_events_total{stage="recovered"}` | **> 0 → P2** —— 这才是「还有别的 `input[*].id` 通道」的金丝雀（事后还能剥到 id）。**旧文档写的 `stage="detected"` 恒 0 已被生产反证**：`detected` 非 0 通常只说明上游拒绝了 reasoning blob 的归属，主动剥 id 结构上防不住，见 `docs/TROUBLESHOOTING.md` 第 17 节 |
+| `copilot_stream_retry_budget_exhausted_total` | **> 0 → P1** —— 流式重试循环的不变量被破坏，客户端本会收到 HTTP 200 + 空 SSE 流（会毒化会话）。按回归处理，先 `COPILOT_OPAQUE_STATE_RECOVERY=false` 再排查 |
+| `copilot_session_affinity_total{outcome="unavailable"}` | increase 1h > 0 → P3（亲和目标熔断，该会话这一轮跨账户、丢推理链；先看那个账户为什么熔断）。**单账户下 hit/unavailable 必须恒为 0** |
+| `copilot_opaque_state_requests_total` | increase 1h > 0 → P3 监控（受影响的**唯一客户端请求**数；用户表现为「这个会话往后每轮都失败」）|
+| `copilot_opaque_state_recovery_total{outcome="exhausted"}` | **increase 1h > 0 → P2** —— 恢复阶梯走完仍失败，客户端必须重建会话。与 `..._requests_total` 相除 = 救不回的比例 |
+| `copilot_opaque_state_recovery_total{outcome="succeeded"}` | 不告警，看趋势：与 `{outcome="attempted"}` 相除 = 恢复命中率。长期接近 0 说明 rung 2 的前提不成立，应 `COPILOT_OPAQUE_STATE_RECOVERY=false` 回到根因调查 |
 | `databricks_endpoint_circuit_open` | == 1 持续 5 min → P2 告警（单 endpoint 不影响整体） |
 | `copilot_endpoint_errors_total` | rate 5min > 0.1 req/s → P3 监控 |
 | `copilot_stream_connections_active` | > 400 持续 30s → P2；结合 forced release / PoolTimeout 判断 |
-| `copilot_pool_timeout_total` | increase 5min > 0 → P1（本地连接池容量压力） |
+| `copilot_pool_timeout_total` | increase 5min > 0 → P1（等池分配超时；**不等于**本地池已满，也不等于上游建连失败。拿结构化日志的 `httpx_pool_observed_full` 定方向，见 TROUBLESHOOTING §9） |
 | `copilot_stream_forced_releases_total` | increase 15min > 0 → P2（已自动回收确认断开的 SSE） |
 | `copilot_stream_upstream_idle_max_seconds` | 只做诊断，不单独告警/回收；长 thinking 可合法长时间无 token |
 

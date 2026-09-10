@@ -628,7 +628,7 @@ class OpenTelemetrySetupTests(unittest.TestCase):
         # 即使真装了包，get_tracer 也能 gracefully 用；这里主要看它不 raise。
         from otel_setup import get_tracer
         t = get_tracer()
-        with t.start_as_current_span("test-span") as span:
+        with t.start_as_current_span("test-span"):
             pass  # no-op or real span both fine
 
 
@@ -655,10 +655,45 @@ class LBSettingsTests(unittest.TestCase):
             self.assertTrue(s.copilot_http2)  # P2.6 opt-out default
             self.assertEqual(s.img_compress_concurrency, 2)
             self.assertEqual(s.img_max_count, 50)
+            self.assertEqual(s.img_max_total_pixels, 100_000_000)
         finally:
             for k, v in saved.items():
                 if v is not None:
                     os.environ[k] = v
+
+    def test_no_dual_sourced_env_default_drift(self):
+        """同一个 env 被「模块级常量」与「LBSettings」分别读取时，默认值必须一致。
+
+        LBSettings 是 introspection 层（`GET /config/effective`），散点的
+        `os.environ.get` 才是实际执行时读的 backing store。两边默认值一旦不同，
+        运维不设该 env 时 introspection 就在说谎 —— 而这个端点存在的唯一目的就是
+        防止这种情况。曾真的漂移过：`IMG_MAX_TOTAL_PIXELS` 报 200M、执行 100M，
+        查 413 的人照 introspection 会得出「没超预算」的错误结论。
+
+        这里比的是**运行期实际值**而不是源码字面量，所以 `"30"` vs `30.0` 这类
+        形式差异不会误报。
+        """
+        import os
+        pairs = [
+            ("IMG_ADMISSION_ENABLED", "_IMG_ADMISSION_ENABLED", "img_admission_enabled"),
+            ("IMG_COMPRESS_CONCURRENCY", "_IMG_COMPRESS_CONCURRENCY", "img_compress_concurrency"),
+            ("IMG_MAX_COUNT", "_IMG_MAX_COUNT", "img_max_count"),
+            ("IMG_MAX_TOTAL_PIXELS", "_IMG_MAX_TOTAL_PIXELS", "img_max_total_pixels"),
+        ]
+        saved = {env: os.environ.pop(env, None) for env, _, _ in pairs}
+        try:
+            settings = main.LBSettings.load()
+            for env, const_name, field in pairs:
+                with self.subTest(env=env):
+                    self.assertEqual(
+                        getattr(main, const_name), getattr(settings, field),
+                        f"{env}: 执行侧 {const_name} 与 introspection 侧 "
+                        f"LBSettings.{field} 默认值不一致",
+                    )
+        finally:
+            for env, v in saved.items():
+                if v is not None:
+                    os.environ[env] = v
 
     def test_env_overrides_apply(self):
         import os

@@ -9,6 +9,7 @@ import sys
 import asyncio
 import math
 import base64
+import hashlib
 import json
 import time
 import random
@@ -105,6 +106,17 @@ class LBSettings:
     # 401 时视为 request-scoped（中性，不计入 endpoint consecutive_errors）。
     # 设 false 恢复旧行为（所有 401 都计数），仅用于回退排查。
     copilot_stateful_401_neutral: bool
+    # ---- Copilot opaque state 被上游拒绝后的有界恢复 ----
+    # COPILOT_OPAQUE_STATE_RECOVERY default true —— 只 gate 恢复阶梯的 rung 2
+    # （删掉 reasoning item 的 encrypted_content 再重试一次）。剥 id 的 rung 1 由
+    # COPILOT_STRIP_INPUT_ITEM_IDS 单独控制。设 false 时仍会记录并返回结构化的
+    # orphaned_conversation_state 错误，只是不做那次重试。
+    copilot_opaque_state_recovery: bool
+    # ---- Copilot 会话亲和 ----
+    # COPILOT_SESSION_AFFINITY default true —— 把同一会话（Codex 的
+    # prompt_cache_key）的每一轮钉在同一个账户上。**单账户下是完全的 no-op**
+    # （只有一个合格端点时压根不走亲和分支），所以默认开对现状零影响。
+    copilot_session_affinity: bool
     # ---- Copilot HTTP client / pool ----
     copilot_http2: bool                # COPILOT_HTTP2 default true
     copilot_pool_max_connections: int  # COPILOT_POOL_MAX_CONNECTIONS
@@ -137,13 +149,21 @@ class LBSettings:
             img_admission_enabled=_env_bool("IMG_ADMISSION_ENABLED", True),
             img_compress_concurrency=_env_int("IMG_COMPRESS_CONCURRENCY", 2),
             img_max_count=_env_int("IMG_MAX_COUNT", 50),
-            img_max_total_pixels=_env_int("IMG_MAX_TOTAL_PIXELS", 200_000_000),
+            # 必须与实际执行准入的 _IMG_MAX_TOTAL_PIXELS 同默认值。二者曾分别是
+            # 200M / 100M：不设该 env 时 /config/effective 报 200M 而门在 100M 处
+            # 拒绝，查 413 的人照 introspection 会得出「没超预算」的错误结论。
+            # 对齐向执行值（更保守），不改运行期行为。防漂移守卫见
+            # tests/test_databricks_payload_compat.py::LBSettingsTests
+            #   ::test_no_dual_sourced_env_default_drift
+            img_max_total_pixels=_env_int("IMG_MAX_TOTAL_PIXELS", 100_000_000),
             copilot_editor_version=_env_str("COPILOT_EDITOR_VERSION", "vscode/1.104.0"),
             copilot_editor_plugin_version=_env_str("COPILOT_EDITOR_PLUGIN_VERSION", "copilot-chat/0.30.0"),
             copilot_user_agent=_env_str("COPILOT_USER_AGENT", "GitHubCopilotChat/0.30.0"),
             copilot_html_soft_cooldown=_env_float("COPILOT_HTML_SOFT_COOLDOWN", 30.0),
             copilot_strip_input_item_ids=_env_bool("COPILOT_STRIP_INPUT_ITEM_IDS", True),
             copilot_stateful_401_neutral=_env_bool("COPILOT_STATEFUL_401_NEUTRAL", True),
+            copilot_opaque_state_recovery=_env_bool("COPILOT_OPAQUE_STATE_RECOVERY", True),
+            copilot_session_affinity=_env_bool("COPILOT_SESSION_AFFINITY", True),
             copilot_http2=_env_bool("COPILOT_HTTP2", True),
             copilot_pool_max_connections=_env_int("COPILOT_POOL_MAX_CONNECTIONS", 500),
             copilot_pool_max_keepalive=_env_int("COPILOT_POOL_MAX_KEEPALIVE", 200),
@@ -985,12 +1005,12 @@ def _valid_responses_completed(response):
     if usage is not None:
         if not isinstance(usage, dict) or not all(_i64(usage.get(k)) for k in ("input_tokens", "output_tokens", "total_tokens")):
             return False
-        for field, required in (("input_tokens_details", "cached_tokens"), ("output_tokens_details", "reasoning_tokens")):
-            details = usage.get(field)
+        for field_name, required in (("input_tokens_details", "cached_tokens"), ("output_tokens_details", "reasoning_tokens")):
+            details = usage.get(field_name)
             if details is not None:
                 if not isinstance(details, dict) or not _i64(details.get(required)):
                     return False
-                if field == "input_tokens_details" and not _i64(details.get("cache_write_tokens", 0)):
+                if field_name == "input_tokens_details" and not _i64(details.get("cache_write_tokens", 0)):
                     return False
         units = usage.get("codex_rollout_budget_units")
         if units is not None and (type(units) not in (int, float) or type(units) is float and not math.isfinite(units)):
@@ -1432,6 +1452,14 @@ def _peek_image_size(raw: bytes):
         return None
 
 
+def _try_b64(data: str) -> Optional[bytes]:
+    """尽力解 base64；解不开返回 None（调用方仍会把它算作一张图）。"""
+    try:
+        return base64.b64decode(data, validate=False)
+    except Exception:
+        return None
+
+
 def check_image_admission(payload) -> None:
     """解码前遍历 payload 统计图片张数与总像素，超限抛 ImageAdmissionError。
     仅 peek header，不触发全量解码，本身内存开销极小。"""
@@ -1440,7 +1468,14 @@ def check_image_admission(payload) -> None:
     count = 0
     total_px = 0
 
-    def account(raw: bytes):
+    def account(raw: Optional[bytes]):
+        """记一张图。``raw=None`` 表示 base64 解不开 —— 仍然计入张数。
+
+        张数必须在「尝试解码之前」就记，否则畸形 base64 会整体绕过张数预算：
+        解码抛异常 → 压根走不到计数 → 客户端可以塞任意多个 image 节点。
+        像素数无从统计（PIL 同样解不开它，压缩阶段也不会解码，所以不构成 OOM 风险），
+        但预算本身不能被畸形输入绕过。
+        """
         nonlocal count, total_px
         count += 1
         if count > _IMG_MAX_COUNT:
@@ -1448,6 +1483,8 @@ def check_image_admission(payload) -> None:
                 f"Too many images in request: >{_IMG_MAX_COUNT} (limit for LB memory safety). "
                 f"Please split the request or remove images."
             )
+        if raw is None:
+            return
         size = _peek_image_size(raw)
         if size:
             total_px += size[0] * size[1]
@@ -1464,12 +1501,7 @@ def check_image_admission(payload) -> None:
                 src = node["source"]
                 data = src.get("data") if src.get("type") == "base64" else None
                 if isinstance(data, str) and data:
-                    try:
-                        account(base64.b64decode(data, validate=False))
-                    except ImageAdmissionError:
-                        raise
-                    except Exception:
-                        pass
+                    account(_try_b64(data))
                 return
             for v in node.values():
                 visit(v)
@@ -1484,12 +1516,7 @@ def check_image_admission(payload) -> None:
             m = _DATA_URL_RE.match(node)
             if not m:
                 return
-            try:
-                account(base64.b64decode(m.group(2), validate=False))
-            except ImageAdmissionError:
-                raise
-            except Exception:
-                pass
+            account(_try_b64(m.group(2)))
 
     visit(payload)
 
@@ -1679,7 +1706,15 @@ def compress_images_in_payload(payload) -> dict:
 
 async def compress_images_async(payload) -> dict:
     """在线程池执行压缩，避免阻塞 event loop。无图片时近乎零开销。
-    用 Semaphore 限制并发解码张数，避免多张高分图同时进位图打爆内存。"""
+
+    内存上界怎么来的（容易看错，写清）：``compress_images_in_payload`` 在单线程里
+    **逐张**解码，每张位图在 ``_compress_image_bytes`` 返回后即释放，所以单个请求的
+    峰值是「一张位图」而不是「N 张」。这里的 Semaphore 限的是**并发压缩的请求数**，
+    于是全局峰值 ≈ ``IMG_COMPRESS_CONCURRENCY`` 张位图。
+
+    也就是说防 OOM 靠的是「顺序解码 + 这个请求级限流」，**不是** IMG_MAX_TOTAL_PIXELS
+    —— 后者约束的是累计解码工作量（延迟/CPU），两者目的不同，别混用来调参。
+    """
     if not _PIL_AVAILABLE:
         return {"count": 0, "before": 0, "after": 0}
     global _img_compress_sem
@@ -1896,9 +1931,9 @@ class GlobalStats:
 # ==================== Usage Data Persistence ====================
 # P2.2: moved to usage_store.py (base + JSON + MySQL). Re-import here so
 # any `main.UsageDataStore` reference keeps working.
-from usage_store import (
-    UsageDataStore, JsonUsageStore, MysqlUsageStore, create_usage_store,
-)
+# 只 import 真正被引用的两个：JsonUsageStore / MysqlUsageStore 由
+# create_usage_store 内部选择，main.py 不直接触碰它们。
+from usage_store import UsageDataStore, create_usage_store
 
 
 
@@ -2022,6 +2057,12 @@ _STATEFUL_PIN_REASONS = ("http_5xx", "network_error", "pinned_unavailable",
                          "pool_acquire_timeout")
 _UPSTREAM_HTML_BUCKETS = ("200", "4xx", "5xx", "other")
 _UPSTREAM_401_SCOPES = ("endpoint", "request")
+# 上游拒绝 opaque state 的两类（实测上游是两级独立校验，见
+# CopilotProxy._classify_opaque_state_rejection 的 docstring）与恢复阶梯的三种结局。
+_OPAQUE_STATE_KINDS = ("orphaned_id", "unverifiable_content")
+_OPAQUE_STATE_RECOVERY_OUTCOMES = ("attempted", "exhausted", "succeeded")
+# 会话亲和的三种结局：命中 / 亲和目标不可用而落回常规策略 / 请求没带会话键
+_SESSION_AFFINITY_OUTCOMES = ("absent", "hit", "unavailable")
 
 
 def _labeled_counter_samples(name: str, label: str, counts: dict,
@@ -2406,10 +2447,10 @@ class ClaudeProxy:
         
         # 移除 Databricks 不支持的顶层字段（如新版 Claude Code 发送的 context_management 等）
         unsupported_fields = ["context_management", "output_config"]
-        for field in unsupported_fields:
-            if field in body:
-                logger.info(f"Removing unsupported field: {field}")
-                del body[field]
+        for field_name in unsupported_fields:
+            if field_name in body:
+                logger.info(f"Removing unsupported field_name: {field_name}")
+                del body[field_name]
 
         # 新版 Claude Code 可能把 system prompt 作为 messages[].role=system 发送；
         # Databricks Anthropic endpoint 只接受顶层 system，不接受 system role message。
@@ -2585,8 +2626,28 @@ class ClaudeProxy:
                     continue
                 break
         
-        raise HTTPException(status_code=502, detail={"error": {"code": "upstream_request_failed", "message": "Upstream request failed; execution may have occurred. Not replayed after ambiguous failure."}})
-    
+        # 与 CopilotProxy._proxy 的收尾对齐：从前这里丢掉 last_error，无条件抛一个
+        # 固定文案的 502 —— PoolTimeout / ConnectError / RemoteProtocolError 在客户端
+        # 看来完全一样，而 docs/RESILIENCE.md 里 503（连接获取/建立失败，未执行，可重放）
+        # 与 502（执行不明，禁止重放）的语义区分在这条路径上整个丢失了。
+        if _replay_safe_transport_failure(last_error):
+            raise HTTPException(
+                status_code=503,
+                detail={"error": {
+                    "code": "upstream_connect_failed",
+                    "message": ("Could not establish a connection to any Databricks endpoint. "
+                                "The request was not executed upstream."),
+                    "failure_type": type(last_error).__name__ if last_error else "unknown",
+                }})
+        raise HTTPException(
+            status_code=502,
+            detail={"error": {
+                "code": "upstream_request_failed",
+                "message": ("Upstream request failed; execution may have occurred. "
+                            "Not replayed after ambiguous failure."),
+                "failure_type": type(last_error).__name__ if last_error else "unknown",
+            }})
+
     async def _normal_request(self, endpoint, url, body, headers, model: str = "unknown", start_time: float = 0,
                                 request_id: Optional[str] = None) -> JSONResponse:
         """非流式请求 - 直接透传"""
@@ -2637,11 +2698,6 @@ class ClaudeProxy:
             current_endpoint = endpoint
             current_url = url
             current_headers = headers
-            input_tokens = 0
-            output_tokens = 0
-            cache_creation_tokens = 0
-            cache_read_tokens = 0
-            sent_message_start = False
             sent_any_content = False
 
             HEARTBEAT = b": keep-alive\n\n"
@@ -2722,8 +2778,6 @@ class ClaudeProxy:
                                 continue
                             sent_any_content = True
                             observation.observe(frame)
-                            if observation.last_event == "message_start":
-                                sent_message_start = True
                             if observation.terminal:
                                 success = observation.terminal == "completed"
                                 await end_current_request(success=success, is_client_error=observation.neutral)
@@ -2984,10 +3038,25 @@ class AzureOpenAIProxy:
                     continue
                 break
 
+        # 与 ClaudeProxy / CopilotProxy 的收尾对齐：从前这里丢掉 last_error，无条件抛
+        # 固定文案的 502，把 503（未执行、可重放）与 502（执行不明）的区分也丢了。
+        if _replay_safe_transport_failure(last_error):
+            raise HTTPException(
+                status_code=503,
+                detail={"error": {
+                    "code": "upstream_connect_failed",
+                    "message": ("Could not establish a connection to any Azure OpenAI endpoint. "
+                                "The request was not executed upstream."),
+                    "failure_type": type(last_error).__name__ if last_error else "unknown",
+                }})
         raise HTTPException(
             status_code=502,
-            detail={"error": {"code": "upstream_request_failed", "message": "Upstream request failed; execution may have occurred. Not replayed after ambiguous failure."}},
-        )
+            detail={"error": {
+                "code": "upstream_request_failed",
+                "message": ("Upstream request failed; execution may have occurred. "
+                            "Not replayed after ambiguous failure."),
+                "failure_type": type(last_error).__name__ if last_error else "unknown",
+            }})
 
     async def _normal_request(self, endpoint, url, body, headers, model: str, api_type: str, start_time: float) -> JSONResponse:
         """非流式请求；request lease 由调用方 exactly-once 结算。"""
@@ -3042,9 +3111,6 @@ class AzureOpenAIProxy:
             current_endpoint = endpoint
             current_url = url
             current_headers = headers
-            input_tokens = 0
-            output_tokens = 0
-            cache_read_tokens = 0
             sent_any_chunk = False
             HEARTBEAT = b": keep-alive\n\n"
             wire_output = _SSEWireOutput()
@@ -3211,6 +3277,93 @@ class _UnsupportedModelError(Exception):
 
 class _LongLivedTokenInvalidError(Exception):
     """long-lived OAuth token 失效（GitHub 端 401），自愈链上层捕获"""
+
+
+class _OpaqueStateRecovery:
+    """一个客户端请求一份的 opaque-state 恢复预算 + 计数聚合。
+
+    为什么要显式计数而不是靠「改写载荷是幂等的，所以天然最多重试一次」：
+    ``_proxy`` 的外层 attempt 循环、401 auth repair、``_normal_request`` 的递归
+    是三条**能叠加**的重试通道。幂等只保证「同一个 rung 不会连着触发两次」，
+    不保证整条请求的上游调用次数有上界。这个对象在 ``_proxy`` 里创建一次、
+    穿到流式与非流式两条路径，所以三条通道共用同一份预算。
+
+    阶梯（rung 0 是发送前的主动剥离，不占预算）：
+      rung 1  再剥一次 ``input[*].id``            —— 只在 rung 0 关掉 / 出现新 id 通道时有料
+      rung 2  删 reasoning item 的 ``encrypted_content``
+      走完    结构化 ``orphaned_conversation_state`` 错误，绝不静默当成成功
+    """
+
+    MAX_RUNGS = 2
+
+    __slots__ = ("proxy", "api_type", "rungs_fired", "request_counted",
+                 "pending_success", "exhausted_kind", "last_kind")
+
+    def __init__(self, proxy: "CopilotProxy", api_type: str):
+        self.proxy = proxy
+        self.api_type = api_type
+        self.rungs_fired = 0
+        self.request_counted = False
+        self.pending_success = False
+        self.exhausted_kind: Optional[str] = None
+        self.last_kind: Optional[str] = None
+
+    # ---- 观测 ----
+
+    def observe(self, kind: Optional[str]) -> Optional[str]:
+        """记录**本次**上游响应的 opaque-state 分类结果，原样返回它。
+
+        每个失败响应都必须调用一次，``kind=None`` 也要 —— ``last_kind`` 是
+        「要不要把这次 401 喂给 auth repair」的判据，残留上一轮的判定会让恢复之后
+        紧随的真 token 过期拿不到那次免费修复。
+        """
+        self.last_kind = kind
+        if kind is None:
+            return None
+        self.proxy.opaque_state_rejections[kind] = (
+            self.proxy.opaque_state_rejections.get(kind, 0) + 1)
+        if not self.request_counted:
+            # 唯一受影响的客户端请求数 —— 运维该读的口径。事件数会被阶梯放大。
+            self.request_counted = True
+            self.proxy.opaque_state_requests_total += 1
+        return kind
+
+    def note_rung_fired(self) -> None:
+        self.rungs_fired += 1
+        self.pending_success = True
+        self.proxy._note_opaque_state_recovery("attempted")
+
+    def note_succeeded(self) -> None:
+        """只在**最终有效完成**后调用（流式终端事件 completed / 非流式真正返回）。
+
+        上游接受了恢复后的请求不等于成功：流可能仍被截断，那由既有的
+        ``stream_truncated_no_completion_*`` 指标衡量。
+        """
+        if self.pending_success:
+            self.pending_success = False
+            self.proxy._note_opaque_state_recovery("succeeded")
+
+    def note_exhausted(self, kind: str) -> None:
+        """阶梯彻底走完，本请求无从恢复。每个请求最多记一次。"""
+        if self.exhausted_kind is None:
+            self.exhausted_kind = kind
+            self.pending_success = False
+            self.proxy._note_opaque_state_recovery("exhausted")
+
+    # ---- 载荷改写（返回 rung 名表示本轮有改写、可以重试；None = 没料了）----
+
+    def try_next_rung(self, body: dict) -> Optional[str]:
+        """依次尝试剩余的 rung，返回触发的 rung 名，没料可用时返回 None。"""
+        if self.rungs_fired >= self.MAX_RUNGS:
+            return None
+        if CopilotProxy._strip_input_item_ids(body, self.api_type):
+            self.note_rung_fired()
+            return "strip_input_item_ids"
+        if (LB_SETTINGS.copilot_opaque_state_recovery
+                and CopilotProxy._drop_reasoning_encrypted_content(body, self.api_type)):
+            self.note_rung_fired()
+            return "drop_reasoning_encrypted_content"
+        return None
 
 
 # 上游响应头里对排查最有价值的一组字段。cf-ray / x-github-request-id / server
@@ -3480,6 +3633,11 @@ class CopilotProxy:
         # `[DONE]` for chat/completions). This surfaces silent upstream truncation
         # that clients previously observed only as "stream closed before completion".
         self.stream_truncated_no_completion_total = 0
+        # 流式重试预算被原地修复吃穿的次数。按 _stream_response 的循环不变量
+        # （每个 continue 都要求 attempt < max_retries - 1）它**不可达**，所以这是
+        # 一个「必须恒 0」的金丝雀：非 0 即不变量被破坏，客户端本会收到空流。
+        # 用指标而不是只靠日志，是为了让告警能写 `> 0` 而不是 grep 日志。
+        self.stream_retry_budget_exhausted_total = 0
         # Per-(model, api_type) breakdown of the same signal — lets scrapers tell
         # "Codex Responses is truncating" apart from "gpt-4o chat is truncating"
         # without adding another log-parsing rule.
@@ -3519,13 +3677,28 @@ class CopilotProxy:
         # 每请求回放多少个 connection-bound id」。
         self.input_item_ids_stripped_total = 0
         self.input_item_ids_stripped_requests_total = 0
-        # 兜底路径：即使已主动剥离，上游仍以「item id 不属于本 connection」拒绝
-        # 的次数（key = "detected" / "recovered" / "unrecoverable"）。detected 恒
-        # 为 0 才说明主动剥离完全奏效；非 0 说明还有别的 id 通道需要排查。
+        # 兜底路径：上游以「item id 不属于本 connection」拒绝的次数
+        # （key = _ORPHANED_ITEM_ID_STAGES）。语义要点（2026-09-10 生产实证修正）：
+        #   detected      每次这类拒绝 +1。**非 0 不代表还有别的 id 通道** —— 生产上
+        #                 detected=12 而日志明写 "no input[*].id to strip"，因为拒绝
+        #                 的其实是 encrypted_content 的归属，主动剥 id 防不住
+        #   recovered     真剥到了 id 并重试 —— **这才是「还有别的 id 通道」的金丝雀**
+        #   unrecoverable 恢复阶梯彻底走完仍失败（只在最终结局记一次）
         self.orphaned_item_id_events: Dict[str, int] = {}
         # 上游 401 按熔断归属分类的次数（key = _UPSTREAM_401_SCOPES）。见
         # _classify_upstream_failure：request-scoped 不计入 endpoint 健康度。
         self.upstream_401_events: Dict[str, int] = {}
+        # opaque state 被上游拒绝的观测三件套（见 _OpaqueStateRecovery）：
+        #   requests_total  受影响的**唯一客户端请求**数 —— 运维该读这个
+        #   rejections      每次拒绝事件，按 kind 拆（key = _OPAQUE_STATE_KINDS）
+        #   recovery        阶梯结局（key = _OPAQUE_STATE_RECOVERY_OUTCOMES）
+        self.opaque_state_requests_total = 0
+        self.opaque_state_rejections: Dict[str, int] = {}
+        self.opaque_state_recovery: Dict[str, int] = {}
+        # 会话亲和的结果分布（key = _SESSION_AFFINITY_OUTCOMES）。单账户下恒为
+        # absent/无意义（只有一个合格端点时不走亲和分支），所以这三个数只在配了
+        # 第二个账户之后才有解读价值。
+        self.session_affinity_events: Dict[str, int] = {}
 
     def _record_truncation(self, model: str, api_type: str) -> None:
         """Bucket a silent-truncation event by (model, api_type) for Prometheus."""
@@ -4130,7 +4303,8 @@ class CopilotProxy:
     # ---- Endpoint 选择 ----
 
     def _select_endpoint(self, model: str, api_type: Optional[str] = None,
-                          *, pinned: Optional[CopilotEndpoint] = None) -> Optional[CopilotEndpoint]:
+                          *, pinned: Optional[CopilotEndpoint] = None,
+                          session_key: Optional[str] = None) -> Optional[CopilotEndpoint]:
         """从可用端点中筛选支持指定模型的端点。空 models = 通配。
 
         ``api_type``（e390237 引入）：按上游 API 类型过滤——账户可能只启用
@@ -4160,6 +4334,21 @@ class CopilotProxy:
         pool = fresh if fresh else matched  # 全部冷却时降级到"最小活跃"选一个而不是拒绝
         if len(pool) == 1:
             return pool[0]
+
+        # 会话亲和：同一会话的每一轮都落到同一个账户，否则跨账户回放 opaque state
+        # 必然 401（实测 24/24）。哈希打在**配置态的合格集合**上而不是 pool 上 ——
+        # pool 会随熔断/冷却变化，拿它做模会让某个端点一掉线就把**所有**会话重新
+        # 洗牌；打在配置集合上只影响原本映射到那个端点的会话。
+        # 亲和目标不可用时不硬等，落回下面的常规策略（阶梯能救回跨账户回放）。
+        if session_key and LB_SETTINGS.copilot_session_affinity:
+            eligible = [ep for ep in self.load_balancer.endpoints
+                        if ep.supports(model, api_type)]
+            if len(eligible) > 1:
+                preferred = eligible[self._affinity_index(session_key, len(eligible))]
+                if preferred in pool:
+                    self._note_session_affinity("hit")
+                    return preferred
+                self._note_session_affinity("unavailable")
 
         strategy = self.load_balancer.strategy
         if strategy == "least_requests":
@@ -4311,6 +4500,95 @@ class CopilotProxy:
             return False
         return cls._ORPHANED_ITEM_ID_MARKER in (body_text or "").lower()
 
+    # 篡改 / 截断的 encrypted_content 的原文特征（2026-09-10 直连 GHCP 实测：把 blob
+    # 中间 20 个字符换成 'A' 即得），status 是 400、code 是 invalid_request_body：
+    #   The encrypted content <blob> could not be verified.
+    #   Reason: Encrypted content could not be decrypted or parsed.
+    #
+    # 判据要求**同时**命中「主题是 encrypted content」与「校验失败」两半。只匹配
+    # "could not be verified" 会误吞掉别的 400 —— 例如 "The provided API key could not
+    # be verified"。那种误判代价很实：会无理由删掉用户的推理 blob，还把真实原因改写成
+    # orphaned_conversation_state 藏起来，运维看不到是凭证问题。
+    _UNVERIFIABLE_CONTENT_SUBJECTS = ("encrypted content", "encrypted_content")
+    _UNVERIFIABLE_CONTENT_FAILURES = ("could not be verified",
+                                      "could not be decrypted or parsed")
+
+    @classmethod
+    def _classify_opaque_state_rejection(cls, status: int, body_text: str) -> Optional[str]:
+        """上游是不是在拒绝本请求携带的 opaque state？返回 kind 或 None。
+
+        实测（2026-09-10，直连 GHCP Enterprise）上游对 ``encrypted_content`` 有
+        **两级独立校验**，报错完全不同：
+
+        1. 先解密 / 解析 —— blob 被篡改就是
+           ``invalid_request_body`` + "could not be verified" → ``unverifiable_content``
+        2. 再校验归属 —— blob 解得开但不属于这条 connection 就是
+           "input item does not belong to this connection" → ``orphaned_id``
+
+        所以 orphan 报错**不是**「blob 坏了」，而是「blob 是好的但不是你的」。这解释了
+        为什么生产上 detected=12 却日志明写「no input[*].id to strip」：拒绝的是
+        reasoning blob 的归属，主动剥 id 根本防不住。第 1 类此前完全没有兜底。
+
+        两类都走同一条恢复阶梯（``_OpaqueStateRecovery``），且**两类都已实测确认能被
+        「删掉那个 blob」救回**：
+
+        - 第 1 类（blob 解不开）：篡改 20 字符即复现，删 blob 后 200
+        - 第 2 类（归属对不上）：2026-09-10 用两个真实 GHCP 账户
+          （enterprise + business 两套部署）跨账户回放实测，**双向 × 3 次重复 = 24/24
+          确定性**：带 id 回放 → 401 "input item ID does not belong to this
+          connection"；只剥 id（本 LB 生产现行行为）→ 401 "input item does not belong
+          to this connection"（**与生产日志逐字一致**）；剥 id + 删 blob → 200 且答出
+          上一轮种下的暗号。
+
+        kill switch ``COPILOT_OPAQUE_STATE_RECOVERY`` 保留作运行期回退手段，但它守的
+        不再是「效力未知」——效力已经是实测事实。
+        """
+        if status not in (400, 401):
+            return None
+        lowered = (body_text or "").lower()
+        if cls._ORPHANED_ITEM_ID_MARKER in lowered:
+            return "orphaned_id"
+        if (any(s in lowered for s in cls._UNVERIFIABLE_CONTENT_SUBJECTS)
+                and any(f in lowered for f in cls._UNVERIFIABLE_CONTENT_FAILURES)):
+            return "unverifiable_content"
+        return None
+
+    @staticmethod
+    def _drop_reasoning_encrypted_content(body: dict, api_type: str) -> int:
+        """删掉 ``input[*]`` 里 reasoning item 的 ``encrypted_content``，返回删除个数。
+
+        恢复阶梯的 rung 2。为什么这么删是安全的（2026-09-10 直连 GHCP 实测，
+        ``gpt-5.4-mini`` + ``store:false`` + function tool 回路）：
+
+        - 删 blob 但保留 item 本体 → 200，且答出上一轮种下的暗号（上下文保真）
+        - ``call_id`` 回路仍正确配对，``function_call_output`` 不受影响
+        - **token 与 prompt cache 代价为零**：``input_tokens=1637 /
+          cached_tokens=1280`` 在「保留 blob / 删 blob / 整条删 reasoning」三组完全
+          一致 —— 那个 5000+ 字符的 blob 根本不计入 input tokens
+        - 「整条删 reasoning item」实测同样 200，但删 blob 之后已经没有 opaque 载体
+          了，再多一级救不回任何东西，纯噪音，故不做
+
+        为什么不会静默丢历史：GHCP **不支持** ``previous_response_id``（带上直接 400
+        ``previous_response_id is not supported``，见 docs/TROUBLESHOOTING.md §11），
+        所以客户端必然把完整历史放在 ``input[]`` 里。删掉的只是加密的推理链，
+        message / 工具调用 / 工具结果 / 用户约束一律保留 —— 跨账户实测里删 blob 之后
+        对面仍能答出上一轮种下的暗号，24/24。
+
+        只碰 ``type == "reasoning"`` 的 item：别处的 ``encrypted_content``（若上游将来
+        引入）语义未知，不在射程内。Chat Completions 协议没有这个字段，返回 0。
+        """
+        if api_type != "responses" or not isinstance(body, dict):
+            return 0
+        items = body.get("input")
+        if not isinstance(items, list):
+            return 0
+        dropped = 0
+        for item in items:
+            if (isinstance(item, dict) and item.get("type") == "reasoning"
+                    and item.pop("encrypted_content", None) is not None):
+                dropped += 1
+        return dropped
+
     @staticmethod
     def _classify_upstream_failure(status: int, *, request_is_stateful: bool) -> bool:
         """返回 `is_client_error` —— True = 中性，不计入 endpoint 健康度。
@@ -4353,6 +4631,102 @@ class CopilotProxy:
         `endpoint` 持续增长 = 真的凭证/席位问题，会走到熔断。
         """
         self.upstream_401_events[scope] = self.upstream_401_events.get(scope, 0) + 1
+
+    def _note_session_affinity(self, outcome: str) -> None:
+        """记录一次会话亲和的结果（outcome = _SESSION_AFFINITY_OUTCOMES）。
+
+        绝不记录会话键本身 —— 它是客户端的 session id，属于可关联标识。
+        """
+        self.session_affinity_events[outcome] = (
+            self.session_affinity_events.get(outcome, 0) + 1)
+
+    def _note_opaque_state_recovery(self, outcome: str) -> None:
+        """记录恢复阶梯的一个结局（outcome ∈ _OPAQUE_STATE_RECOVERY_OUTCOMES）。"""
+        self.opaque_state_recovery[outcome] = (
+            self.opaque_state_recovery.get(outcome, 0) + 1)
+
+    @staticmethod
+    def _mark_opaque_state_exhausted(detail: dict, kind: str, rungs_fired: int) -> dict:
+        """把上游错误改写成明确的「会话状态已失效，请重建」信号（阶梯 rung 3）。
+
+        为什么不静默成功、也不换账户：这条会话携带的 opaque state 被上游拒绝，
+        LB 无从伪造一个有效状态；``_select_endpoint`` 对 stateful 请求本来就禁止
+        failover（跨账户重放必 401）。唯一诚实的动作是告诉客户端「丢掉历史重建」。
+
+        **HTTP 状态码统一改写为 400**（2026-09-10 实测 codex-cli 0.145.0 之后的决定）：
+
+        | LB 返回 | 客户端打上游次数 | 客户端表现 |
+        |---|---|---|
+        | 400 | **1** | 立即放弃，**把错误体逐字显示给用户**（含 code 与指引） |
+        | 401 / 403 / 409 / 422 | **6** | 5 次 `Reconnecting... N/5`，且 409/422 只显示 `unexpected status`，我们的 code 被吞掉 |
+        | 500 / 503 | **30+** | 重试风暴 |
+
+        所以 409/422 换过去毫无改善（与 401 同为 6 次），交接文档 §8.2 把它们列为候选是
+        基于未验证的假设。而这条拒绝是**确定不可重试**的（会话状态永久坏掉，重发同一
+        请求必然同样失败），400 既能让客户端立刻停手、又是唯一会把我们的
+        ``orphaned_conversation_state`` 指引透给用户的状态码。
+
+        代价：丢掉「上游原本是 401 还是 400」这个信号。但 ``opaque_state_kind`` 与
+        ``copilot_upstream_401_total`` 已经把它记全了，客户端也拿不到更少的信息。
+
+        **流式路径改不了**：ASGI 的 ``http.response.start`` 在生成器被迭代前就发了 200，
+        所以只能发 SSE error 帧（实测仍 6 次重试）。流式的真正解法是会话亲和 —— 从根上
+        不产生跨账户回放。
+        """
+        error = detail.setdefault("error", {})
+        error["code"] = "orphaned_conversation_state"
+        error["opaque_state_kind"] = kind
+        error["recovery_rungs_attempted"] = rungs_fired
+        upstream_message = error.get("message") or ""
+        # 措辞不断言具体字段：kind 已经把「归属对不上」和「blob 解不开」区分开，而
+        # 同一个出口也可能被 Chat 协议的请求走到（那里根本没有 reasoning item）。
+        error["message"] = (
+            f"The Copilot upstream rejected conversation state carried by this request "
+            f"({kind}); {rungs_fired} bounded recovery step(s) were tried and it still "
+            "refused. The load balancer cannot rebuild that state and will not replay it "
+            "on another account. Start a new session, or drop the prior turns from the "
+            f"request, and retry. Upstream said: {upstream_message}"
+        )
+        return detail
+
+    @staticmethod
+    def _session_affinity_key(body: dict, api_type: str) -> Optional[str]:
+        """取一个**跨请求稳定**的会话标识，用于把同一会话钉在同一个账户上。
+
+        为什么必须有这个（2026-09-10 用两个真实 GHCP 账户实测，双向 × 3 次 = 24/24）：
+        A 账户铸造的 reasoning ``encrypted_content`` 拿到 B 账户回放**必然** 401
+        ``input item does not belong to this connection``。而 ``least_requests`` 会把
+        同一会话的连续轮次分到不同账户，所以只要配了第二个账户，这个 401 就是**必然
+        事件**而非偶发。恢复阶梯能救回来（也是实测的），但每次都要丢掉推理链。
+
+        键取 ``prompt_cache_key``：Codex CLI 就是拿它做 prompt cache 的，实测
+        （codex-cli 0.145.0）**跨 6 次客户端重试完全一致，跨会话内的多个轮次也一致**
+        （turn1 7 个 input item / turn2 9 个，同一个键）。它等于 Codex 的
+        ``session_id`` / ``thread_id``。
+
+        故意**不**用 api_key 做键：同一个 key 会承载多个会话，而且那会把不同会话
+        绑成同一个亲和单元，既没用又引入跨会话关联。也不用请求内容做键 —— 内容每轮
+        都在变，且不该进哈希。
+
+        Chat Completions 没有这个字段也没有 opaque state，返回 None（不做亲和）。
+        """
+        if api_type != "responses" or not isinstance(body, dict):
+            return None
+        key = body.get("prompt_cache_key")
+        if isinstance(key, str) and key.strip():
+            return key.strip()
+        return None
+
+    @staticmethod
+    def _affinity_index(session_key: str, n: int) -> int:
+        """把会话键映射到 [0, n)。
+
+        **必须用稳定哈希**：Python 内置 ``hash()`` 对 str 加了 per-process 随机盐
+        （PYTHONHASHSEED），多副本之间结果不同 —— 那正好破坏这个机制的唯一目的。
+        blake2b 是确定性的，跨进程、跨副本、跨重启一致。
+        """
+        digest = hashlib.blake2b(session_key.encode("utf-8"), digest_size=8).digest()
+        return int.from_bytes(digest, "big") % max(1, n)
 
     @staticmethod
     def _request_has_opaque_state(body: dict, api_type: str) -> bool:
@@ -4499,10 +4873,27 @@ class CopilotProxy:
                     "(model=%s request_id=%s)", n_stripped, model, request_id,
                 )
 
+        # 会话亲和键：同一会话每轮都要落到同一账户，否则跨账户回放 opaque state
+        # 必然 401（实测 24/24）。单账户下这个值不产生任何影响。
+        session_key = self._session_affinity_key(body, api_type)
+        if session_key is None and api_type == "responses":
+            self._note_session_affinity("absent")
+
+        # 一个客户端请求一份恢复预算。外层 attempt 循环、401 auth repair、
+        # _normal_request 的递归共用它，所以三条重试通道不会叠加出无界重发。
+        recovery = _OpaqueStateRecovery(self, api_type)
+        # auth repair 的预算也是每请求一次，且**与 attempt 计数解耦**：恢复分支用
+        # `continue` 推进 attempt，旧守卫 `attempt == 0` 会让紧随其后的真 token 过期
+        # 拿不到那次免费修复（上一轮记录为「已知次要交互，未修」）。
+        auth_repaired = False
+
         for attempt in range(max_retries):
             if attempt >= max_retries:
                 break  # 6636670: in-lease auth retry decrements max_retries; break if exhausted
-            endpoint = self._select_endpoint(model, api_type, pinned=pinned_endpoint if is_stateful else None)
+            endpoint = self._select_endpoint(
+                model, api_type,
+                pinned=pinned_endpoint if is_stateful else None,
+                session_key=session_key)
             if not endpoint:
                 if is_stateful and pinned_endpoint is not None:
                     # pinned endpoint 掉线 → 直接抛 503，让客户端知道要重新构造会话
@@ -4571,6 +4962,7 @@ class CopilotProxy:
                             endpoint, url, body, headers, model, api_type, start_time,
                             disconnect_checker=disconnect_checker,
                             request_id=request_id, attempt_lease=attempt_lease,
+                            recovery=recovery,
                         )
                         attempt_transferred = True  # 6636670: streaming lifecycle now owns this lease
                         return result
@@ -4580,12 +4972,19 @@ class CopilotProxy:
                             try:
                                 result = await self._normal_request(
                                     endpoint, url, body, headers, model, api_type, start_time,
-                                    request_id=request_id,
+                                    request_id=request_id, recovery=recovery,
                                 )
                                 break
                             except httpx.HTTPStatusError as auth_error:
-                                if auth_error.response.status_code != 401 or attempt != 0 or auth_attempt != 0:
+                                # opaque-state 拒绝不喂 auth repair：刷 session token 对它
+                                # 注定无用（实测 token 轮换不使 opaque state 失效），只会
+                                # 白打一次上游并把 orphan 计数器翻倍。恢复阶梯已在
+                                # _normal_request 里处理过它了。
+                                if (auth_error.response.status_code != 401 or auth_repaired
+                                        or auth_attempt != 0
+                                        or recovery.last_kind is not None):
                                     raise
+                                auth_repaired = True
                                 # Only an explicit 401 rejection permits this one body replay.
                                 # Hold the original admission: refreshed auth is not inference recovery.
                                 logger.warning("[Copilot] 401 on %s; refreshing within the admitted request", endpoint.name)
@@ -4628,6 +5027,15 @@ class CopilotProxy:
                     if error_body.get("error", {}).get("code") == "upstream_html_error":
                         ids = error_body["error"].get("upstream_ids") or {}
                         self._apply_html_cooldown(endpoint, api_type, status, upstream_ids=ids)
+                    elif recovery.exhausted_kind is not None:
+                        # 恢复阶梯走完了：给客户端一个可区分的「重建会话」信号，而不是
+                        # 一个看起来像凭证问题的裸 401。状态码改写成 400 —— 实测 Codex
+                        # 对 401 会重试 6 次（每次都跑一整条阶梯 = 2 次 GHCP 调用），
+                        # 对 400 只打 1 次就放弃并逐字显示错误体。这条拒绝确定不可重试，
+                        # 所以 6× 放大纯属浪费（详见 _mark_opaque_state_exhausted）。
+                        error_body = self._mark_opaque_state_exhausted(
+                            error_body, recovery.exhausted_kind, recovery.rungs_fired)
+                        status = 400
                     # 403/429 归入非 client-error（会计入 circuit）；401 按来源分类
                     # （见 _classify_upstream_failure：stateful 请求的 401 是
                     # request-scoped，不该污染 endpoint 健康度）；仅 4xx 中的其他
@@ -4704,7 +5112,10 @@ class CopilotProxy:
 
     async def _normal_request(self, endpoint: CopilotEndpoint, url: str, body: dict, headers: dict,
                                model: str, api_type: str, start_time: float,
-                               request_id: Optional[str] = None) -> JSONResponse:
+                               request_id: Optional[str] = None,
+                               recovery: Optional["_OpaqueStateRecovery"] = None) -> JSONResponse:
+        if recovery is None:  # 直接调用（测试 / 低层调用者）也要有预算
+            recovery = _OpaqueStateRecovery(self, api_type)
         response = await self.client.post(url, json=body, headers=headers)
         try:
             self.last_negotiated_http_version = response.http_version
@@ -4720,30 +5131,42 @@ class CopilotProxy:
             body_text = response.text
             if response.status_code >= 400 and self._is_unsupported_model_error(response.status_code, body_text):
                 raise _UnsupportedModelError(f"{response.status_code}: {body_text[:200]}")
-            # 兜底：上游拒绝 orphaned input item id。非流式还没写出任何字节，
-            # 就地剥掉 id 重发一次是安全的（同 endpoint、同 headers）。剥离幂等，
-            # 所以最多重发一次；n==0 说明拒绝另有原因，照常往下走报错。
-            if self._is_orphaned_item_id_error(response.status_code, body_text):
-                self.orphaned_item_id_events["detected"] = (
-                    self.orphaned_item_id_events.get("detected", 0) + 1)
-                n = self._strip_input_item_ids(body, api_type)
-                if n:
+            # 上游拒绝本请求携带的 opaque state（两类：item id 归属 / blob 解不开）。
+            # 非流式还没写出任何字节，且这是 4xx 明确拒绝而非执行不明，就地改写载荷
+            # 重发是符合 RESILIENCE.md POST replay 约束的（同 endpoint、同 headers）。
+            # 预算由 recovery 显式持有，递归深度 ≤ _OpaqueStateRecovery.MAX_RUNGS。
+            kind = recovery.observe(
+                self._classify_opaque_state_rejection(response.status_code, body_text))
+            if kind is not None:
+                if kind == "orphaned_id":
+                    self.orphaned_item_id_events["detected"] = (
+                        self.orphaned_item_id_events.get("detected", 0) + 1)
+                rung = recovery.try_next_rung(body)
+                if rung == "strip_input_item_ids":
+                    # 事后还能剥到 id ⇒ 主动剥离漏了一个通道，这才是真金丝雀
                     self.orphaned_item_id_events["recovered"] = (
                         self.orphaned_item_id_events.get("recovered", 0) + 1)
+                if rung:
                     logger.warning(
-                        "[Copilot] upstream rejected orphaned input item id(s) on non-stream "
-                        "request; stripped %d and retrying once (endpoint=%s request_id=%s)",
-                        n, endpoint.name, request_id,
+                        "[Copilot] upstream rejected opaque state (%s) on non-stream request; "
+                        "applied %s and retrying (rung %d/%d, endpoint=%s request_id=%s)",
+                        kind, rung, recovery.rungs_fired,
+                        _OpaqueStateRecovery.MAX_RUNGS, endpoint.name, request_id,
                     )
-                    return await self._normal_request(
+                    result = await self._normal_request(
                         endpoint, url, body, headers, model, api_type, start_time,
-                        request_id=request_id,
+                        request_id=request_id, recovery=recovery,
                     )
-                self.orphaned_item_id_events["unrecoverable"] = (
-                    self.orphaned_item_id_events.get("unrecoverable", 0) + 1)
+                    recovery.note_succeeded()
+                    return result
+                recovery.note_exhausted(kind)
+                if kind == "orphaned_id":
+                    self.orphaned_item_id_events["unrecoverable"] = (
+                        self.orphaned_item_id_events.get("unrecoverable", 0) + 1)
                 logger.error(
-                    "[Copilot] orphaned-item-id rejection but request carries no "
-                    "input[*].id to strip — cause is elsewhere (request_id=%s)", request_id,
+                    "[Copilot] opaque-state rejection (%s) with no recovery step left after "
+                    "%d rung(s); client must rebuild the conversation (request_id=%s)",
+                    kind, recovery.rungs_fired, request_id,
                 )
             body_lower = (body_text or "").lstrip().lower()
             is_html_body = (
@@ -4801,9 +5224,14 @@ class CopilotProxy:
     async def _stream_response(self, endpoint: CopilotEndpoint, url: str, body: dict, headers: dict,
                                 model: str, api_type: str, start_time: float,
                                 disconnect_checker=None,
-                                request_id: Optional[str] = None, attempt_lease=None) -> StreamingResponse:
+                                request_id: Optional[str] = None, attempt_lease=None,
+                                recovery: Optional["_OpaqueStateRecovery"] = None) -> StreamingResponse:
         """流式请求，复用 AzureOpenAIProxy._stream_response 同款 pump + heartbeat + sent_any_chunk 守卫架构"""
         proxy_self = self
+        if recovery is None:  # 直接调用（测试 / 低层调用者）也要有预算
+            recovery = _OpaqueStateRecovery(self, api_type)
+        # 换端点时也要遵守会话亲和（pinned 优先级更高：它管的是同一请求内不许换）
+        session_key = self._session_affinity_key(body, api_type)
         max_retries = 3
         request_lease = {"endpoint": endpoint, "active": True,
                          "lease": attempt_lease if attempt_lease is not None else self.load_balancer.current_attempt(endpoint)}
@@ -4910,6 +5338,9 @@ class CopilotProxy:
             cache_read_tokens = 0
             sent_any_chunk = False
             saw_completion = False
+            # 每请求一次的 401 auth repair 预算，**与 attempt 计数解耦**（见下方
+            # 用它的分支：opaque-state 恢复的 continue 会推进 attempt）。
+            auth_repaired = False
             # Diagnostic context for the truncation / error branches.
             chunks_yielded_count = 0
             first_event_name: Optional[str] = None
@@ -5029,40 +5460,73 @@ class CopilotProxy:
                             f"[Copilot] stream failed ({response.status_code}, ct={upstream_ct}, "
                             f"{'HTML error page' if is_html else 'JSON/text'}): {log_snippet}"
                         )
-                        # 兜底：上游因「item id 不属于本 connection」拒绝。主动剥离
-                        # （_proxy 里）正常情况下已让这里恒不触发；真触发说明还有别
-                        # 的 id 通道，此时就地剥掉再试一次总比把 poisoned 会话原样
-                        # 甩回客户端好。安全性：这是 4xx 且 not sent_any_chunk，
-                        # 尚未提交任何 SSE 帧，符合 RESILIENCE.md 的 POST replay 约束。
-                        if (not sent_any_chunk
-                                and proxy_self._is_orphaned_item_id_error(response.status_code, error_text)):
-                            proxy_self.orphaned_item_id_events["detected"] = (
-                                proxy_self.orphaned_item_id_events.get("detected", 0) + 1)
-                            n = proxy_self._strip_input_item_ids(body, api_type)
-                            if n:
+                        # 上游拒绝本请求携带的 opaque state。两类：item id 归属对不上，
+                        # 或 encrypted_content blob 解不开（实测是两级独立校验，见
+                        # _classify_opaque_state_rejection）。安全性：这是 4xx 明确拒绝
+                        # 且 not sent_any_chunk，尚未提交任何 SSE 帧，符合
+                        # RESILIENCE.md 的 POST replay 约束。预算由 recovery 显式持有。
+                        opaque_kind = None
+                        if not sent_any_chunk:
+                            opaque_kind = recovery.observe(
+                                proxy_self._classify_opaque_state_rejection(
+                                    response.status_code, error_text))
+                        # 循环不变量：**每一个 continue 都必须留下一轮来消费修好的请求**。
+                        # 端点切换类的三处（5xx / PoolTimeout / 网络错误）本来就带
+                        # `attempt < max_retries - 1`；原地修复类（恢复 rung、auth
+                        # repair）过去靠「剥离幂等 + auth 限死 attempt == 0」凑出上限 2，
+                        # 恰好留一轮。rung 提到 2 级并把 auth 与 attempt 解耦后那个巧合
+                        # 没了：原地修复能吃满 3 轮，而循环体就是生成器体的最后一段，
+                        # 耗尽即**静默结束**（下游 HTTP 200 + 0 字节，正是第 14 节里会
+                        # 毒化会话的无终端断流）。所以显式带上同一条守卫。
+                        repair_budget_left = attempt < max_retries - 1
+                        if opaque_kind is not None:
+                            if opaque_kind == "orphaned_id":
+                                proxy_self.orphaned_item_id_events["detected"] = (
+                                    proxy_self.orphaned_item_id_events.get("detected", 0) + 1)
+                            rung = recovery.try_next_rung(body) if repair_budget_left else None
+                            if rung == "strip_input_item_ids":
+                                # 事后还能剥到 id ⇒ 主动剥离漏了一个通道，真金丝雀
                                 proxy_self.orphaned_item_id_events["recovered"] = (
                                     proxy_self.orphaned_item_id_events.get("recovered", 0) + 1)
+                            if rung:
                                 logger.warning(
-                                    "[Copilot] upstream rejected orphaned input item id(s); "
-                                    "stripped %d and retrying once (endpoint=%s request_id=%s)",
-                                    n, current_endpoint.name, request_id,
+                                    "[Copilot] upstream rejected opaque state (%s); applied %s "
+                                    "and retrying (rung %d/%d, endpoint=%s request_id=%s)",
+                                    opaque_kind, rung, recovery.rungs_fired,
+                                    _OpaqueStateRecovery.MAX_RUNGS, current_endpoint.name,
+                                    request_id,
                                 )
                                 # 与 401 auth repair 同形：同 endpoint、同 lease、只改
                                 # body 后原地重试，因此不 end_current_request（loop 头
                                 # 不会重新 start，提前 end 会让下一轮跑在无 lease 状态）。
-                                # 天然只会重试一次 —— 剥离是幂等的，下一轮
-                                # _strip_input_item_ids 返回 0，走不进这个分支。
                                 continue
-                            # 已经没有 id 可剥 → 拒绝来自别处，不掩盖，照常报错
-                            proxy_self.orphaned_item_id_events["unrecoverable"] = (
-                                proxy_self.orphaned_item_id_events.get("unrecoverable", 0) + 1)
+                            recovery.note_exhausted(opaque_kind)
+                            if opaque_kind == "orphaned_id":
+                                proxy_self.orphaned_item_id_events["unrecoverable"] = (
+                                    proxy_self.orphaned_item_id_events.get("unrecoverable", 0) + 1)
                             logger.error(
-                                "[Copilot] orphaned-item-id rejection but request carries no "
-                                "input[*].id to strip — cause is elsewhere (request_id=%s)", request_id,
+                                "[Copilot] opaque-state rejection (%s) with no recovery step "
+                                "left after %d rung(s)%s; client must rebuild the conversation "
+                                "(request_id=%s)", opaque_kind, recovery.rungs_fired,
+                                "" if repair_budget_left else " (retry budget spent first)",
+                                request_id,
                             )
-                        if response.status_code == 401 and attempt == 0 and not sent_any_chunk:
+                            if not is_html:
+                                # 与非流式那处的 elif 对称：HTML 挑战页自带
+                                # upstream_html_error 诊断语义，不能被覆盖掉。
+                                proxy_self._mark_opaque_state_exhausted(
+                                    upstream_detail, opaque_kind, recovery.rungs_fired)
+                        # opaque-state 拒绝不喂 auth repair：刷 session token 对它注定
+                        # 无用（实测轮换不使 opaque state 失效），只会白打一次上游并把
+                        # orphan 计数器翻倍。auth_repaired 是**每请求一次**且与 attempt
+                        # 解耦 —— 恢复分支的 continue 会推进 attempt，旧守卫
+                        # `attempt == 0` 会让紧随其后的真 token 过期拿不到那次修复。
+                        if (response.status_code == 401 and not auth_repaired
+                                and not sent_any_chunk and recovery.last_kind is None
+                                and repair_budget_left):
                             try:
                                 await proxy_self.get_session_token(current_endpoint, force=True)
+                                auth_repaired = True
                                 # 401 auth repair 保留同一 lease（RESILIENCE.md：single auth retry
                                 # 不 open circuit）；仅重建 headers。stream=True 保留 Accept:
                                 # text/event-stream；has_image_cached 避免每次重扫。
@@ -5078,7 +5542,8 @@ class CopilotProxy:
                         if _retry_rejected_response(response, attempt, max_retries) and not sent_any_chunk:
                             logger.warning(f"[Copilot] {current_endpoint.name} returned {response.status_code}, retrying stream...")
                             await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
-                            new_endpoint = proxy_self._select_endpoint(model, api_type, pinned=stateful_pin)
+                            new_endpoint = proxy_self._select_endpoint(model, api_type, pinned=stateful_pin,
+                                                                 session_key=session_key)
                             # stateful 请求且 pinned 已 unavailable → new_endpoint 为 None → 跳过 retry
                             if is_stateful and new_endpoint is None:
                                 proxy_self._note_stateful_pin("http_5xx")
@@ -5145,6 +5610,10 @@ class CopilotProxy:
                                 # not a second generation outcome or replay trigger.
                                 await end_current_request(success=success, is_client_error=observation.neutral)
                                 if success:
+                                    # 恢复只有走到合法终端事件才算成功：上游接受了改写
+                                    # 后的请求但流仍被截断，不能记 succeeded（否则
+                                    # succeeded 会变成「上游收下了」而不是「用户拿到了」）。
+                                    recovery.note_succeeded()
                                     _record_usage_best_effort(
                                         proxy_self, current_endpoint, model, input_tokens, output_tokens,
                                         time.time() - start_time, cache_read_tokens=cache_read_tokens,
@@ -5201,7 +5670,8 @@ class CopilotProxy:
                         and not single_endpoint
                     ):
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
-                        new_endpoint = proxy_self._select_endpoint(model, api_type, pinned=stateful_pin)
+                        new_endpoint = proxy_self._select_endpoint(model, api_type, pinned=stateful_pin,
+                                                                 session_key=session_key)
                         if is_stateful and new_endpoint is None:
                             proxy_self._note_stateful_pin("pool_acquire_timeout")
                             logger.warning(
@@ -5282,7 +5752,8 @@ class CopilotProxy:
                     # 且 response 必须是 None（未拿到任何响应字节）
                     if response is None and not sent_any_chunk and _replay_safe_transport_failure(e) and attempt < max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
-                        new_endpoint = proxy_self._select_endpoint(model, api_type, pinned=stateful_pin)
+                        new_endpoint = proxy_self._select_endpoint(model, api_type, pinned=stateful_pin,
+                                                                 session_key=session_key)
                         if is_stateful and new_endpoint is None:
                             proxy_self._note_stateful_pin("network_error")
                             logger.warning(
@@ -5323,6 +5794,21 @@ class CopilotProxy:
 
                 finally:
                     await _finish_cleanup(_close_stream_resources(pump_task, response))
+
+            # 结构性兜底：按上面的不变量（每个 continue 都要求 attempt < max_retries - 1）
+            # 最后一轮不可能 continue，所以这里**不可达**。留着是因为一旦后人加一个忘了
+            # 带守卫的 continue，代价是「下游 HTTP 200 + 0 字节、无终端事件」—— 那是静默
+            # 故障，还会按第 14 节的机制把客户端会话毒化。宁可多一条明确错误。回归测试
+            # 通过把 MAX_RUNGS 调高来验证这条不变量对最可能的未来改动仍然成立。
+            if not stream_state["terminal_emitted"]:
+                proxy_self.stream_retry_budget_exhausted_total += 1
+                await end_current_request(success=False, is_client_error=True)
+                yield _sse_terminal_error(
+                    api_type, "retry_budget_exhausted",
+                    "Copilot retry budget was consumed by in-place repairs without producing a "
+                    "final upstream response. Nothing was replayed after any content was sent.",
+                    metadata=_sse_error_metadata())
+                _emit_stream_end("retry_budget_exhausted", logging.ERROR, terminal_valid=False)
 
         # X-Request-Id / OpenAI-Request-Id: Codex-rs reads these headers even
         # when the SSE body never reaches the client (e.g. upstream 5xx during
@@ -5468,8 +5954,27 @@ def resolve_github_token(endpoint_cfg: dict) -> tuple:
             if token:
                 logger.info(f"[Copilot] resolved token for '{name}' from env ${{{env_key}}}")
                 return token, {"type": "env", "key": env_key}
+            # 显式声明了 ${ENV} 却没解析出来 —— 下面会静默回退到本地缓存文件。
+            # 在 K8s 里那个目录正是 copilot-cache secret 的挂载点，所以运维很可能
+            # 以为在用刚 rotate 的 Secret，实际跑的是缓存里的旧 token。回退本身是
+            # 有意的（提供韧性），但必须留下痕迹，否则这是一次无声的凭证替换。
+            logger.warning(
+                "[Copilot] endpoint '%s' declares github_token=${%s} but that env var is "
+                "unset/empty; falling back to cached credentials. If you rotated a Secret, "
+                "this means the new value is NOT in use.", name, env_key,
+            )
         else:
+            unresolved = [k for k in re.findall(r'\$\{([^}]+)\}', raw)
+                          if not os.environ.get(k, "").strip()]
             token = expand_env_vars(raw).strip()  # 支持嵌入式 ${X} 兼容
+            if unresolved and token:
+                # 嵌入式引用未解析 → 这里会返回一个**残缺**的 token，上游必 401 而
+                # 且毫无线索。不改行为（可能是有意的模板），但要说出来。
+                logger.warning(
+                    "[Copilot] endpoint '%s' github_token contains unresolved env "
+                    "reference(s) %s; the resulting credential is incomplete and will "
+                    "likely be rejected upstream.", name, unresolved,
+                )
             if token:
                 return token, {"type": "literal"}
 
@@ -5817,8 +6322,19 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
         try:
             check_image_admission(body)
         except ImageAdmissionError as e:
+            # 优雅降级：丢掉最早的图再试一次。**必须重跑准入** —— 只按张数 trim 到
+            # 上限并不保证像素预算也满足（50 张 4K 仍远超预算），不重跑等于让降级
+            # 路径把预算整个绕过去。仍超则按原始原因 413，与「无图可 trim」一致。
             trimmed = trim_excess_images(body)
             if trimmed:
+                try:
+                    check_image_admission(body)
+                except ImageAdmissionError as still:
+                    logger.warning(
+                        f"[image-admission] /v1/messages rejected after trimming "
+                        f"{trimmed} images: {still.message}")
+                    raise HTTPException(status_code=413, detail={"error": {
+                        "type": "request_too_large", "message": still.message}})
                 logger.warning(f"[image-trim] /v1/messages: auto-trimmed {trimmed} oldest images (was: {e.message})")
             else:
                 logger.warning(f"[image-admission] /v1/messages rejected: {e.message}")
@@ -6012,10 +6528,10 @@ def _build_openai_models_payload() -> dict:
 
 def _drop_nonpositive_token_limits(body: dict) -> list:
     removed = []
-    for field in ("max_tokens", "max_completion_tokens"):
-        if field not in body:
+    for field_name in ("max_tokens", "max_completion_tokens"):
+        if field_name not in body:
             continue
-        value = body.get(field)
+        value = body.get(field_name)
         if isinstance(value, bool):
             numeric = int(value)
         else:
@@ -6024,8 +6540,8 @@ def _drop_nonpositive_token_limits(body: dict) -> list:
             except (TypeError, ValueError):
                 continue
         if numeric <= 0:
-            body.pop(field, None)
-            removed.append(field)
+            body.pop(field_name, None)
+            removed.append(field_name)
     return removed
 
 
@@ -6135,8 +6651,8 @@ def _responses_adapter_removed_sampling_fields(chat_body: dict) -> list:
 
 def _strip_unsupported_responses_sampling_fields(body: dict) -> list:
     removed = _responses_adapter_removed_sampling_fields(body)
-    for field in removed:
-        body.pop(field, None)
+    for field_name in removed:
+        body.pop(field_name, None)
     return removed
 
 
@@ -6155,11 +6671,11 @@ def _build_responses_payload_from_chat(chat_body: dict) -> dict:
         payload["max_output_tokens"] = token_limit
 
     removed_sampling_fields = set(_responses_adapter_removed_sampling_fields(chat_body))
-    for field in ("temperature", "top_p"):
-        if field in removed_sampling_fields:
+    for field_name in ("temperature", "top_p"):
+        if field_name in removed_sampling_fields:
             continue
-        if field in chat_body and chat_body[field] is not None:
-            payload[field] = chat_body[field]
+        if field_name in chat_body and chat_body[field_name] is not None:
+            payload[field_name] = chat_body[field_name]
 
     tools = _tools_to_responses_tools(chat_body.get("tools"))
     if tools and not _has_tool_result(messages):
@@ -6703,8 +7219,19 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
         try:
             check_image_admission(body)
         except ImageAdmissionError as e:
+            # 优雅降级：丢掉最早的图再试一次。**必须重跑准入** —— 只按张数 trim 到
+            # 上限并不保证像素预算也满足（50 张 4K 仍远超预算），不重跑等于让降级
+            # 路径把预算整个绕过去。仍超则按原始原因 413，与「无图可 trim」一致。
             trimmed = trim_excess_images(body)
             if trimmed:
+                try:
+                    check_image_admission(body)
+                except ImageAdmissionError as still:
+                    logger.warning(
+                        f"[image-admission] /v1/responses rejected after trimming "
+                        f"{trimmed} images: {still.message}")
+                    raise HTTPException(status_code=413, detail={"error": {
+                        "type": "request_too_large", "message": still.message}})
                 logger.warning(f"[image-trim] /v1/responses: auto-trimmed {trimmed} oldest images (was: {e.message})")
             else:
                 logger.warning(f"[image-admission] /v1/responses rejected: {e.message}")
@@ -6758,8 +7285,19 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
         try:
             check_image_admission(body)
         except ImageAdmissionError as e:
+            # 优雅降级：丢掉最早的图再试一次。**必须重跑准入** —— 只按张数 trim 到
+            # 上限并不保证像素预算也满足（50 张 4K 仍远超预算），不重跑等于让降级
+            # 路径把预算整个绕过去。仍超则按原始原因 413，与「无图可 trim」一致。
             trimmed = trim_excess_images(body)
             if trimmed:
+                try:
+                    check_image_admission(body)
+                except ImageAdmissionError as still:
+                    logger.warning(
+                        f"[image-admission] /v1/chat/completions rejected after trimming "
+                        f"{trimmed} images: {still.message}")
+                    raise HTTPException(status_code=413, detail={"error": {
+                        "type": "request_too_large", "message": still.message}})
                 logger.warning(f"[image-trim] /v1/chat/completions: auto-trimmed {trimmed} oldest images (was: {e.message})")
             else:
                 logger.warning(f"[image-admission] /v1/chat/completions rejected: {e.message}")
@@ -6949,6 +7487,45 @@ async def metrics():
              _labeled_counter_samples("copilot_upstream_401_total", "scope",
                                       copilot_proxy.upstream_401_events,
                                       _UPSTREAM_401_SCOPES))
+        # 上游拒绝 opaque state 的观测三件套。读的顺序是：
+        #   requests_total   受影响的唯一客户端请求数 —— 用户可见故障的规模看这个
+        #   rejections{kind} orphaned_id = blob 归属对不上；unverifiable_content =
+        #                    blob 解不开。两者是上游两级独立校验的两个不同结果
+        #   recovery{outcome} attempted 未必救回；succeeded 只在最终有效完成后记；
+        #                    exhausted = 阶梯走完仍失败，客户端收到
+        #                    orphaned_conversation_state，需要重建会话
+        # exhausted/requests_total 就是「携带坏状态的会话有多少比例救不回来」。
+        emit("copilot_opaque_state_requests_total",
+             "Unique client requests whose opaque state was rejected upstream",
+             "counter",
+             [f"copilot_opaque_state_requests_total {copilot_proxy.opaque_state_requests_total}"])
+        emit("copilot_opaque_state_rejections_total",
+             "Upstream opaque-state rejection events by kind (orphaned_id=ownership, "
+             "unverifiable_content=blob could not be decrypted)",
+             "counter",
+             _labeled_counter_samples("copilot_opaque_state_rejections_total", "kind",
+                                      copilot_proxy.opaque_state_rejections,
+                                      _OPAQUE_STATE_KINDS))
+        # 会话亲和。**单账户下 hit/unavailable 恒为 0**（只有一个合格端点时不走亲和
+        # 分支），所以这三个数只在配了第二个账户之后才有解读价值：
+        #   hit          同一会话被正确钉回原账户 —— 这是在阻止一次必然的 401
+        #   unavailable  亲和目标熔断/冷却 → 落回常规策略 → 该会话这一轮会跨账户，
+        #                由恢复阶梯兜住（代价是丢一次推理链）
+        #   absent       Responses 请求没带 prompt_cache_key（非 Codex 客户端）
+        emit("copilot_session_affinity_total",
+             "Session-affinity outcomes for Copilot Responses requests "
+             "(hit/unavailable are always 0 with a single account)",
+             "counter",
+             _labeled_counter_samples("copilot_session_affinity_total", "outcome",
+                                      copilot_proxy.session_affinity_events,
+                                      _SESSION_AFFINITY_OUTCOMES))
+        emit("copilot_opaque_state_recovery_total",
+             "Bounded opaque-state recovery ladder outcomes (succeeded counts only after a "
+             "valid terminal event)",
+             "counter",
+             _labeled_counter_samples("copilot_opaque_state_recovery_total", "outcome",
+                                      copilot_proxy.opaque_state_recovery,
+                                      _OPAQUE_STATE_RECOVERY_OUTCOMES))
         # Pool capacity gauges: expose configured upper bounds so scrapers / dashboards can alert on saturation
         emit("copilot_pool_max_connections", "Configured httpx max_connections for the Copilot shared client", "gauge",
              [f"copilot_pool_max_connections {CopilotProxy.POOL_MAX_CONNECTIONS}"])
@@ -6986,6 +7563,15 @@ async def metrics():
             f'{{model="{_escape_label(model)}",api_type="{_escape_label(api_type)}"}} {count}'
             for (model, api_type), count in copilot_proxy.stream_truncated_no_completion_by_model.items()
         ]
+        # 必须恒 0 的金丝雀：非 0 说明流式重试循环的不变量被破坏（见
+        # docs/RESILIENCE.md 与 docs/TROUBLESHOOTING.md 第 17 节），客户端本会收到
+        # HTTP 200 + 空 SSE 流。有零样本，所以告警直接写 `> 0`。
+        emit("copilot_stream_retry_budget_exhausted_total",
+             "Streams that exhausted the retry loop via in-place repairs (loop invariant "
+             "violation; MUST stay 0)",
+             "counter",
+             [f"copilot_stream_retry_budget_exhausted_total "
+              f"{copilot_proxy.stream_retry_budget_exhausted_total}"])
         emit("copilot_stream_truncated_no_completion_by_model_total",
              "Silent-truncation events broken down by (model, api_type)",
              "counter", truncated_by_model_samples)
@@ -7113,8 +7699,11 @@ async def admin_copilot_reset_pool(request: Request, x_api_key: Optional[str] = 
     """运维端点：重建 Copilot 共享 httpx.AsyncClient，逐出所有 keepalive 连接。
 
     用途：怀疑 httpx 连接池泄漏或者 keepalive 连接卡在半开状态时的自救按钮。表现常
-    见于 `copilot_pool_timeout_upstream_stall_total` 持续增长、本地 `active_requests`
-    却明显低于 `POOL_MAX_CONNECTIONS`。重建会：
+    见于 `copilot_pool_timeout_total` 持续增长，而结构化日志里 `httpx_pool_observed_full`
+    为 false、本地 `active_requests` 也明显低于 `POOL_MAX_CONNECTIONS` —— 即池没满却
+    acquire 不到连接。（**不要**看 `copilot_pool_timeout_upstream_stall_total`：那是
+    withdrawn 因果分类的遗留，恒 0，见 docs/STREAM_OWNERSHIP.md「Diagnostic/API
+    compatibility」。）重建会：
       1) 用同样的配置新起一个 `httpx.AsyncClient`
       2) 原子替换 `proxy.client`（新请求立刻走新池）
       3) 后台 `aclose()` 旧 client（不影响正在进行的请求；旧请求 EOF 后自然收敛）
@@ -7474,9 +8063,9 @@ def _maybe_run_cli() -> bool:
         try:
             asyncio.run(_copilot_device_flow_login(args.endpoint))
             print(f"\n[auth] Login complete for endpoint '{args.endpoint}'.")
-            print(f"[auth] You can now reference it from config.yaml: ")
+            print("[auth] You can now reference it from config.yaml: ")
             print(f"  github_copilot:\n    endpoints:\n      - name: {args.endpoint}")
-            print(f"        # github_token: 留空即从缓存读取\n")
+            print("        # github_token: 留空即从缓存读取\n")
         except Exception as e:
             print(f"[auth] Login failed: {e}")
             sys.exit(1)

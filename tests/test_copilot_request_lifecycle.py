@@ -112,6 +112,7 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         proxy.pool_timeout_saturated_total = 0
         proxy.pool_timeout_upstream_stall_total = 0
         proxy.stream_truncated_no_completion_total = 0
+        proxy.stream_retry_budget_exhausted_total = 0
         proxy.stream_truncated_no_completion_by_model = {}
         proxy.stream_read_timeout_total = 0
         proxy.stream_pump_queue_full_events_total = 0
@@ -126,6 +127,11 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         proxy.orphaned_item_id_events = {}
         # 上游 401 的熔断归属计数（见 tests/test_copilot_401_circuit_scope.py）
         proxy.upstream_401_events = {}
+        # opaque state 拒绝的有界恢复阶梯（见 tests/test_copilot_opaque_state_recovery.py）
+        proxy.opaque_state_requests_total = 0
+        proxy.opaque_state_rejections = {}
+        proxy.opaque_state_recovery = {}
+        proxy.session_affinity_events = {}
         # Fields introduced when we added the DNS+TCP upstream probe on PoolTimeout.
         # We stub out the probe so tests never actually touch the network — otherwise
         # a sandboxed CI would hang on getaddrinfo for the placeholder host.
@@ -243,7 +249,7 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(main.asyncio, "sleep", new=AsyncMock()):
             with self.assertRaises(HTTPException) as caught:
-                response = await proxy.proxy_chat_completions(
+                await proxy.proxy_chat_completions(
                     {"model": "gpt-test", "messages": []}, stream=False
                 )
 
@@ -1314,7 +1320,7 @@ class AzureRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(main.asyncio, "sleep", new=AsyncMock()):
             with self.assertRaises(HTTPException) as caught:
-                response = await proxy.proxy_responses(
+                await proxy.proxy_responses(
                     {"model": "gpt-test", "input": "hello"}, stream=False
                 )
 
