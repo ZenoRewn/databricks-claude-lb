@@ -2,7 +2,11 @@
 import unittest
 
 import main
-from test_revision2_review import _load  # Installs the unchanged socket helper only.
+import importlib
+
+# 只要 import 副作用（装 socket helper），不引用任何符号 —— 写成
+# `from ... import _load` 会被静态检查报「未使用」，把真告警埋进噪音。
+importlib.import_module("test_revision2_review")
 from protocol_socket_all import run_case
 
 

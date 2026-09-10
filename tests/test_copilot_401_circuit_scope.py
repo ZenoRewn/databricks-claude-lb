@@ -18,7 +18,6 @@
 会话唯一可能服务的 endpoint，并顺带带走该账户其他全部流量，而 failover 本来
 就被 pinning 禁止，熔断换不来任何可用性。
 """
-import asyncio
 import os
 import pathlib
 import sys

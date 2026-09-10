@@ -1,6 +1,6 @@
 """Approved operational limits and protocol contracts; synthetic inputs only."""
 import asyncio
-from contextlib import aclosing, closing
+
 import gzip
 import json
 import os

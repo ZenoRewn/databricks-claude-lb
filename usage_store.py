@@ -13,10 +13,9 @@ import asyncio
 import json
 import logging
 import os
+import importlib.util
 import sys
-import tempfile
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("main")
@@ -116,9 +115,14 @@ class UsageDataStore:
 
     @staticmethod
     def _empty_model() -> dict:
+        # errors 与 totals 对称地按模型累计。注意：生产里**没有任何调用点**传
+        # is_error=True（record() 只在成功路径被调），所以这一列目前恒为 0。
+        # 保留并保持两个后端一致，是为了「哪天真的接上错误记账」时 JSON 与 MySQL
+        # 行为相同 —— 从前 MySQL 侧恒写字面量 0，而 totals["errors"] 又是由这些
+        # per-model 列求和重建的，于是 MySQL 后端重启即丢，JSON 后端不丢。
         return {"input_tokens": 0, "output_tokens": 0,
                 "cache_creation_tokens": 0, "cache_read_tokens": 0,
-                "requests": 0}
+                "requests": 0, "errors": 0}
 
     async def _flush(self):
         async with self._lock:
@@ -162,6 +166,8 @@ class UsageDataStore:
                 totals["requests"] += 1
                 b_totals["requests"] += 1
                 if delta.get("is_error"):
+                    models[m]["errors"] = models[m].get("errors", 0) + 1
+                    b_models[m]["errors"] = b_models[m].get("errors", 0) + 1
                     totals["errors"] += 1
                     b_totals["errors"] += 1
 
@@ -181,10 +187,18 @@ class UsageDataStore:
     # 子类实现
     async def _backend_start(self): pass
     async def _backend_stop(self): pass
-    # _save_day 写「当天累计绝对值」，只被下面 _save_day_delta 的默认实现调用。
-    # MysqlUsageStore 不实现它 —— 它 override 的是 _save_day_delta（增量累加）。
-    # 因此**不要**在别处直接调 _save_day，MySQL 后端上那是个静默 no-op。
-    async def _save_day(self, d: date, data: dict): pass
+    async def _save_day(self, d: date, data: dict):
+        """写「当天累计绝对值」（整天覆盖，单写者语义）。
+
+        只被 ``_save_day_delta`` 的默认实现调用。支持原子累加的后端（MySQL）
+        override 的是 ``_save_day_delta``，**不实现本方法**，所以在那些后端上直接
+        调它是个 bug。这里显式抛错而不是 ``pass`` —— 从前的 ``pass`` 让误调变成
+        「静默丢当天全部用量」，只有一行注释挡着。宁可启动/刷盘时炸掉。
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement _save_day; a backend that "
+            "overrides _save_day_delta must never route through it"
+        )
     async def _load_day(self, d: date) -> dict: return {}
     async def _delete_before(self, cutoff: date) -> int: return 0
 
@@ -347,9 +361,7 @@ class MysqlUsageStore(UsageDataStore):
                           mstats.get("input_tokens", 0), mstats.get("output_tokens", 0),
                           mstats.get("cache_creation_tokens", 0), mstats.get("cache_read_tokens", 0),
                           mstats.get("requests", 0),
-                          # per-model errors 目前不被跟踪（models[m] 里没有 errors
-                          # 字段，只有 totals 有），故恒为 0 增量。已知缺口，独立议题。
-                          0))
+                          mstats.get("errors", 0)))
 
     async def _load_day(self, d: date) -> dict:
         if not self._pool:
@@ -365,7 +377,10 @@ class MysqlUsageStore(UsageDataStore):
         models = {}
         totals = {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0, "requests": 0, "errors": 0}
         for model, inp, out, cc, cr, reqs, errs in rows:
-            models[model] = {"input_tokens": inp, "output_tokens": out, "cache_creation_tokens": cc, "cache_read_tokens": cr, "requests": reqs}
+            # 形状必须与 _empty_model() 一致，否则「进程内新建」与「从 DB 载入」
+            # 的 models[m] 键集不同，消费方一旦不用 .get() 就会 KeyError。
+            models[model] = {"input_tokens": inp, "output_tokens": out, "cache_creation_tokens": cc,
+                             "cache_read_tokens": cr, "requests": reqs, "errors": errs}
             totals["input_tokens"] += inp
             totals["output_tokens"] += out
             totals["cache_creation_tokens"] += cc
@@ -387,9 +402,9 @@ def create_usage_store(storage_config: dict) -> UsageDataStore:
     store_type = storage_config.get("type", "json")
     retention = storage_config.get("retention_days", 0)
     if store_type == "mysql":
-        try:
-            import aiomysql  # noqa: F401
-        except ImportError:
+        # 只探测可用性，不真的导入 —— 从前写成 `import aiomysql  # noqa` 会被静态
+        # 检查报「未使用」，把真正的告警埋在噪音里。
+        if importlib.util.find_spec("aiomysql") is None:
             logger.critical(
                 "usage_storage.type=mysql but aiomysql is not installed. "
                 "Run: pip install aiomysql>=0.2.0 — refusing to start to avoid silent data loss."

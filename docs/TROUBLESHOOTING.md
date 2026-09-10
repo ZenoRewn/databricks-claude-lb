@@ -143,12 +143,22 @@ LB 自带图片自动压缩（>200KB base64 → ≤1280px JPEG@82）；如果压
 |------|----------|------|------|
 | 图片张数上限 | `IMG_MAX_COUNT` | `50` | 单请求图片超此数 → 413 |
 | 总像素预算 | `IMG_MAX_TOTAL_PIXELS` | `100000000` | 所有图 w×h 累加超此值 → 413（≈8 张 4K）|
-| 压缩并发削峰 | `IMG_COMPRESS_CONCURRENCY` | `2` | 同时解码的图片数，`Semaphore` 限流 |
+| 压缩并发削峰 | `IMG_COMPRESS_CONCURRENCY` | `2` | **并发压缩的请求数**。单请求内部是逐张顺序解码、每张用完即释放，所以全局位图峰值 ≈ 这个值 |
 | 总开关 | `IMG_ADMISSION_ENABLED` | `1` | 设 `0` 关闭准入检查（仅保留压缩）|
 
 触发时客户端拿到 JSON 413（非 ingress 的 HTML），错误体 `type: request_too_large`，`message` 说明是张数还是像素超限。日志前缀 `[image-admission]`。
 
 **调参建议**：Pod 内存充裕（≥2Gi）可放宽 `IMG_MAX_TOTAL_PIXELS` 到 `200000000`；内存紧张（<1Gi）调低到 `50000000` 并把 `IMG_COMPRESS_CONCURRENCY` 设 `1`。改环境变量后重启 Pod 生效,无需改代码。
+
+**别把这两个变量混着理解**（2026-09-10 核实）：真正的内存上界来自「顺序解码 + 请求级并发限流」——
+单请求内部逐张解码、每张位图用完即释放，所以全局峰值 ≈ `IMG_COMPRESS_CONCURRENCY` 张位图，**与图片
+张数无关**。`IMG_MAX_TOTAL_PIXELS` 约束的是累计解码工作量（延迟/CPU）。内存吃紧优先调
+`IMG_COMPRESS_CONCURRENCY`，请求太慢才调像素预算。
+
+**超预算时的降级**：LB 会先 `trim_excess_images` 丢掉最早的图（替换成 `[image omitted for context
+length]` 占位），然后**重跑准入**；仍超才 413。重跑是必须的 —— 只按张数 trim 到上限不保证像素预算
+也满足（50 张 4K 仍远超）。所以一个「图很多且都很大」的请求现在会拿到 413，而以往会被放行（慢但能跑）。
+日志前缀 `[image-trim]` / `[image-admission]`。
 
 ---
 
@@ -277,19 +287,23 @@ SSE 流提前断开，客户端拼接到一半挂了。Codex Desktop / OpenAI JS
 Codex Desktop / CLI 抛：
 
 ```
-stream disconnected before completion: [req=61153d56...] Copilot upstream connect stalled for gh-account-1 (no new connection returned within 20.0s); probe.ok=... dns_ms=... tcp_ms=... ips=...
+stream disconnected before completion: [req=61153d56...] Copilot connection pool acquisition timed out for gh-account-1 (configured wait 20.0s); this does not establish a TCP/TLS failure; probe.ok=... dns_ms=... tcp_ms=... ips=...
 ```
 
-这段字符串是 LB 自己产出的（`_describe_pool_timeout`）。触发链：`httpx.PoolTimeout` 被抛出 → LB 判断本地 `sum(active_requests) < POOL_MAX_CONNECTIONS` → 归类为 `upstream_connect_stalled`（本地池还有余量、httpx 却 acquire 不到新连接）。
+这段字符串是 LB 自己产出的（`_describe_pool_timeout`），SSE `error.code` = `pool_acquire_timeout`。
+
+> **旧文案已不再出现。** 早期版本报的是 `Copilot upstream connect stalled for ...`，分类分 `upstream_connect_stalled` / `local_pool_saturated` 两种。那套措辞把「等池分配超时」当成了「上游建连失败」的证据，属于无根据的因果断言，已被撤回（迁移记录见 `docs/STREAM_OWNERSHIP.md`「Diagnostic/API compatibility」）。**按旧字符串搜日志会一无所获**，请用上面的新文案或 `kind=copilot_pool_timeout`。
+
+触发链：`httpx.PoolTimeout` 被抛出（等待池分配超过 `POOL_ACQUIRE_TIMEOUT`）→ LB 抓一次 httpx 内部池快照 + DNS/TCP 探针 → 归类为中立的 `pool_acquire_timeout`，并另记一个纯观测布尔 `httpx_pool_observed_full`。**`PoolTimeout` 本身不区分「本地池满」与「上游不给连接」**，事后补做的探针也无法确立当时的因果，所以 LB 只给观测、不给结论。
 
 ### 真因（按优先级排查）
 
-从 20.0s 起，LB 附带的 DNS+TCP 探针 + httpx 内部池快照直接告诉你是哪一层出问题：
+LB 附带的 DNS+TCP 探针 + httpx 内部池快照**收窄假设范围**，但都不是当时的因果证据（探针发生在超时之后）：
 
-| `probe` 字段 | 含义 | 常见根因 |
+| `probe` 字段 | 观测到的事实 | 值得优先查的方向 |
 |---|---|---|
-| `probe.ok=true` + httpx `active/total` 都 <500 | 探针正常，本地池也不满 → 上游对本地池"新建连接"这一步慢，可能是 GHCP 服务端限流 / 排队 | 现象常见于短时上游波动；20s 快速失败让 Codex 层重试更快 |
-| `probe.ok=true` + httpx `active` ≈ `total` ≈ 500 | 本地池实际已经饱和，但 LB 自己的 `active_requests` 掉队 —— 说明存在连接泄漏或 keepalive 卡住 | 观察 `copilot_stream_connections_active`、找长时间挂着不释放的 stream；检查 `copilot_stream_pump_queue_full_events_total` |
+| `probe.ok=true` + httpx `active/total` 都 <500（`httpx_pool_observed_full=false`） | 事后探针能建连，且池快照没满 —— 池没满却 acquire 不到 | GHCP 服务端限流 / 排队；或本地池有卡住的条目（见下一节的 `/admin/copilot/reset-pool`）。20s 快速失败让 Codex 层重试更快 |
+| `probe.ok=true` + httpx `active` ≈ `total` ≈ 500（`httpx_pool_observed_full=true`） | 快照里池确实满了，而 LB 自己的 `active_requests` 掉队 | 连接泄漏或 keepalive 卡住：观察 `copilot_stream_connections_active`、找长时间挂着不释放的 stream；检查 `copilot_stream_pump_queue_full_events_total` |
 | `probe.error=dns_timeout>3s` | Pod 里到 upstream host 的 DNS 解析卡住 | AKS CoreDNS / NodeLocalDNS 故障，或 upstream host 换 IP 但 DNS TTL 未过；`kubectl exec` 进 pod `dig api.githubcopilot.com` 复现 |
 | `probe.error=tcp_timeout>3s` | DNS 拿到 IP 了但 TCP 到 :443 拒绝 / 超时 | 出口 NAT / firewall 限流；确认 pod egress ACL、Azure NAT gateway 端口耗尽 |
 | `probe.error=dns_error: ...` / `tcp_error: ...` | 具体 IO 异常直接打出来 | 按异常类型走 |
@@ -303,29 +317,29 @@ LB 触发这类错误时会发一行结构化日志（`extra.kind=copilot_pool_t
 - `httpx_pool` — `{total, active, idle, closing, requests_waiting}`，直接反映 httpx 内部池状态
 - `upstream_probe` — 完整 probe 结果，包括 `resolved_ips`、`dns_ms`、`tcp_ms`
 - `per_endpoint` — 每个端点的 `active_requests / circuit_open / total_errors`
-- `classification` — `local_pool_saturated` 或 `upstream_connect_stalled`
-- `exc` — httpcore 原始异常字符串（多半是空的，凭 classification 判断）
+- `classification` — **恒为 `pool_acquire_timeout`**（中立命名；见上文「旧文案已不再出现」）
+- `httpx_pool_observed_full` — bool，超时那一刻的池快照是否已满。这是替代旧二分类的**观测**字段，判断请用它而不是 `classification`
+- `exc` — httpcore 原始异常字符串（多半是空的）
 
 KQL / Loki 直接过：`ContainerLog | where LogEntry contains "copilot_pool_timeout"` 拿 JSON 字段即可。
 
 ### 关键设计
 
-- **单端点 + `upstream_connect_stalled` 快速失败**：所有 Copilot endpoint 共享同一个 `httpx.AsyncClient`，"换 endpoint 重试"仍打同一个 pool，等于让用户再等一个 `POOL_ACQUIRE_TIMEOUT`。所以 `len(endpoints) <= 1 and classification == upstream_connect_stalled` 时不重试、直接给客户端 SSE error，让 Codex 自己 retry。
-- **本地饱和**（`local_pool_saturated`）**仍然重试**：因为存在"某个 stream 刚好结束正在归还 slot"的概率，且换 endpoint 也可能命中不同的 httpcore origin pool。
-- **多端点仍走原退避 + `_select_endpoint(model)` 换端点**流程。
+- **单端点一律快速失败**：所有 Copilot endpoint 共享同一个 `httpx.AsyncClient`，"换 endpoint 重试"仍打同一个 pool，等于让用户再等一个 `POOL_ACQUIRE_TIMEOUT`。所以 `len(endpoints) <= 1` 时不重试、直接给客户端 SSE error，让 Codex 自己 retry。**判据只有端点数**——从前这里还要求 `classification == upstream_connect_stalled`，那个分类撤回后判据一并简化，于是单端点场景不再有「按误导性分类走进重试」的分支。
+- **多端点仍走原退避 + `_select_endpoint` 换端点**流程（受 `attempt < max_retries - 1` 约束）。
 
 ### 相关配置
 
 - `COPILOT_POOL_ACQUIRE_TIMEOUT`（默认 20s，从 60s 下调）：httpx 池 acquire 超时。想恢复旧行为设 `60`。
 - `COPILOT_UPSTREAM_PROBE_TIMEOUT`（默认 3s）：DNS + TCP 探针的每一步超时。
 - `COPILOT_UPSTREAM_PROBE_CACHE_TTL`（默认 5s）：探针结果缓存 TTL，防止密集失败风暴。
-- `COPILOT_POOL_MAX_CONNECTIONS` / `COPILOT_POOL_MAX_KEEPALIVE` / `COPILOT_POOL_KEEPALIVE_EXPIRY`：池上限与 keepalive；调大池上限对"本地饱和"有效，对"upstream stall"无效。
+- `COPILOT_POOL_MAX_CONNECTIONS` / `COPILOT_POOL_MAX_KEEPALIVE` / `COPILOT_POOL_KEEPALIVE_EXPIRY`：池上限与 keepalive；只在 `httpx_pool_observed_full=true` 的那类观测下调大池上限才有意义。
 
 ### 相关 metrics
 
-- `copilot_pool_timeout_total` — 所有 PoolTimeout 累计（含两类）
-- `copilot_pool_timeout_saturated_total` — 本地池真饱和的次数
-- `copilot_pool_timeout_upstream_stall_total` — 上游握手挂的次数（**用户报错这一条**）
+- `copilot_pool_timeout_total` — **权威计数**，所有 PoolTimeout 累计
+- `copilot_pool_timeout_saturated_total` — 其中「超时那一刻池快照已满」的次数（观测，非根因）
+- ~~`copilot_pool_timeout_upstream_stall_total`~~ — **已废弃，结构性恒 0**。没有任何自增点，HELP 文本标了 `Deprecated`；保留只为不破坏既有抓取。**不要基于它写告警**，否则得到一条永远不会触发的规则（回归守卫：`tests/test_pool_timeout_classification.py`）
 
 ---
 
@@ -511,7 +525,8 @@ LB 在转发前一律剥掉 `input[*].id`（`CopilotProxy._strip_input_item_ids`
 - `function_call` 回路正常（配对靠 `call_id`，与 `id` 无关）
 - **prompt cache 不受影响** —— `cached_tokens` 与保留 id 完全相同
 
-另有兜底：若上游仍以该错误拒绝且尚未发出任何 SSE 帧，就地剥 id 重试一次（剥离幂等，最多一次）。
+另有兜底：若上游仍以该错误拒绝且尚未发出任何 SSE 帧，走**有界恢复阶梯**（先再剥一次 id，再删
+reasoning 的 `encrypted_content`），见 [第 17 节](#17-上游拒绝-opaque-state-时的有界恢复阶梯)。
 
 ### 排查命令
 
@@ -519,7 +534,8 @@ LB 在转发前一律剥掉 `input[*].id`（`CopilotProxy._strip_input_item_ids`
 # 1) 剥离是否在工作（分子/分母 = 客户端平均每请求回放多少个 id）
 curl -s $LB/metrics | grep copilot_input_item_ids_stripped
 
-# 2) detected 必须恒为 0。非 0 = 仍有 id 漏到上游，要查别的 id 通道
+# 2) 看 stage 而不只看总量。**recovered > 0 才是「还有别的 id 通道」的金丝雀**；
+#    detected > 0 只说明上游拒绝了本请求携带的状态，未必与 id 有关（见第 17 节）
 curl -s $LB/metrics | grep copilot_orphaned_item_id_events_total
 
 # 3) 找造成中毒的那次断流（用客户端错误里的 req= 值）
@@ -541,8 +557,12 @@ COPILOT_STRIP_INPUT_ITEM_IDS=false    # 恢复原样透传
 剥离**不会**削弱跨账户重放保护：statefulness 由 `previous_response_id` / `encrypted_content` 判定，与 `id` 无关，
 `copilot_stateful_request_pinned_total` 的语义不变（有回归测试锁住这条不变量）。
 
-本节的金丝雀 `copilot_orphaned_item_id_events_total{stage="detected"}` 此前在健康态下**没有 0 序列**
-（空 dict → 无 sample），现已修好，告警可直接写 `> 0`，见 [第 15 节](#15-一个账户下所有模型突然不可用401-熔断污染)末尾。
+`copilot_orphaned_item_id_events_total` 此前在健康态下**没有 0 序列**（空 dict → 无 sample），现已修好，
+告警可直接写 `> 0`，见 [第 15 节](#15-一个账户下所有模型突然不可用401-熔断污染)末尾。
+
+**旧文档说「`detected` 恒为 0 才说明剥离奏效、非 0 = 还有别的 id 通道」——这条已被生产反证并更正。**
+2026-09-10 生产 `detected=12` 而同一条日志明写 `no input[*].id to strip`：上游拒绝的其实是 reasoning
+`encrypted_content` 的**归属**，主动剥 id 结构上防不住。正确读法见 [第 17 节](#17-上游拒绝-opaque-state-时的有界恢复阶梯)。
 
 另外：会话被永久毒化的原因**不是** LB 重启换 session token —— 那条假设已被实测否证，见
 [第 16 节](#16-重启会让客户端手里的会话状态失效--实测不成立)。
@@ -623,17 +643,21 @@ curl -s $LB/v1/chat/completions -H "Authorization: Bearer $LB_KEY" \
 COPILOT_STATEFUL_401_NEUTRAL=false    # 恢复旧行为：所有 401 都计入熔断
 ```
 
-### 已知次要交互（记录，未修）
+### 已知次要交互（**2026-09-10 已修**）
 
-`_stream_response` 的重试循环只有一个 `for attempt in range(max_retries)`，而**剥离分支与 401 auth repair
-分支都用 `continue`**，两者都会推进 `attempt`。所以若一次请求的首个失败是 orphan-401，剥离重试后
-`attempt` 已经是 1；此时若紧接着撞上真正的 session token 过期 401，`attempt == 0` 不成立 →
-**拿不到那次免费的 auth repair**，直接落到计数分支。
+原文记录：`_stream_response` 的重试循环只有一个 `for attempt in range(max_retries)`，而**恢复分支与 401
+auth repair 分支都用 `continue`**，两者都会推进 `attempt`。所以若一次请求的首个失败是 orphan-401，
+恢复重试后 `attempt` 已经是 1；此时若紧接着撞上真正的 session token 过期 401，`attempt == 0` 不成立 →
+**拿不到那次免费的 auth repair**。
 
-后果有限：该请求会以一次 `endpoint`-scoped 计数失败，客户端重试即可（下一次请求 `attempt` 从 0 开始，
-auth repair 恢复可用）。概率也低——需要「orphan-401 命中」与「token 恰好在同一请求内过期」同时发生，
-而主动剥离已让前者在正常情况下恒不触发。若 `copilot_upstream_401_total{scope="endpoint"}` 与
-`copilot_orphaned_item_id_events_total{stage="detected"}` **同时**非零，可以怀疑踩到了这条。
+已修：auth repair 的预算改成**每请求一次的独立 flag**（`auth_repaired`），与 `attempt` 计数解耦，
+流式与非流式两条路径都改了。回归测试
+`tests/test_copilot_opaque_state_recovery.py::AuthRepairIsolationTests::test_auth_repair_budget_survives_a_recovery_rung`
+锁住这条：恢复用掉一个 rung 之后，紧随的真 401 仍能拿到那次刷新。
+
+**副作用要知道**：解耦之后，「换到新 endpoint 后才出现的 401」现在也能拿到一次刷新（旧守卫下拿不到）。
+这是有意的 —— 新 endpoint 的 401 更该刷 token —— 但它是一处超出最小改动的行为变化。上界不变：
+每个客户端请求最多一次 auth repair。
 
 ### 顺带修好的：金丝雀指标此前「缺失 ≠ 零」
 
@@ -680,3 +704,219 @@ Turn 1 拿到一个带 **424 字符 item id + 5324 字符 `encrypted_content`** 
 - 真正值得做的是让 **long-lived** 凭证跨重启存活（挂 `copilot-cache` secret 到
   `/home/app/.config/databricks-claude-lb`，repo manifest 已就绪，收敛步骤见 `docs/AKS.md`）
 - 会话被永久毒化的原因**不是**重启换 token，而是第 14 节的 connection-bound `input[*].id`
+
+---
+
+## 17. 上游拒绝 opaque state 时的有界恢复阶梯
+
+### 症状
+
+Codex 报 `input item does not belong to this connection`（第 14 节那条），但 `/metrics` 显示
+
+```
+copilot_orphaned_item_id_events_total{stage="detected"}      12
+copilot_orphaned_item_id_events_total{stage="recovered"}      0    ← 恒 0
+copilot_orphaned_item_id_events_total{stage="unrecoverable"} 12
+copilot_upstream_401_total{scope="request"}                   6
+copilot_token_refresh_total{endpoint="ZenoRewn"}              7
+```
+
+同时日志明写 `orphaned-item-id rejection but request carries no input[*].id to strip — cause is elsewhere`。
+
+### 为什么 `recovered` 恒 0（不是巧合，是结构性的）
+
+`_proxy` 已在**发送前**主动剥掉 `input[*].id`（默认开启）。事后的兜底路径再调同一个**幂等** helper，
+必然返 0 → 走不进 `recovered` 分支 → 永远落到 `unrecoverable`。所以旧版的兜底在默认配置下是死路。
+
+### 为什么计数是 2 倍（2026-09-10 实测，流式与非流式都一样）
+
+记完 `unrecoverable` 之后代码**继续掉进 401 auth repair**：强制刷一次 session token，再原样重发。
+那次刷新**注定无用**——实测 session token 轮换不使 opaque state 失效（第 16 节）。于是一个客户端请求
+把每个 orphan 计数器都记了两遍：
+
+| 一个客户端请求（旧行为） | 流式 | 非流式 |
+|---|---|---|
+| `detected` / `unrecoverable` | 2 | 2 |
+| `upstream_401{request}` | 1 | 1 |
+| 强制 session token 交换 | 1 | 1 |
+| 上游调用次数 | 2 | 2 |
+
+对照上面的生产数字：`12 = 6×2`，`6 = 6×1`，`token_refresh 7 = 6 次浪费的强制刷新 + 1 次 warmup`，
+`neutral_requests 7 = 6 + 1`。**唯一请求数就是 6**，不需要按 request_id 去重也能算出来。
+
+### 上游其实有两级独立校验（2026-09-10 直连 GHCP 实测）
+
+篡改 `encrypted_content` 中间 20 个字符，拿到的**不是** orphan 报错：
+
+```json
+{"error":{"message":"The encrypted content Zb+H...LQ== could not be verified. Reason: Encrypted content could not be decrypted or parsed.","code":"invalid_request_body"}}
+```
+
+所以：**先解密/解析**（失败 → `invalid_request_body`），**再校验归属**（失败 → `does not belong to this
+connection`）。orphan 报错意味着那个 blob 能正常解密、只是不属于这条 connection。两点推论：
+
+- 「状态格式不兼容 / 过期」这条根因候选被削弱 —— 那更可能报第一类错误
+- 第一类错误此前**完全没有兜底**，现在与 orphan 走同一条恢复阶梯
+
+### 删掉 blob 安全吗
+
+下表是**两次独立隔离会话**的合并（会话 ① 默认参数给 A–E，会话 ② `store:false` + function tool
+回路给 B–F），模型均为 `gpt-5.4-mini`。两次的 `id` 都是 420 字符，`encrypted_content` 分别
+5160 / 5128 字符 —— 同账号不同轮次长度会变，故表里只写量级。
+
+| 组 | 处理 | 结果 |
+|---|---|---|
+| A | 原样回放（420 字符 `id` + ~5.1KB `encrypted_content`） | 200，答出暗号 |
+| B | 剥 `id`、保留 `encrypted_content`（LB 旧行为） | 200，答出暗号 |
+| C | 剥 `id` + 整条删除 reasoning item | **200，答出暗号** |
+| D | 剥 `id` + 保留 item 但删 `encrypted_content` | **200，答出暗号** |
+| E | 剥 `id` + 篡改 `encrypted_content` | **400 `invalid_request_body`** |
+| F | 保留 `id` + 删 `encrypted_content` | 200，答出暗号 |
+
+- `call_id` 回路在 C/D/F 全部正确配对，`function_call_output` 不受影响
+- **token 与 prompt cache 代价为零**：`input_tokens=1637 / cached_tokens=1280` 在 B/C/D 三组完全一致
+  —— 那个 5000+ 字符的 blob 根本不计入 input tokens
+- **不会静默丢历史**：GHCP 不支持 `previous_response_id`（第 11 节），客户端必然把完整历史放在
+  `input[]` 里，删掉的只是加密的推理链，message / 工具调用 / 工具结果 / 用户约束一律保留
+
+### 解决（已内置）
+
+```
+rung 0  发送前主动剥 input[*].id                 —— 无条件，COPILOT_STRIP_INPUT_ITEM_IDS
+rung 1  被拒后再剥一次 id                        —— 只在 rung 0 关掉 / 出现新 id 通道时有料
+rung 2  删 reasoning item 的 encrypted_content   —— COPILOT_OPAQUE_STATE_RECOVERY
+走完    返回 orphaned_conversation_state 错误      —— 明确要求客户端重建，绝不静默成功
+```
+
+预算是**显式计数**（`_OpaqueStateRecovery.MAX_RUNGS = 2`），不靠「改写幂等所以最多重试一次」——
+外层 attempt 循环、401 auth repair、`_normal_request` 递归是三条能叠加的通道，一个客户端请求共用一份预算。
+**实测上界**：流式 ≤3 次上游调用，非流式 ≤4（1 原始 + 1 auth repair + 2 级恢复）；生产形态（主动剥离
+已开、纯 orphan）= 2 次，与改动前**相同** —— 原来那次白打的强制 token 刷新换成了一次真正的恢复尝试。
+
+同时 **opaque-state 拒绝不再喂给 401 auth repair**，那次注定无用的强制 token 交换消失了。
+逐个计数器的前后变化（每个唯一客户端请求，生产形态，**实测**）：
+
+| 计数器 | 旧 | 新 |
+|---|---|---|
+| `orphaned…{detected}` | 2 | **2（不变）** —— 第二次拒绝仍真实存在，只是换成了一次真正的恢复尝试 |
+| `orphaned…{unrecoverable}` | 2 | **1** —— 只在阶梯走完后记一次 |
+| `upstream_401{request}` | 1 | 1 |
+| 强制 session token 交换 | 1 | **0** |
+| 上游调用次数 | 2 | 2 |
+
+要按「受影响请求数」看规模，读新指标 `copilot_opaque_state_requests_total`，不要拿 `detected` 当请求数。
+
+### 还有一个错误码：`retry_budget_exhausted`
+
+流式重试循环里每个 `continue` 都要求「还剩一轮来消费修好的请求」。原地修复（恢复 rung、auth repair）
+过去靠巧合满足这条（剥离幂等 + auth 限死 `attempt == 0`）；阶梯做成两级并把 auth 与 attempt 解耦后
+巧合没了，三次原地修复能吃满三轮，而**流式循环体就是生成器体的最后一段**，耗尽就静默结束 ——
+下游拿到 HTTP 200 + 0 字节，也就是本文第 14 节那种会毒化会话的无终端断流。
+
+现在两处原地修复都显式带上 `attempt < max_retries - 1`，另外加了一层循环后兜底：真走到那里就发
+`retry_budget_exhausted` 终端。按不变量它不可达，纯粹是防后人加 `continue` 时漏掉守卫。
+**若 `copilot_stream_retry_budget_exhausted_total > 0`（或日志里见到
+`outcome=retry_budget_exhausted`），说明不变量被破坏了，按回归处理。** 该指标健康态下有 `0` 序列，
+告警直接写 `> 0`：
+
+```bash
+curl -s $LB/metrics | grep copilot_stream_retry_budget_exhausted_total   # 必须恒 0
+```
+
+### 排查命令
+
+```bash
+# 1) 规模：受影响的唯一客户端请求数（不是事件数）
+curl -s $LB/metrics | grep copilot_opaque_state_requests_total
+
+# 2) 是哪一类拒绝
+#    orphaned_id         = blob 归属对不上（跨账户 / 旧 connection 的状态）
+#    unverifiable_content = blob 解不开（被截断或篡改）
+curl -s $LB/metrics | grep copilot_opaque_state_rejections_total
+
+# 3) 阶梯效果。succeeded/attempted = 恢复命中率；exhausted 才是用户真正受损的部分
+#    注意 attempted - succeeded - exhausted 是第三桶：上游收下了改写后的请求但流被截断。
+#    那一桶的量看 copilot_stream_truncated_no_completion_total，不要误算进「恢复失败」
+curl -s $LB/metrics | grep copilot_opaque_state_recovery_total
+
+# 4) 旧指标的正确读法：recovered > 0 才是「还有别的 id 通道」的金丝雀
+curl -s $LB/metrics | grep copilot_orphaned_item_id_events_total
+
+# 5) 逐请求看阶梯走了几级
+kubectl -n <ns> logs deploy/claude-lb | grep -E "applied (strip_input_item_ids|drop_reasoning_encrypted_content)"
+kubectl -n <ns> logs deploy/claude-lb | grep "no recovery step left"
+```
+
+### 客户端看到什么
+
+阶梯走完后错误的 `code` 是 `orphaned_conversation_state`，message 说明已尝试几级恢复、要求开新会话或
+丢弃历史后重试，并保留 `upstream_ids` / `lb_request_id`。**HTTP 状态码保持上游原值（400/401）**。
+
+> 未决项：把它换成 409/422 语义上更准，但需要先验证 Codex / OpenAI JS SDK 对这两个码的重试与
+> fallback 行为。未验证不动 —— 只改 `code` 与 message 对 SDK 行为零风险。
+
+### 临时关闭（仅排查用）
+
+```bash
+COPILOT_OPAQUE_STATE_RECOVERY=false   # 只关 rung 2；仍会记 exhausted 并返回结构化错误
+COPILOT_STRIP_INPUT_ITEM_IDS=false    # 关 rung 0（会让 rung 1 变得有料）
+```
+
+### 诚实边界
+
+`does not belong to this connection` 需要另一个账户/连接铸造的 blob 才能复现，单账号造不出来。所以
+**「删 blob 能救那一类拒绝」是推断**。已实测的是：
+
+- 删了之后请求形态合法、上下文保真、工具回路正常、token/cache 代价为零
+- 另一类 opaque-state 拒绝（E 组，blob 解不开）**确定**能被它救回
+
+这就是 rung 2 带 kill switch 的原因。上线后看 `succeeded/attempted` 就能把推断变成实测。
+
+---
+
+## 18. 配了第二个 Copilot 账户之后会话报 `does not belong to this connection`
+
+### 症状
+
+单账户时好好的，加了第二个账户就开始出现第 14 / 17 节那条错误，而且**频率很高**。
+
+### 真因（2026-09-10 用两个真实 GHCP 账户实测，双向 × 3 次 = 24/24）
+
+A 账户铸造的 reasoning `encrypted_content` 拿到 B 账户回放**必然** 401。`least_requests` 会把同一
+会话的连续轮次分到不同账户，所以这个 401 是**必然事件**而不是偶发 —— 不是「运气不好」，是配置必然
+导致的。
+
+### 解决（已内置，默认开启）
+
+`COPILOT_SESSION_AFFINITY=true`：按 Codex 的 `prompt_cache_key`（= `session_id`/`thread_id`，实测
+跨重试跨轮次稳定）用 blake2b 哈希到固定账户。**单账户下是完全的 no-op。**
+
+```bash
+# hit 应该占绝大多数；单账户下 hit/unavailable 恒为 0
+curl -s $LB/metrics | grep copilot_session_affinity_total
+```
+
+| outcome | 含义 | 处理 |
+|---|---|---|
+| `hit` | 同一会话被钉回原账户 —— 每一次都是挡下了一次必然的 401 | 正常 |
+| `unavailable` | 亲和目标熔断/冷却，该轮跨账户 → 恢复阶梯兜住，丢一次推理链 | 看那个账户为什么熔断 |
+| `absent` | 请求没带 `prompt_cache_key`（非 Codex 客户端） | 该客户端拿不到亲和保护 |
+
+`unavailable` 与 `copilot_opaque_state_requests_total` 应同步增长。**两者背离**（受影响请求远多于
+`unavailable`）说明有别的跨账户来源，需要查。
+
+### 端到端实测对照
+
+| | 亲和开 | 亲和关 |
+|---|---|---|
+| 各账户请求数 | 3 / 0 | 3 / 3 |
+| `opaque_state_requests_total` | **0** | **3** |
+| `recovery{succeeded}` | 0 | **3** |
+| Codex 轮次成功 | 3/3 | 6/6 |
+
+关掉亲和时用户**仍然没看到错误**（阶梯 3/3 全救回，答案正确），但每轮都白打一次上游并丢掉推理链。
+
+### 非 Codex 客户端怎么办
+
+亲和依赖客户端提供稳定会话键。若你的客户端不发 `prompt_cache_key`（`absent` 一直涨），它就拿不到
+亲和保护，只能靠恢复阶梯。这种情况下要么让客户端带上该字段，要么**保持单账户**。

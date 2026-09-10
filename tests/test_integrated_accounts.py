@@ -1,10 +1,9 @@
 """Synthetic capability/selection tests: no enrollment, files or real accounts."""
-import asyncio
 import io
 import json
 import time
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import main
@@ -153,7 +152,7 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
                         await p.load_balancer.on_request_start(ep)
                         if provider=='databricks': response=await p._stream_request(ep,'http://synthetic',{}, {},model='synthetic',start_time=time.time())
                         else: response=await p._stream_response(ep,'http://synthetic',{}, {},'synthetic','responses',time.time())
-                        body=b''.join([b async for b in response.body_iterator])
+                        b''.join([b async for b in response.body_iterator])   # 读干流，值不需要
                         self.assertEqual(ep.total_errors,1);self.assertEqual(ep.neutral_requests,0)
                         self.assertEqual(ep.active_requests,0);self.assertEqual(ep.successful_requests,0)
                         self.assertEqual(len(calls),2 if provider=='copilot' and status==401 else 1)
