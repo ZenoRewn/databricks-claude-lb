@@ -1,3 +1,4 @@
+from effort_compat import preserve_native_effort, effort_response_headers
 """
 Databricks Claude Load Balancer Proxy for Claude Code
 使用 Databricks 原生 Anthropic 端点 (/anthropic/v1/messages)
@@ -2446,7 +2447,8 @@ class ClaudeProxy:
             body["model"] = get_databricks_model(original_model)
         
         # 移除 Databricks 不支持的顶层字段（如新版 Claude Code 发送的 context_management 等）
-        unsupported_fields = ["context_management", "output_config"]
+        unsupported_fields = ["context_management"]
+        preserve_native_effort(body)
         for field_name in unsupported_fields:
             if field_name in body:
                 logger.info(f"Removing unsupported field_name: {field_name}")
@@ -2664,7 +2666,7 @@ class ClaudeProxy:
         _record_usage_best_effort(self, endpoint, model, input_tokens, output_tokens, elapsed,
                           cache_creation_tokens=cache_creation_tokens, cache_read_tokens=cache_read_tokens)
 
-        return JSONResponse(content=resp_json, status_code=response.status_code)
+        return JSONResponse(content=resp_json, status_code=response.status_code, headers=effort_response_headers(body))
 
     async def _stream_request(self, endpoint, url, body, headers, max_retries: int = 3, model: str = "unknown", start_time: float = 0, attempt_lease=None,
                                 request_id: Optional[str] = None) -> StreamingResponse:

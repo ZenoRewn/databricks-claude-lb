@@ -396,7 +396,7 @@ GHCP 上游会返回 429 + `retry-after` 头。LB 的熔断器会临时摘掉该
 | 模型名映射 | `claude-opus-4-7` → `databricks-claude-opus-4-7` |
 | Thinking 参数 | Opus 4.6+/Sonnet 4.6+ 使用 `adaptive`；旧模型自动转换为 `enabled` + `budget_tokens` |
 | cache_control | 自动 strip `scope` 等额外字段，保留 `{"type": "ephemeral"}` 支持 prompt caching |
-| 不支持的字段 | 自动移除 `context_management`、`output_config`、`defer_loading`、`input_examples`、`tool_reference` |
+| 不支持的字段 | 移除旧端点不支持的字段；Claude Opus 5 保留 `output_config.effort`，其余 output_config 项及旧型号沿用兼容过滤 |
 
 ## 用量持久化与成本追踪
 
@@ -577,3 +577,9 @@ A: 已在 v 最新版修复。代理现在会：
 ## License
 
 MIT
+
+### Claude Opus 5 原生 effort 转发（2026-09-16）
+
+修复了整段删除 `output_config` 导致 effort 丢失的问题。对 `databricks-claude-opus-5` 保留 `output_config.effort`，不默认改写无效值，由上游校验。非流式成功响应通过 `x-claude-effort-forwarded` 返回实际转发的合法值；该头表示转发及上游接受，不保证固定推理 Token 或输出长度。其余模型和尚未验证的格式字段保持既有兼容策略。流式请求也转发 effort，但此版本不为流式回执增加新头。
+
+Author: Zeno Ren
