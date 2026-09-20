@@ -52,6 +52,10 @@ class FakeConn:
     def cursor(self):
         return FakeCursor(self._sink, self._rows)
 
+    async def begin(self): pass
+    async def commit(self): pass
+    async def rollback(self): pass
+
     async def __aenter__(self):
         return self
 

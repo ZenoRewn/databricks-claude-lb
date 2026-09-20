@@ -137,6 +137,11 @@ def note_generation(outcome):
         record.generation = 'failed' if outcome == 'error' else outcome
 
 
+def current_request_id():
+    record = CURRENT.get()
+    return record.request_id if record else None
+
+
 def note_json_result(payload, api_type):
     """Observe explicit result semantics without changing the response contract."""
     record = CURRENT.get()

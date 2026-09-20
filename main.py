@@ -1,7 +1,8 @@
 from effort_compat import preserve_native_effort, effort_response_headers
 from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_call,
                                note_admission, note_admission_end, note_generation,
-                               note_json_result, note_candidate_selection, note_retry_decision)
+                               note_json_result, note_candidate_selection, note_retry_decision,
+                               current_request_id as telemetry_request_id)
 from upstream_body import (read_error_body, render_metrics as error_body_metrics,
                            MAX_BYTES as UPSTREAM_ERROR_BODY_MAX_BYTES,
                            TIMEOUT as UPSTREAM_ERROR_BODY_TIMEOUT_SECONDS)
@@ -11,6 +12,9 @@ from request_budget import (RequestBudgetMiddleware, headers_received,
 from admission import (AdmissionMiddleware, AdmissionError, CURRENT_LEASE,
                        CONTROLLER as INFERENCE_ADMISSION,
                        BODY_READ_TIMEOUT as REQUEST_BODY_TIMEOUT_SECONDS)
+from usage_store import (IO_TIMEOUT as USAGE_IO_TIMEOUT_SECONDS,
+                         MAX_BUFFER_EVENTS as USAGE_MAX_BUFFER_EVENTS,
+                         FLUSH_BATCH_EVENTS as USAGE_FLUSH_BATCH_EVENTS)
 """
 Databricks Claude Load Balancer Proxy for Claude Code
 使用 Databricks 原生 Anthropic 端点 (/anthropic/v1/messages)
@@ -109,6 +113,9 @@ class LBSettings:
     inference_body_memory_bytes: int
     request_body_timeout_seconds: float
     inference_tenant_limits: dict
+    usage_io_timeout_seconds: float
+    usage_max_buffer_events: int
+    usage_flush_batch_events: int
     # ---- Image compression ----
     img_admission_enabled: bool        # IMG_ADMISSION_ENABLED
     img_compress_concurrency: int      # IMG_COMPRESS_CONCURRENCY=2
@@ -179,6 +186,9 @@ class LBSettings:
             inference_body_memory_bytes=INFERENCE_ADMISSION.body_budget,
             request_body_timeout_seconds=REQUEST_BODY_TIMEOUT_SECONDS,
             inference_tenant_limits=dict(INFERENCE_ADMISSION.tenant_limits),
+            usage_io_timeout_seconds=USAGE_IO_TIMEOUT_SECONDS,
+            usage_max_buffer_events=USAGE_MAX_BUFFER_EVENTS,
+            usage_flush_batch_events=USAGE_FLUSH_BATCH_EVENTS,
             img_admission_enabled=_env_bool("IMG_ADMISSION_ENABLED", True),
             img_compress_concurrency=_env_int("IMG_COMPRESS_CONCURRENCY", 2),
             img_max_count=_env_int("IMG_MAX_COUNT", 50),
@@ -2517,7 +2527,8 @@ class ClaudeProxy:
         tm["requests"] += 1
         if usage_store:
             usage_store.record(model, input_tokens, output_tokens,
-                               cache_creation_tokens, cache_read_tokens)
+                               cache_creation_tokens, cache_read_tokens,
+                               provider='databricks', tenant=_CURRENT_TENANT.get(), request_id=telemetry_request_id())
 
     async def close(self):
         await self.client.aclose()
@@ -3032,7 +3043,8 @@ class AzureOpenAIProxy:
         self.global_stats.total_requests += 1
         if usage_store:
             usage_store.record(model, input_tokens, output_tokens,
-                               cache_creation_tokens, cache_read_tokens)
+                               cache_creation_tokens, cache_read_tokens,
+                               provider='azure_openai', tenant=_CURRENT_TENANT.get(), request_id=telemetry_request_id())
 
     async def proxy_responses(self, body: dict, stream: bool = False):
         """代理 Azure OpenAI Responses API"""
@@ -4524,7 +4536,8 @@ class CopilotProxy:
         self.global_stats.total_requests += 1
         if usage_store:
             usage_store.record(model, input_tokens, output_tokens,
-                               cache_creation_tokens, cache_read_tokens)
+                               cache_creation_tokens, cache_read_tokens,
+                               provider='copilot', tenant=_CURRENT_TENANT.get(), request_id=telemetry_request_id())
 
     # ---- 请求构造 ----
 
@@ -6301,13 +6314,17 @@ async def lifespan(app: FastAPI):
 
     restore = usage_store.get_today_data()
     if restore and restore.get("models"):
+        restored_requests = 0
         for model_name, mstats in restore["models"].items():
+            if not model_name.lower().startswith(('claude-', 'databricks-claude-')):
+                continue  # Shared legacy GPT history has no reliable CP/Azure ownership.
             proxy.global_stats.total_input_tokens += mstats.get("input_tokens", 0)
             proxy.global_stats.total_output_tokens += mstats.get("output_tokens", 0)
             proxy.global_stats.total_cache_creation_tokens += mstats.get("cache_creation_tokens", 0)
             proxy.global_stats.total_cache_read_tokens += mstats.get("cache_read_tokens", 0)
             proxy.global_stats.total_requests += mstats.get("requests", 0)
             proxy.global_stats.successful_requests += mstats.get("requests", 0)
+            restored_requests += mstats.get('requests',0)
             # 按模型恢复当天快照（供 /stats 计算 KPI Est. Cost 及 Anthropic Models 表使用）
             proxy.today_model_stats[model_name] = {
                 "input_tokens": mstats.get("input_tokens", 0),
@@ -6316,9 +6333,8 @@ async def lifespan(app: FastAPI):
                 "cache_read_tokens": mstats.get("cache_read_tokens", 0),
                 "requests": mstats.get("requests", 0),
             }
-        if restore.get("totals", {}).get("errors"):
-            proxy.global_stats.total_errors += restore["totals"]["errors"]
-        logger.info(f"Restored today's usage data: {restore['totals'].get('requests', 0)} requests")
+        # Persisted usage-event errors are not this process's upstream failures.
+        logger.info('Restored %d attributed Databricks requests; shared usage remains in history', restored_requests)
 
     logger.info(f"Proxy started with {len(proxy.load_balancer.endpoints)} Databricks endpoints")
     logger.info(f"Usage storage: {storage_config.get('type', 'json')}")
@@ -6353,7 +6369,10 @@ async def lifespan(app: FastAPI):
         except (asyncio.CancelledError, Exception):
             pass
     if usage_store:
-        await usage_store.stop()
+        try:
+            await usage_store.stop()
+        except Exception as exc:
+            logger.error('Usage shutdown flush failed (%s); inference clients still close', type(exc).__name__)
     if proxy:
         await proxy.close()
     if azure_proxy:
@@ -7858,6 +7877,8 @@ async def metrics():
     lines.append(TELEMETRY.render().rstrip())
     lines.append(error_body_metrics().rstrip())
     lines.append(INFERENCE_ADMISSION.render_metrics().rstrip())
+    if usage_store:
+        lines.append(usage_store.render_metrics().rstrip())
     body = "\n".join(lines) + "\n" if lines else "# no providers configured\n"
     return Response(content=body, media_type="text/plain; version=0.0.4")
 

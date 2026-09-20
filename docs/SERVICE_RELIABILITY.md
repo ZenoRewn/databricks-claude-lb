@@ -88,6 +88,20 @@ Databricks 可选 `endpoints[].models` 白名单使用转换后的原生模型�
 
 新增 `lb_admission_active/queued/body_bytes/draining`、`lb_admission_rejected_total{reason}` 与排队耗时指标。这里是进程内限制，多副本会使总额度随实例数变化；需要全局配额时不能直接假设这些值跨 Pod 共享。
 
+## 用量失败恢复与事务幂等
+
+用量先进入有事件 ID/发生时间的 pending 队列，按**发生日**组批。每批有固定 batch ID、不可变增量和累计视图；保存失败、取消、读取旧日数据失败时保留，重试不重复修改缓存。新事件进入独立 buffer，不会被失败批次吞掉。启动失败仍保留后台恢复循环；正常 stop 会尝试排完尾批，失败也会关闭后端和推理客户端。
+
+MySQL 在一个事务里插入 `usage_batch_ledger` 回执并更新全部模型的 `usage_daily` 增量。部分失败回滚全批；提交成功但 ACK 丢失、取消后再次投递，通过 batch ID + payload hash 判定已提交，不再次累计。不同内容复用同一 batch ID 会报错。今日历史查询从 MySQL 读取共享累计，避免各副本只显示自己的缓存。
+
+新增账本保存 provider、tenant、LB request ID、事件时间与 token 分项，不保存 prompt、答案、凭据或 opaque content。旧共享 GPT 历史不再恢复到 Databricks 面板；保留在共享历史中，不猜测 CP/Azure 归属。历史 usage-event errors 不回填到运行时上游失败计数。新 schema 是追加表，见 [SQL 文件](../deploy/sql/usage-batch-ledger.sql)；生产发布前需要审阅建表权限与迁移。此次只对隔离测试数据库执行了验证。
+
+JSON 后端仍只支持单写者；磁盘操作移到工作线程，取消时等待该线程，避免旧批次迟到覆盖新数据。使用 fsync + 原子替换，写失败和损坏文件不再伪装成功或空日数据。重投使用同一累计快照，不重复叠加。
+
+`USAGE_IO_TIMEOUT_SECONDS=10`、`USAGE_MAX_BUFFER_EVENTS=100000`、`USAGE_FLUSH_BATCH_EVENTS=1000` 控制异步 I/O 和队列。新增 pending/in-flight、flush success/failure、rejected events、last success 与 backend_ready 指标；backend_ready 表示最近已观察到的持久化状态，不是实时数据库探针。队列满会明确拒绝新的用量事件并计数，调用方生成结果保持独立，绝不重新推理。
+
+**仍然是内存待写队列，不承诺进程/Pod 硬丢失时零丢账。** 若必须零 RPO，需要可靠 outbox 或上游账单对账，这要结合实际存储部署选择。账本事件 payload 按 usage retention 清除，最小 batch ID/date/hash 回执保留以防旧批次重复；清除这些回执前必须确认没有可重试旧批次。用量估算仍不能代替供应商实际账单。
+
 ## 日报与归档组件
 
 `operations.reporting` 是纯 Python 标准库工具，不调用模型、不发送消息、不修改 scheduler。现有 OpenClaw watcher 应将其快照适配成 [example-snapshots.json](../operations/example-snapshots.json) 的结构，再使用计算结果生成解释。示例数据完全为合成数据。

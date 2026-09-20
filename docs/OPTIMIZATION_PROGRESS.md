@@ -15,7 +15,20 @@ Author: Zeno Ren
 
 本地 Python 3.14 全量：501 passed、433 subtests passed。Linux/amd64/Python 3.12 镜像：500 passed、1 skipped（默认镜像没有可选 OTel 依赖）、433 subtests passed。镜像应用代码全部来自 baked files，没有挂载主程序覆盖；监控工具和文档仅作为测试材料挂载。
 
-正常 Docker 构建的 PyPI 下载遇到 TLS EOF；离线验证构建使用宿主机经 TLS 从 PyPI 下载的 wheel，仅替换依赖安装来源，保留相同应用 COPY 清单。验证镜像 `claude-lb:review-20260920-amd64` 尚未推送或部署。所有新运行模块的镜像 hash 与本地一致。
+正常 Docker 构建的 PyPI 下载遇到 TLS EOF；离线验证构建使用宿主机经 TLS 从 PyPI 下载的 wheel，仅替换依赖安装来源，保留相同应用 COPY 清单。第一批验证镜像 `claude-lb:review-20260920-amd64` 尚未推送或部署。第一批构建时新运行模块的镜像 hash 与当时本地一致；后续批次需要重新构建验收，不能复用旧镜像结论。
+
+后续本地进度（尚未最终发布验收）：
+
+- `6ccfa10`：请求总预算 1800s、上游响应头预算 180s，真实 TCP 停滞/取消回收测试；全量 511 passed、438 subtests。
+- `5cb5329`：模型兼容白名单、请求内 tried-set、重试决策观测；全量 520 passed、446 subtests 后，补回空池 503 契约并单独验证相关 10 项测试。
+- 最新准入批次：进程并发/队列/tenant 限制、128 MiB 输入预留、120s 上传预算、JSON object 校验；全量 533 passed、457 subtests。
+- `eeb3aee` 为上述准入批次提交。
+- usage 失败恢复、事务批次幂等、跨午夜事件归属、JSON 错误传播/原子写、source 元数据和新持久化指标已实现。全量 551 passed、6 skipped（隔离 MySQL 场景）、462 subtests；另用 Linux/amd64 baked image 在真实 MySQL 8.0.46 跑通全部 6 个事务/回执/并发/retention 场景。CI 已加独立 mysql-usage job；正常 CI unit job 保持隔离场景跳过。
+- 后续需本地 readiness/drain、参数兼容可见性、最终镜像验收与更新交接说明。所有生产/OpenClaw修改仍未执行。
+
+工作分支为 `codex/service-reliability-20260920`。离线 PyPI wheel 在 `/tmp/lb-wheelhouse-20260920`（linux/amd64/Python 3.12），pytest wheel 在 `/tmp/lb-test-wheels-20260920`。旧镜像构建目录路径保存于 `/tmp/lb-offline-build-path-20260920.txt`；不得将旧源码副本用于后续最终构建。Docker 已启动；所有生产访问均只读。
+
+最新 storage 验证镜像为 `claude-lb:usage-review-20260920-v2`，源码副本路径记录在 `/tmp/lb-usage-v2-build-path-20260920.txt`。隔离数据库容器 `lb-usage-test-20260920` 使用 network=none，无挂载用户数据；通过 `--network container:lb-usage-test-20260920` 运行测试客户端。收尾时只清理这个本任务创建的测试容器及其匿名卷，不动其他容器。
 
 ## 接下来按顺序推进
 
