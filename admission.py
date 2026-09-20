@@ -119,7 +119,11 @@ class AdmissionController:
         self.waiters.append(waiter)
         started = time.monotonic()
         try:
-            return await asyncio.wait_for(asyncio.shield(waiter.future),self.wait_timeout)
+            # Python 3.11 wait_for can consume external cancellation when the
+            # offered future completes in the same turn. Own the timeout here
+            # so cancellation still releases an offered lease below.
+            async with asyncio.timeout(self.wait_timeout):
+                return await asyncio.shield(waiter.future)
         except BaseException as exc:
             if waiter in self.waiters:
                 self.waiters.remove(waiter)
