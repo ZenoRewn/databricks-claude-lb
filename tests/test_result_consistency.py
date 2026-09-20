@@ -122,6 +122,18 @@ class ResultConsistencyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(r['ep'].total_errors, 0)
             self.assertEqual(r['ep'].neutral_requests, 1)
 
+    async def test_native_stream_context_error_uses_shared_classification(self):
+        for provider,api in [('databricks','messages'),('azure','responses'),('azure','chat'),('copilot','responses'),('copilot','chat')]:
+            with self.subTest(provider=provider,api=api):
+                error={'code':'context_window_exceeded','message':'input exceeds context window'}
+                payload={'type':'response.failed','response':{'error':error}} if api=='responses' else {'type':'error','error':error}
+                raw=('data: '+json.dumps(payload)+'\n\n').encode()
+                r=await self.drive(provider,api,raw,stream=True,content_type='text/event-stream')
+                self.assertEqual(r['ep'].total_errors,0)
+                self.assertEqual(r['ep'].neutral_requests,1)
+                self.assertEqual(r['sends'],1)
+                self.assertEqual(r['wire'],raw)
+
     async def test_failed_stream_retains_observed_usage(self):
         raw = (b'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":9,"output_tokens":0}}}\n\n'
                b'event: error\ndata: {"type":"error","error":{"code":"server_error","message":"failed"}}\n\n')

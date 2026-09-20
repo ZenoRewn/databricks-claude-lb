@@ -1196,10 +1196,11 @@ class _SSEObservation:
             self.terminal = "error"
             error = data.get("error", data)
         if isinstance(error, dict):
-            note_reason(failure_reason({'error':error}))
+            reason = failure_reason({'error':error})
+            note_reason(reason)
             # Narrow request-local evidence only. Auth/quota/overload/server and
             # unknown EOF/errors remain conservative endpoint failures.
-            self.neutral = self.neutral or error.get("code") in ("invalid_prompt", "context_length_exceeded", "max_output_tokens")
+            self.neutral = self.neutral or reason in ('context_window_exceeded','invalid_input','output_limit')
 
     def _usage(self, usage, input_key="input_tokens", output_key="output_tokens", details_key="input_tokens_details"):
         if not isinstance(usage, dict):
@@ -3006,13 +3007,14 @@ class ClaudeProxy:
                         "Upstream ended without message_stop; cause undetermined",
                         {"request_id": request_id} if request_id else None,
                     )
-                    yield f"event: error\ndata: {json.dumps({'type':'error','error':{'code':'upstream_truncated','message':_trunc_msg}})}\n\n".encode()
+                    yield _sse_terminal_error('messages','upstream_truncated',_trunc_msg)
                     return
 
                 except (_LocalStreamLimit, _LocalObserverError) as e:
                     await end_current_request(success=False, is_client_error=True)
                     _msg = _apply_request_id_prefix(str(e), {"request_id": request_id} if request_id else None)
-                    payload = {"type": "error", "error": {"code": e.code, "type": "local_resource_limit" if isinstance(e, _LocalStreamLimit) else "local_observer_error", "message": _msg}}
+                    payload = {"type": "error", "error": {"code": e.code, "type": "local_resource_limit" if isinstance(e, _LocalStreamLimit) else "local_observer_error", "message": _msg,
+                              "retryable": False, "execution_certainty": "unknown"}}
                     yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode()
                     return
 
@@ -3040,7 +3042,7 @@ class ClaudeProxy:
 
                     # P1.4: request_id 前缀到 network-error message
                     _detail = _apply_request_id_prefix(error_detail, {"request_id": request_id} if request_id else None)
-                    yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': _detail}})}\n\n".encode()
+                    yield _sse_terminal_error('messages','upstream_transport_error',_detail)
                     return
 
                 except Exception as e:
@@ -3049,7 +3051,7 @@ class ClaudeProxy:
                     logger.error(f"Stream error: {error_detail}\n{traceback.format_exc()}")
                     await end_current_request(success=False, is_client_error=isinstance(e, httpx.PoolTimeout))
                     _detail = _apply_request_id_prefix(error_detail, {"request_id": request_id} if request_id else None)
-                    yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': _detail}})}\n\n".encode()
+                    yield _sse_terminal_error('messages','upstream_stream_error',_detail)
                     return
 
                 finally:
