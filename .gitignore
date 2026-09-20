@@ -40,3 +40,9 @@ usage_data/
 
 # video 项目（如有）
 video/
+
+# Local, pinned build inputs (not credentials or source overlays)
+.wheelhouse/
+.release-wheelhouse/
+.test-wheelhouse/
+.release-private/

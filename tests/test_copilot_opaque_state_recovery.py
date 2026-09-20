@@ -297,7 +297,7 @@ class CrossAccountReplayShapeTests(_PinnedSettings, unittest.IsolatedAsyncioTest
             if has_blob:
                 return httpx.Response(401, request=req, text=first_error_text,
                                       headers=dict(JSON_CT))
-            return httpx.Response(200, request=req, json={"output": [], "usage": {}})
+            return httpx.Response(200, request=req, json={"id":"synthetic","status":"completed","output":[],"usage":{}})
 
         client = unittest.mock.Mock()
         client.post = AsyncMock(side_effect=post)
@@ -338,7 +338,7 @@ class NonStreamRecoveryTests(_PinnedSettings, unittest.IsolatedAsyncioTestCase):
             status, text = responses[idx]
             req = httpx.Request("POST", url)
             if status == 200:
-                return httpx.Response(200, request=req, json={"output": [], "usage": {}})
+                return httpx.Response(200, request=req, json={"id":"synthetic","status":"completed","output":[],"usage":{}})
             return httpx.Response(status, request=req, text=text, headers=dict(JSON_CT))
 
         client = unittest.mock.Mock()

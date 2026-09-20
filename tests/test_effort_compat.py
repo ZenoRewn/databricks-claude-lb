@@ -22,7 +22,7 @@ class DeployedEffortTests(unittest.IsolatedAsyncioTestCase):
                         if stream:
                             return httpx.Response(200, content=b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
                                                   headers={"content-type": "text/event-stream"})
-                        return httpx.Response(200, json={"type": "message", "usage": {}})
+                        return httpx.Response(200, json={"type":"message","stop_reason":"end_turn","usage":{}})
                     ep = main.WorkspaceEndpoint("fixture", "https://fixture.invalid", "synthetic")
                     proxy = main.ClaudeProxy(main.LoadBalancer([ep]), "synthetic")
                     await proxy.client.aclose()

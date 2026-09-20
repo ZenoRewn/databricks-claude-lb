@@ -19,7 +19,7 @@ class Independent(unittest.IsolatedAsyncioTestCase):
     h=await r.readuntil(b'\r\n\r\n'); n=next((int(x.split(b':',1)[1]) for x in h.split(b'\r\n') if x.lower().startswith(b'content-length:')),0)
     if n: await r.readexactly(n)
     self.assertFalse(any(x.lower().startswith(b'authorization:') for x in h.split(b'\r\n')))
-    calls.append(1);status=b'401 Unauthorized' if len(calls)==1 else b'200 OK';body=b'{"usage":{}}'
+    calls.append(1);status=b'401 Unauthorized' if len(calls)==1 else b'200 OK';body=b'{"id":"synthetic","status":"completed","output":[],"usage":{}}'
     w.write(b'HTTP/1.1 '+status+b'\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: '+str(len(body)).encode()+b'\r\n\r\n'+body);await w.drain()
    finally:w.close();await w.wait_closed();handlers.discard(asyncio.current_task())
   server=await asyncio.start_server(origin,'127.0.0.1',0); url='http://127.0.0.1:'+str(server.sockets[0].getsockname()[1])

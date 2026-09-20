@@ -103,7 +103,7 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
         async def handler(req):
             attempts.append(req)
             if len(attempts)==1: raise httpx.ConnectError('synthetic pre-execution connect')
-            return httpx.Response(200,json={'usage':{}})
+            return httpx.Response(200,json={'id':'synthetic','status':'completed','output':[],'usage':{}})
         await p.client.aclose()
         p.client=httpx.AsyncClient(transport=httpx.MockTransport(handler),trust_env=False)
         self.addAsyncCleanup(p.client.aclose)

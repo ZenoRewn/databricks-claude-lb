@@ -16,7 +16,7 @@ BODY_READ_TIMEOUT = float(os.getenv('REQUEST_BODY_TIMEOUT_SECONDS', '120'))
 TENANT_LIMITS = json.loads(os.getenv('INFERENCE_TENANT_LIMITS', '{}'))
 CURRENT_LEASE = ContextVar('inference_admission_lease', default=None)
 ROUTES = {'/v1/messages','/v1/responses','/v1/chat/completions'}
-REASONS = ('queue_full','queue_timeout','body_memory_budget','draining')
+REASONS = ('queue_full','queue_timeout','body_memory_budget','draining','maintenance')
 
 
 class AdmissionError(Exception):
@@ -77,7 +77,12 @@ class AdmissionController:
         self.rejections = Counter()
         self.queue_wait_count = 0
         self.queue_wait_seconds = 0.0
-        self.draining = False
+        self.permanent_draining = False
+        self.maintenance_paused = False
+
+    @property
+    def draining(self):
+        return self.permanent_draining or self.maintenance_paused
 
     def _can_admit(self, tenant):
         return not self.draining and self.active < self.max_active and self.tenant_active[tenant] < self.tenant_limits.get(tenant,self.max_active)
@@ -98,17 +103,28 @@ class AdmissionController:
                 waiter.future.set_result(self._allocate(waiter.tenant))
 
     def drain(self):
-        self.draining = True
+        self.permanent_draining = True
+        self._reject_waiters('draining')
+
+    def set_maintenance(self, paused):
+        self.maintenance_paused = bool(paused)
+        if self.draining:
+            self._reject_waiters('draining' if self.permanent_draining else 'maintenance')
+        else:
+            self._dispatch()
+
+    def _reject_waiters(self, reason):
         while self.waiters:
             waiter = self.waiters.popleft()
             if not waiter.future.done():
-                self.rejections['draining'] += 1
-                waiter.future.set_exception(AdmissionError('draining'))
+                self.rejections[reason] += 1
+                waiter.future.set_exception(AdmissionError(reason))
 
     async def acquire(self, tenant):
         if self.draining:
-            self.rejections['draining'] += 1
-            raise AdmissionError('draining')
+            reason = 'draining' if self.permanent_draining else 'maintenance'
+            self.rejections[reason] += 1
+            raise AdmissionError(reason)
         self._dispatch()
         if self._can_admit(tenant):
             return self._allocate(tenant)

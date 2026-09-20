@@ -17,6 +17,9 @@ from usage_store import (IO_TIMEOUT as USAGE_IO_TIMEOUT_SECONDS,
                          MAX_BUFFER_EVENTS as USAGE_MAX_BUFFER_EVENTS,
                          FLUSH_BATCH_EVENTS as USAGE_FLUSH_BATCH_EVENTS)
 from gateway_lifecycle import sync_drain, DRAIN_MARKER_FILE
+from response_semantics import assess_json, reported_usage, failure_reason, enrich_error, decode_json_response, invalid_stream_type, is_html as is_html_content_type
+from request_telemetry import note_reason
+from cleanup_observability import CLEANUP
 """
 Databricks Claude Load Balancer Proxy for Claude Code
 使用 Databricks 原生 Anthropic 端点 (/anthropic/v1/messages)
@@ -349,6 +352,7 @@ def _is_anthropic_model(model_name: str) -> bool:
 
 async def _join_cleanup_task(task):
     """Join an owned task despite level cancellation or repeated Task.cancel()."""
+    CLEANUP.watch(task)
     cancelled = None
     with anyio.CancelScope(shield=True):
         while not task.done():
@@ -664,6 +668,8 @@ def _sse_terminal_from_upstream_detail(api_type: str, upstream_detail: dict,
     if api_type == "responses":
         payload = {"type": "response.failed", "response": {"error": error}}
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
+    if api_type == 'messages':
+        return f"event: error\ndata: {json.dumps({'type':'error','error':error},ensure_ascii=False)}\n\n".encode()
     payload_dict = {"error": error}
     return f"data: {json.dumps(payload_dict, ensure_ascii=False)}\n\ndata: [DONE]\n\n".encode()
 
@@ -1102,6 +1108,8 @@ class _SSEObservation:
         self.terminal = None
         self.finish_reason = None
         self.neutral = False
+        self.usage = {}
+        self.usage_recorded = False
         self.input_tokens = self.output_tokens = self.cache_read_tokens = self.cache_creation_tokens = 0
 
     def observe(self, frame):
@@ -1110,9 +1118,17 @@ class _SSEObservation:
             if self.terminal:
                 note_generation('incomplete' if self.terminal == 'completed' and self.finish_reason in
                                 ('max_tokens', 'length', 'content_filter') else self.terminal)
+                if self.outcome == 'incomplete':
+                    note_reason('output_limit')
         except Exception as exc:
             # A bug in local observation is never evidence of endpoint failure.
             raise _LocalObserverError("Local stream observer failed; upstream outcome unknown") from exc
+
+    @property
+    def outcome(self):
+        if self.terminal == 'completed':
+            return 'incomplete' if self.finish_reason in ('max_tokens','length','content_filter') else 'completed'
+        return self.terminal if self.terminal in ('incomplete','failed') else 'failed'
 
     def _observe(self, frame):
         text = frame.decode("utf-8-sig" if self.first else "utf-8", errors="replace")
@@ -1146,6 +1162,7 @@ class _SSEObservation:
                 # their optional error/reason details are absent or malformed.
                 self.terminal = kind.split(".")[1]
                 response = response if isinstance(response, dict) else {}
+                self._usage(response.get('usage'))
                 error = response.get("error")
                 details = response.get("incomplete_details")
                 self.neutral = (kind == "response.incomplete" and isinstance(details, dict)
@@ -1172,6 +1189,7 @@ class _SSEObservation:
             self.terminal = "error"
             error = data.get("error", data)
         if isinstance(error, dict):
+            note_reason(failure_reason({'error':error}))
             # Narrow request-local evidence only. Auth/quota/overload/server and
             # unknown EOF/errors remain conservative endpoint failures.
             self.neutral = self.neutral or error.get("code") in ("invalid_prompt", "context_length_exceeded", "max_output_tokens")
@@ -1179,6 +1197,7 @@ class _SSEObservation:
     def _usage(self, usage, input_key="input_tokens", output_key="output_tokens", details_key="input_tokens_details"):
         if not isinstance(usage, dict):
             return
+        self.usage.update(reported_usage({'usage':usage},self.api_type))
         for source, target in ((input_key, "input_tokens"), (output_key, "output_tokens"),
                                ("cache_read_input_tokens", "cache_read_tokens"),
                                ("cache_creation_input_tokens", "cache_creation_tokens")):
@@ -2035,6 +2054,79 @@ def _record_usage_best_effort(proxy_instance, endpoint, *args, **kwargs):
         logger.error("Usage accounting failed: %s", type(exc).__name__)
 
 
+class _SemanticResponseError(HTTPException):
+    def __init__(self, detail, *, neutral=False):
+        super().__init__(status_code=502, detail=detail, headers={'X-Should-Retry':'false'})
+        self.neutral = neutral
+
+
+def _account_assessed_usage(instance, endpoint, model, elapsed, api_type, outcome, usage):
+    if not usage and outcome != 'completed':
+        return
+    values = {k:usage.get(k,0) for k in ('input_tokens','output_tokens','cache_creation_tokens','cache_read_tokens')}
+    kwargs = dict(cache_creation_tokens=values['cache_creation_tokens'],cache_read_tokens=values['cache_read_tokens'],
+                  generation_outcome=outcome,usage_fields=list(usage))
+    if api_type != 'messages':
+        kwargs['api_type'] = api_type
+    _record_usage_best_effort(instance,endpoint,model,values['input_tokens'],values['output_tokens'],elapsed,**kwargs)
+
+
+def _record_observation_usage(instance,endpoint,model,start_time,observation):
+    if observation is None or observation.usage_recorded:
+        return
+    observation.usage_recorded = True
+    outcome = observation.outcome
+    if observation.terminal is None and asyncio.current_task() and asyncio.current_task().cancelling():
+        outcome = 'cancelled'
+    _account_assessed_usage(instance,endpoint,model,time.time()-start_time,observation.api_type,outcome,observation.usage)
+
+
+def _account_terminal_http_error(instance,endpoint,model,start_time,api_type,response):
+    try:payload=decode_json_response(response)
+    except (ValueError,AttributeError):return
+    usage=reported_usage(payload,api_type)
+    if usage:
+        _account_assessed_usage(instance,endpoint,model,time.time()-start_time,api_type,'failed',usage)
+
+
+def _buffered_result(instance, endpoint, response, model, api_type, start_time, response_headers=None):
+    try:
+        payload = decode_json_response(response)
+    except (ValueError, UnicodeError):
+        payload = None
+    if is_html_content_type(response.headers.get('content-type','')) or not isinstance(payload,dict):
+        code = 'upstream_html_error' if is_html_content_type(response.headers.get('content-type','')) else 'invalid_upstream_response'
+        detail = enrich_error({'error':{'code':code,'message':'Upstream response does not match the requested protocol.'}},
+                              status=response.status_code,headers=response.headers,request_id=telemetry_request_id())
+        note_generation('failed');note_reason('invalid_protocol')
+        raise _SemanticResponseError(detail)
+    assessment = assess_json(payload,api_type)
+    note_json_result(payload,api_type)
+    _account_assessed_usage(instance,endpoint,model,time.time()-start_time,api_type,assessment.outcome,assessment.usage)
+    if assessment.outcome == 'failed':
+        detail = _build_upstream_error_detail(response.status_code,response.text,type(instance).__name__,endpoint.name,
+                                              content_type=response.headers.get('content-type'),upstream_headers=response.headers,
+                                              lb_request_id=telemetry_request_id())
+        if assessment.reason == 'invalid_protocol':
+            detail['error'].update(code='invalid_upstream_response',reason='invalid_protocol')
+            note_reason('invalid_protocol')
+        raise _SemanticResponseError(detail,neutral=assessment.neutral)
+    result = JSONResponse(content=payload,status_code=response.status_code,headers=response_headers)
+    result.lb_assessment = assessment
+    return result
+
+
+def _buffered_settlement(result):
+    assessment = getattr(result,'lb_assessment',None)
+    return (assessment.outcome == 'completed', assessment.neutral) if assessment else (True,False)
+
+
+def _http_error_headers(response):
+    headers={'Retry-After':response.headers['Retry-After']} if 'Retry-After' in response.headers else {}
+    if response.status_code!=429:headers['X-Should-Retry']='false'
+    return headers
+
+
 # Prometheus histogram bucket edges in seconds. Covers sub-100ms (fast chat
 # completion) → 100ms-1s (typical) → 1-30s (thinking) → 30s+ (long thinking /
 # large output). Chosen so p50/p95/p99 quantiles remain meaningful for the
@@ -2493,17 +2585,18 @@ class ClaudeProxy:
         self.upstream_html_events_by_status: Dict[str, int] = {}
 
     def _record_usage(self, endpoint: WorkspaceEndpoint, model: str, input_tokens: int, output_tokens: int, elapsed: float,
-                      cache_creation_tokens: int = 0, cache_read_tokens: int = 0):
+                      cache_creation_tokens: int = 0, cache_read_tokens: int = 0, *, generation_outcome="completed", usage_fields=None):
         """记录 token 用量和延迟指标"""
         # Prometheus histogram（提供 p50/p95/p99 分位数观测）
-        LATENCY_HISTOGRAM.observe("databricks", "messages", elapsed, tenant=_CURRENT_TENANT.get())
+        if generation_outcome == "completed":
+            LATENCY_HISTOGRAM.observe("databricks", "messages", elapsed, tenant=_CURRENT_TENANT.get())
         # 端点级别
         endpoint.total_input_tokens += input_tokens
         endpoint.total_output_tokens += output_tokens
         endpoint.total_cache_creation_tokens += cache_creation_tokens
         endpoint.total_cache_read_tokens += cache_read_tokens
         endpoint.total_response_time += elapsed
-        endpoint.successful_requests += 1
+        endpoint.successful_requests += int(generation_outcome == "completed")
         if model not in endpoint.model_stats:
             endpoint.model_stats[model] = {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0, "requests": 0}
         endpoint.model_stats[model]["input_tokens"] += input_tokens
@@ -2517,7 +2610,7 @@ class ClaudeProxy:
         self.global_stats.total_cache_creation_tokens += cache_creation_tokens
         self.global_stats.total_cache_read_tokens += cache_read_tokens
         self.global_stats.total_response_time += elapsed
-        self.global_stats.successful_requests += 1
+        self.global_stats.successful_requests += int(generation_outcome == "completed")
         self.global_stats.total_requests += 1
         # 当天 per-model 累加（跨 0 点自动滚动）
         today_iso = date.today().isoformat()
@@ -2530,10 +2623,12 @@ class ClaudeProxy:
         tm["cache_creation_tokens"] += cache_creation_tokens
         tm["cache_read_tokens"] += cache_read_tokens
         tm["requests"] += 1
-        if usage_store:
+        if usage_store and (usage_fields is None or usage_fields):
             usage_store.record(model, input_tokens, output_tokens,
                                cache_creation_tokens, cache_read_tokens,
-                               provider='databricks', tenant=_CURRENT_TENANT.get(), request_id=telemetry_request_id())
+                               provider='databricks', tenant=_CURRENT_TENANT.get(), request_id=telemetry_request_id(),
+                               generation_outcome=generation_outcome,usage_fields=usage_fields,
+                               is_error=generation_outcome != "completed")
 
     async def close(self):
         await self.client.aclose()
@@ -2690,12 +2785,16 @@ class ClaudeProxy:
                     return await self._stream_request(endpoint, url, body, headers, model=model, start_time=start_time, attempt_lease=attempt_lease, request_id=request_id)
                 else:
                     result = await self._normal_request(endpoint, url, body, headers, model=model, start_time=start_time, request_id=request_id)
-                    await self.load_balancer.on_request_end(endpoint, success=True, lease=attempt_lease)
+                    success,neutral = _buffered_settlement(result)
+                    await self.load_balancer.on_request_end(endpoint, success=success, is_client_error=neutral, lease=attempt_lease)
                     return result
                     
             except asyncio.CancelledError:
                 await _finish_cleanup(self.load_balancer.on_request_end(
                     endpoint, success=False, lease=attempt_lease, cancelled=True))
+                raise
+            except _SemanticResponseError as exc:
+                await self.load_balancer.on_request_end(endpoint,success=False,is_client_error=exc.neutral,lease=attempt_lease)
                 raise
             except httpx.HTTPStatusError as e:
                 last_error = e
@@ -2726,8 +2825,9 @@ class ClaudeProxy:
                         _note_upstream_html(self, endpoint, "Databricks", "messages",
                                             e.response.status_code, upstream_ids=ids)
                     logger.error(f"Request failed with {e.response.status_code}: {json.dumps(error_body, ensure_ascii=False)[:500]}")
+                    _account_terminal_http_error(self,endpoint,model,start_time,'messages',e.response)
                     raise HTTPException(status_code=e.response.status_code, detail=error_body,
-                                        headers={"Retry-After": e.response.headers["Retry-After"]} if "Retry-After" in e.response.headers else None)
+                                        headers=_http_error_headers(e.response))
 
             except Exception as e:
                 last_error = e
@@ -2768,18 +2868,7 @@ class ClaudeProxy:
         response = await inference_call(self.client.post(url, json=body, headers=headers), 'databricks', 'messages')
         response.raise_for_status()
 
-        elapsed = time.time() - start_time
-        resp_json = response.json()
-        note_json_result(resp_json, 'messages')
-        usage = resp_json.get("usage", {})
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
-        cache_creation_tokens = usage.get("cache_creation_input_tokens", 0)
-        cache_read_tokens = usage.get("cache_read_input_tokens", 0)
-        _record_usage_best_effort(self, endpoint, model, input_tokens, output_tokens, elapsed,
-                          cache_creation_tokens=cache_creation_tokens, cache_read_tokens=cache_read_tokens)
-
-        return JSONResponse(content=resp_json, status_code=response.status_code, headers=effort_response_headers(body))
+        return _buffered_result(self,endpoint,response,model,'messages',start_time,effort_response_headers(body))
 
     async def _stream_request(self, endpoint, url, body, headers, max_retries: int = 3, model: str = "unknown", start_time: float = 0, attempt_lease=None,
                                 request_id: Optional[str] = None) -> StreamingResponse:
@@ -2822,6 +2911,7 @@ class ClaudeProxy:
 
             for attempt in range(max_retries):
                 response = None
+                observation = None
                 pump_task = None
 
                 try:
@@ -2835,7 +2925,7 @@ class ClaudeProxy:
                             else:
                                 response = payload
 
-                    if response.status_code >= 400:
+                    if response.status_code >= 400 or invalid_stream_type(response.headers.get('content-type','')):
                         error_body = await _bounded_error_body(response)
                         # 429 rate limit 也触发熔断
                         is_client_error = 400 <= response.status_code < 500 and response.status_code not in (401, 403, 429)
@@ -2852,7 +2942,7 @@ class ClaudeProxy:
                         # P1.3: 用 _build_upstream_error_detail 复用 HTML 识别通道，然后
                         # 只把 upstream_html_error 触发软熔断（不改 event: error 帧的 shape）
                         _detail_probe = _build_upstream_error_detail(
-                            response.status_code, error_msg, "Databricks", current_endpoint.name,
+                            response.status_code, error_body.decode('utf-8',errors='replace') if isinstance(error_body,bytes) else str(error_body), "Databricks", current_endpoint.name,
                             content_type=upstream_ct, upstream_headers=response.headers,
                         )
                         if _detail_probe.get("error", {}).get("code") == "upstream_html_error":
@@ -2879,8 +2969,9 @@ class ClaudeProxy:
                                 continue
 
                         # P1.4: 把 [req=...] 前缀到 error.message，与 Copilot 侧对齐
-                        _msg = _apply_request_id_prefix(error_msg, {"request_id": request_id} if request_id else None)
-                        yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': _msg}})}\n\n".encode()
+                        _account_terminal_http_error(proxy_self,current_endpoint,model,start_time,'messages',response)
+                        yield _sse_terminal_from_upstream_detail('messages',_detail_probe,
+                                                                metadata={'request_id':request_id} if request_id else None)
                         return
 
                     def own_pump(task, owned_queue):
@@ -2896,14 +2987,9 @@ class ClaudeProxy:
                             sent_any_content = True
                             observation.observe(frame)
                             if observation.terminal:
-                                success = observation.terminal == "completed"
-                                await end_current_request(success=success, is_client_error=observation.neutral)
-                                if success:
-                                    _record_usage_best_effort(
-                                        proxy_self, current_endpoint, model,
-                                        observation.input_tokens, observation.output_tokens, time.time() - start_time,
-                                        cache_creation_tokens=observation.cache_creation_tokens,
-                                        cache_read_tokens=observation.cache_read_tokens)
+                                success = observation.outcome == "completed"
+                                await end_current_request(success=success, is_client_error=observation.neutral or observation.outcome == "incomplete")
+                                _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                                 yield wire_output.frame(frame)
                                 return
                             yield wire_output.frame(frame)
@@ -2960,6 +3046,7 @@ class ClaudeProxy:
                     return
 
                 finally:
+                    _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                     await _finish_cleanup(_close_stream_resources(pump_task, response))
 
         return _LifecycleStreamingResponse(
@@ -3023,16 +3110,17 @@ class AzureOpenAIProxy:
 
     def _record_usage(self, endpoint: AzureOpenAIEndpoint, model: str, input_tokens: int, output_tokens: int, elapsed: float,
                       cache_creation_tokens: int = 0, cache_read_tokens: int = 0,
-                      api_type: str = "chat"):
+                      api_type: str = "chat", *, generation_outcome="completed", usage_fields=None):
         """记录 token 用量和延迟指标"""
         # Prometheus histogram（提供 p50/p95/p99 分位数观测）
-        LATENCY_HISTOGRAM.observe("azure", api_type, elapsed, tenant=_CURRENT_TENANT.get())
+        if generation_outcome == "completed":
+            LATENCY_HISTOGRAM.observe("azure", api_type, elapsed, tenant=_CURRENT_TENANT.get())
         endpoint.total_input_tokens += input_tokens
         endpoint.total_output_tokens += output_tokens
         endpoint.total_cache_creation_tokens += cache_creation_tokens
         endpoint.total_cache_read_tokens += cache_read_tokens
         endpoint.total_response_time += elapsed
-        endpoint.successful_requests += 1
+        endpoint.successful_requests += int(generation_outcome == "completed")
         if model not in endpoint.model_stats:
             endpoint.model_stats[model] = {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0, "requests": 0}
         endpoint.model_stats[model]["input_tokens"] += input_tokens
@@ -3045,12 +3133,14 @@ class AzureOpenAIProxy:
         self.global_stats.total_cache_creation_tokens += cache_creation_tokens
         self.global_stats.total_cache_read_tokens += cache_read_tokens
         self.global_stats.total_response_time += elapsed
-        self.global_stats.successful_requests += 1
+        self.global_stats.successful_requests += int(generation_outcome == "completed")
         self.global_stats.total_requests += 1
-        if usage_store:
+        if usage_store and (usage_fields is None or usage_fields):
             usage_store.record(model, input_tokens, output_tokens,
                                cache_creation_tokens, cache_read_tokens,
-                               provider='azure_openai', tenant=_CURRENT_TENANT.get(), request_id=telemetry_request_id())
+                               provider='azure_openai', tenant=_CURRENT_TENANT.get(), request_id=telemetry_request_id(),
+                               generation_outcome=generation_outcome,usage_fields=usage_fields,
+                               is_error=generation_outcome != "completed")
 
     async def proxy_responses(self, body: dict, stream: bool = False):
         """代理 Azure OpenAI Responses API"""
@@ -3115,13 +3205,17 @@ class AzureOpenAIProxy:
                 result = await self._normal_request(
                     endpoint, url, body, headers, model, api_type, start_time
                 )
-                await end_attempt(success=True)
+                success,neutral = _buffered_settlement(result)
+                await end_attempt(success=success,is_client_error=neutral)
                 return result
             except asyncio.CancelledError:
                 cleanup_task = asyncio.create_task(
                     end_attempt(success=False, is_client_error=True, cancelled=True)
                 )
                 await asyncio.shield(cleanup_task)
+                raise
+            except _SemanticResponseError as exc:
+                await end_attempt(success=False,is_client_error=exc.neutral)
                 raise
             except httpx.HTTPStatusError as e:
                 last_error = e
@@ -3147,8 +3241,9 @@ class AzureOpenAIProxy:
                 if error_body.get("error", {}).get("code") == "upstream_html_error":
                     ids = error_body["error"].get("upstream_ids") or {}
                     _note_upstream_html(self, endpoint, "Azure", api_type, status, upstream_ids=ids)
+                _account_terminal_http_error(self,endpoint,model,start_time,api_type,e.response)
                 raise HTTPException(status_code=status, detail=error_body,
-                                    headers={"Retry-After": e.response.headers["Retry-After"]} if "Retry-After" in e.response.headers else None)
+                                    headers=_http_error_headers(e.response))
             except Exception as e:
                 last_error = e
                 self.global_stats.total_errors += 1
@@ -3184,22 +3279,7 @@ class AzureOpenAIProxy:
         response = await inference_call(self.client.post(url, json=body, headers=headers), 'azure_openai', api_type)
         response.raise_for_status()
 
-        elapsed = time.time() - start_time
-        resp_json = response.json()
-        note_json_result(resp_json, api_type)
-        usage = resp_json.get("usage", {})
-        if api_type == "chat":
-            input_tokens = usage.get("prompt_tokens", 0)
-            output_tokens = usage.get("completion_tokens", 0)
-            cache_read_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
-        else:
-            input_tokens = usage.get("input_tokens", 0)
-            output_tokens = usage.get("output_tokens", 0)
-            cache_read_tokens = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
-        _record_usage_best_effort(self, endpoint, model, input_tokens, output_tokens, elapsed,
-                          cache_read_tokens=cache_read_tokens, api_type=api_type)
-
-        return JSONResponse(content=resp_json, status_code=response.status_code)
+        return _buffered_result(self,endpoint,response,model,api_type,start_time)
 
     async def _stream_response(self, endpoint, url, body, headers, model: str, api_type: str, start_time: float, attempt_lease=None) -> StreamingResponse:
         """流式请求 - 透传 SSE，支持流内重试"""
@@ -3241,6 +3321,7 @@ class AzureOpenAIProxy:
 
             for attempt in range(max_retries):
                 response = None
+                observation = None
                 pump_task = None
 
                 try:
@@ -3254,7 +3335,7 @@ class AzureOpenAIProxy:
                             else:
                                 response = payload
 
-                    if response.status_code >= 400:
+                    if response.status_code >= 400 or invalid_stream_type(response.headers.get('content-type','')):
                         error_body = await _bounded_error_body(response)
                         is_client_error = 400 <= response.status_code < 500 and response.status_code not in (401, 403, 429)
                         try:
@@ -3293,6 +3374,7 @@ class AzureOpenAIProxy:
                                 await start_current_request(current_endpoint)
                                 continue
 
+                        _account_terminal_http_error(proxy_self,current_endpoint,model,start_time,api_type,response)
                         yield _sse_terminal_from_upstream_detail(api_type, upstream_detail)
                         return
 
@@ -3309,14 +3391,9 @@ class AzureOpenAIProxy:
                             sent_any_chunk = True
                             observation.observe(frame)
                             if observation.terminal:
-                                success = observation.terminal == "completed"
-                                await end_current_request(success=success, is_client_error=observation.neutral)
-                                if success:
-                                    _record_usage_best_effort(
-                                        proxy_self, current_endpoint, model,
-                                        observation.input_tokens, observation.output_tokens, time.time() - start_time,
-                                        cache_read_tokens=observation.cache_read_tokens,
-                                        api_type=api_type)
+                                success = observation.outcome == "completed"
+                                await end_current_request(success=success, is_client_error=observation.neutral or observation.outcome == "incomplete")
+                                _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                                 yield wire_output.frame(frame)
                                 return
                             yield wire_output.frame(frame)
@@ -3361,6 +3438,7 @@ class AzureOpenAIProxy:
                     return
 
                 finally:
+                    _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                     await _finish_cleanup(_close_stream_resources(pump_task, response))
 
         return _LifecycleStreamingResponse(
@@ -3530,7 +3608,21 @@ def _format_upstream_ids_suffix(ids: dict) -> str:
     return " ".join(f"{k}={v}" for k, v in ids.items())
 
 
-def _build_upstream_error_detail(
+def _build_upstream_error_detail(status, body_text, provider, endpoint_name, content_type=None,
+                                 upstream_headers=None, lb_request_id=None):
+    detail = _build_legacy_upstream_error_detail(status,body_text,provider,endpoint_name,
+                                                content_type,upstream_headers,lb_request_id)
+    try:
+        payload = json.loads(body_text)
+    except (ValueError,TypeError):
+        payload = None
+    detail = enrich_error(detail,status=status,payload=payload,headers=upstream_headers,
+                          request_id=lb_request_id or telemetry_request_id())
+    note_reason(detail['error']['reason'])
+    return detail
+
+
+def _build_legacy_upstream_error_detail(
     status: int,
     body_text: str,
     provider: str,
@@ -4517,15 +4609,16 @@ class CopilotProxy:
 
     def _record_usage(self, endpoint: CopilotEndpoint, model: str, input_tokens: int, output_tokens: int, elapsed: float,
                       cache_creation_tokens: int = 0, cache_read_tokens: int = 0,
-                      api_type: str = "chat"):
+                      api_type: str = "chat", *, generation_outcome="completed", usage_fields=None):
         # Prometheus histogram（提供 p50/p95/p99 分位数观测）
-        LATENCY_HISTOGRAM.observe("copilot", api_type, elapsed, tenant=_CURRENT_TENANT.get())
+        if generation_outcome == "completed":
+            LATENCY_HISTOGRAM.observe("copilot", api_type, elapsed, tenant=_CURRENT_TENANT.get())
         endpoint.total_input_tokens += input_tokens
         endpoint.total_output_tokens += output_tokens
         endpoint.total_cache_creation_tokens += cache_creation_tokens
         endpoint.total_cache_read_tokens += cache_read_tokens
         endpoint.total_response_time += elapsed
-        endpoint.successful_requests += 1
+        endpoint.successful_requests += int(generation_outcome == "completed")
         if model not in endpoint.model_stats:
             endpoint.model_stats[model] = {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0, "requests": 0}
         endpoint.model_stats[model]["input_tokens"] += input_tokens
@@ -4538,12 +4631,14 @@ class CopilotProxy:
         self.global_stats.total_cache_creation_tokens += cache_creation_tokens
         self.global_stats.total_cache_read_tokens += cache_read_tokens
         self.global_stats.total_response_time += elapsed
-        self.global_stats.successful_requests += 1
+        self.global_stats.successful_requests += int(generation_outcome == "completed")
         self.global_stats.total_requests += 1
-        if usage_store:
+        if usage_store and (usage_fields is None or usage_fields):
             usage_store.record(model, input_tokens, output_tokens,
                                cache_creation_tokens, cache_read_tokens,
-                               provider='copilot', tenant=_CURRENT_TENANT.get(), request_id=telemetry_request_id())
+                               provider='copilot', tenant=_CURRENT_TENANT.get(), request_id=telemetry_request_id(),
+                               generation_outcome=generation_outcome,usage_fields=usage_fields,
+                               is_error=generation_outcome != "completed")
 
     # ---- 请求构造 ----
 
@@ -5126,12 +5221,16 @@ class CopilotProxy:
                                     raise auth_error
                                 self.global_stats.total_errors += 1
                                 max_retries -= 1  # Count the explicit 401 replay, not a new admission.
-                        await end_attempt(success=True)
+                        success,neutral = _buffered_settlement(result)
+                        await end_attempt(success=success,is_client_error=neutral)
                         return result
                 except _UnsupportedModelError:
                     # 模型不被 Copilot 支持，向上层抛，由路由 fallback 到 Azure
                     self.global_stats.total_errors += 1
                     await end_attempt(success=False, is_client_error=True)
+                    raise
+                except _SemanticResponseError as exc:
+                    await end_attempt(success=False,is_client_error=exc.neutral)
                     raise
                 except httpx.HTTPStatusError as e:
                     last_error = e
@@ -5179,8 +5278,9 @@ class CopilotProxy:
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         continue
                     # 保留 upstream Retry-After（若上游给了），并沿用已带 HTML/upstream_ids 的 error_body
+                    _account_terminal_http_error(self,endpoint,model,start_time,api_type,e.response)
                     raise HTTPException(status_code=status, detail=error_body,
-                                        headers={"Retry-After": e.response.headers["Retry-After"]} if "Retry-After" in e.response.headers else None)
+                                        headers=_http_error_headers(e.response))
                 except httpx.PoolTimeout as e:
                     # Local client saturation is not an upstream endpoint failure.
                     last_error = e
@@ -5286,7 +5386,8 @@ class CopilotProxy:
                         endpoint, url, body, headers, model, api_type, start_time,
                         request_id=request_id, recovery=recovery,
                     )
-                    recovery.note_succeeded()
+                    if result.lb_assessment.outcome == 'completed':
+                        recovery.note_succeeded()
                     return result
                 recovery.note_exhausted(kind)
                 if kind == "orphaned_id":
@@ -5318,38 +5419,16 @@ class CopilotProxy:
                 )
                 # HTML challenge / 上游软故障统一按 502 抛，让客户端不误信 200 body。
                 # 保留 upstream_detail 的 error 结构 + upstream_ids 便于 debug。
-                raise HTTPException(status_code=502, detail=upstream_detail)
+                raise _SemanticResponseError(upstream_detail)
             if response.status_code >= 400:
                 response.raise_for_status()
-        elapsed = time.time() - start_time
-        resp_json = response.json()
-        note_json_result(resp_json, api_type)
-        usage = resp_json.get("usage", {}) or {}
-        if api_type == "responses":
-            input_tokens = usage.get("input_tokens", 0)
-            output_tokens = usage.get("output_tokens", 0)
-            cache_read_tokens = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
-        else:
-            input_tokens = usage.get("prompt_tokens", 0)
-            output_tokens = usage.get("completion_tokens", 0)
-            cache_read_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
-        _record_usage_best_effort(self, endpoint, model, input_tokens, output_tokens, elapsed,
-                           cache_read_tokens=cache_read_tokens, api_type=api_type)
-        # Same shape as the streaming `[Copilot stream_end]`: one row per request.
-        _log_copilot_request_end(
-            outcome="completed",
-            level=logging.INFO,
-            request_id=request_id,
-            endpoint_name=endpoint.name,
-            model=model,
-            api_type=api_type,
-            elapsed=elapsed,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_tokens=cache_read_tokens,
-        )
-        return JSONResponse(content=resp_json, status_code=response.status_code,
-                            headers=_request_id_response_headers(request_id))
+        result = _buffered_result(self,endpoint,response,model,api_type,start_time,_request_id_response_headers(request_id))
+        assessment = result.lb_assessment
+        _log_copilot_request_end(outcome=assessment.outcome,level=logging.INFO,
+            request_id=request_id,endpoint_name=endpoint.name,model=model,api_type=api_type,
+            elapsed=time.time()-start_time,input_tokens=assessment.usage.get('input_tokens',0),
+            output_tokens=assessment.usage.get('output_tokens',0),cache_read_tokens=assessment.usage.get('cache_read_tokens',0))
+        return result
 
     async def _stream_response(self, endpoint: CopilotEndpoint, url: str, body: dict, headers: dict,
                                 model: str, api_type: str, start_time: float,
@@ -5527,6 +5606,7 @@ class CopilotProxy:
             for attempt in range(max_retries):
                 stream_state["attempt"] = attempt
                 response = None
+                observation = None
                 pump_task = None
 
                 try:
@@ -5557,7 +5637,7 @@ class CopilotProxy:
                     # 现在同 status>=400 分支合并成一条 HTML 路径，都触发软熔断。
                     upstream_ct = response.headers.get("content-type", "") if response is not None else ""
                     upstream_ct_is_html = upstream_ct.strip().lower().startswith("text/html")
-                    if response.status_code >= 400 or upstream_ct_is_html:
+                    if response.status_code >= 400 or invalid_stream_type(upstream_ct):
                         error_body = await _bounded_error_body(response)
                         try:
                             error_text = error_body.decode("utf-8") if isinstance(error_body, bytes) else str(error_body)
@@ -5695,6 +5775,7 @@ class CopilotProxy:
                                 await start_current_request(current_endpoint)
                                 continue
 
+                        _account_terminal_http_error(proxy_self,current_endpoint,model,start_time,api_type,response)
                         yield _sse_terminal_from_upstream_detail(
                             api_type, upstream_detail, metadata=_sse_error_metadata()
                         )
@@ -5736,20 +5817,17 @@ class CopilotProxy:
                                 input_tokens=input_tokens, output_tokens=output_tokens,
                             )
                             if observation.terminal:
-                                success = observation.terminal == "completed"
+                                success = observation.outcome == "completed"
                                 # Settle before offering the terminal: clients may stop
                                 # immediately at it. Later transport close is cleanup,
                                 # not a second generation outcome or replay trigger.
-                                await end_current_request(success=success, is_client_error=observation.neutral)
+                                await end_current_request(success=success, is_client_error=observation.neutral or observation.outcome == "incomplete")
                                 if success:
                                     # 恢复只有走到合法终端事件才算成功：上游接受了改写
                                     # 后的请求但流仍被截断，不能记 succeeded（否则
                                     # succeeded 会变成「上游收下了」而不是「用户拿到了」）。
                                     recovery.note_succeeded()
-                                    _record_usage_best_effort(
-                                        proxy_self, current_endpoint, model, input_tokens, output_tokens,
-                                        time.time() - start_time, cache_read_tokens=cache_read_tokens,
-                                        api_type=api_type)
+                                _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                                 _emit_stream_end(observation.terminal, logging.INFO if success else logging.WARNING,
                                                  terminal_valid=True, account_neutral=observation.neutral)
                                 yield wire_output.frame(frame)
@@ -5925,6 +6003,7 @@ class CopilotProxy:
                     return
 
                 finally:
+                    _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                     await _finish_cleanup(_close_stream_resources(pump_task, response))
 
             # 结构性兜底：按上面的不变量（每个 continue 都要求 attempt < max_retries - 1）
@@ -6362,7 +6441,7 @@ async def lifespan(app: FastAPI):
             proxy.global_stats.total_cache_creation_tokens += mstats.get("cache_creation_tokens", 0)
             proxy.global_stats.total_cache_read_tokens += mstats.get("cache_read_tokens", 0)
             proxy.global_stats.total_requests += mstats.get("requests", 0)
-            proxy.global_stats.successful_requests += mstats.get("requests", 0)
+            proxy.global_stats.successful_requests += max(0,mstats.get("requests",0)-mstats.get("errors",0))
             restored_requests += mstats.get('requests',0)
             # 按模型恢复当天快照（供 /stats 计算 KPI Est. Cost 及 Anthropic Models 表使用）
             proxy.today_model_stats[model_name] = {
@@ -6407,6 +6486,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Databricks Claude Proxy (Native Anthropic)", lifespan=lifespan)
+
+
+@app.exception_handler(_SemanticResponseError)
+async def semantic_response_error(request,exc):
+    return JSONResponse(status_code=exc.status_code,content=exc.detail,headers=exc.headers)
 
 
 @app.middleware("http")
@@ -7600,7 +7684,9 @@ async def health_accepting():
     status = 'accepting' if accepting else 'draining' if draining else 'starting' if not initialized else 'not_configured'
     return JSONResponse(status_code=200 if accepting else 503,content={
         'status':status,'initialized':initialized,'draining':draining,
-        'active_requests':INFERENCE_ADMISSION.active,'queued_requests':len(INFERENCE_ADMISSION.waiters)})
+        'active_requests':INFERENCE_ADMISSION.active,'queued_requests':len(INFERENCE_ADMISSION.waiters),
+        'maintenance_paused':INFERENCE_ADMISSION.maintenance_paused,
+        'permanent_draining':INFERENCE_ADMISSION.permanent_draining,'release_control_version':2})
 
 
 @app.get("/metrics")
@@ -7925,6 +8011,7 @@ async def metrics():
         lines.append(hist_text.rstrip())
 
     lines.append(TELEMETRY.render().rstrip())
+    lines.append(CLEANUP.render().rstrip())
     lines.append(error_body_metrics().rstrip())
     lines.append(INFERENCE_ADMISSION.render_metrics().rstrip())
     if usage_store:

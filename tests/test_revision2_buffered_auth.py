@@ -33,7 +33,9 @@ class BufferedAuth(unittest.IsolatedAsyncioTestCase):
                 if status == "read_error":
                     writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n{")
                 else:
-                    payload = b'{"id":"synthetic","output":[],"choices":[],"usage":{}}'
+                    payload = json.dumps({'id':'synthetic','status':'completed','output':[],'usage':{'input_tokens':1,'output_tokens':1}}
+                                         if api == 'responses' else {'choices':[{'finish_reason':'stop','message':{'role':'assistant','content':'synthetic'}}],
+                                                                    'usage':{'prompt_tokens':1,'completion_tokens':1}}).encode()
                     writer.write(b"HTTP/1.1 " + str(status).encode() + b" Synthetic\r\n"
                                  b"Content-Type: application/json\r\nConnection: close\r\nContent-Length: "
                                  + str(len(payload)).encode() + b"\r\n\r\n" + payload)
