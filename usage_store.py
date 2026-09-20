@@ -10,15 +10,44 @@ The classes preserve their identity when imported back into main.py, so any
 the re-export in main.py.
 """
 import asyncio
+import copy
+from collections import deque
+import hashlib
 import json
 import logging
+import math
 import os
 import importlib.util
 import sys
+import time
+import uuid
+import anyio
 from datetime import date, datetime, timedelta
 from typing import Optional
 
 logger = logging.getLogger("main")
+
+IO_TIMEOUT = float(os.getenv('USAGE_IO_TIMEOUT_SECONDS','10'))
+MAX_BUFFER_EVENTS = int(os.getenv('USAGE_MAX_BUFFER_EVENTS','100000'))
+FLUSH_BATCH_EVENTS = int(os.getenv('USAGE_FLUSH_BATCH_EVENTS','1000'))
+if not math.isfinite(IO_TIMEOUT) or IO_TIMEOUT <= 0 or MAX_BUFFER_EVENTS < 1 or FLUSH_BATCH_EVENTS < 1:
+    raise ValueError('Usage persistence budgets must be finite and positive')
+
+
+async def _storage_cleanup(awaitable):
+    """Retain transaction/pool cleanup across repeated or level cancellation."""
+    task = asyncio.create_task(awaitable)
+    cancelled = None
+    with anyio.CancelScope(shield=True):
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+        result = task.result()
+    if cancelled is not None:
+        raise cancelled
+    return result
 
 # ==================== Usage Data Persistence ====================
 
@@ -27,6 +56,14 @@ class UsageDataStore:
 
     def __init__(self, retention_days: int = 0):
         self._buffer: list = []
+        self._pending_groups = deque()
+        self._inflight_batch = None
+        self._flush_failures = 0
+        self._flush_successes = 0
+        self._rejected_events = 0
+        self._last_success = 0.0
+        self._backend_ready = False
+        self._last_error_type = None
         self._lock = asyncio.Lock()
         self._flush_task: Optional[asyncio.Task] = None
         self._today_cache: dict = {}
@@ -36,18 +73,23 @@ class UsageDataStore:
 
     async def start(self):
         try:
-            await self._backend_start()
-            today = date.today()
-            self._today_date = today
-            self._today_cache = await self._load_day(today)
-            self._flush_task = asyncio.create_task(self._periodic_flush())
-            if self.retention_days > 0:
-                deleted = await self._delete_before(today - timedelta(days=self.retention_days))
-                if deleted:
-                    logger.info(f"Auto-cleanup: deleted {deleted} expired records (retention={self.retention_days}d)")
-                self._last_cleanup_date = today
+            async with asyncio.timeout(IO_TIMEOUT):
+                await self._backend_start()
+                today = date.today()
+                self._today_date = today
+                self._today_cache = await self._load_day(today)
+                self._backend_ready = True
+                if self.retention_days > 0:
+                    deleted = await self._delete_before(today - timedelta(days=self.retention_days))
+                    if deleted:
+                        logger.info(f"Auto-cleanup: deleted {deleted} expired records (retention={self.retention_days}d)")
+                    self._last_cleanup_date = today
         except Exception as e:
+            self._backend_ready = False
+            self._last_error_type = type(e).__name__
             logger.error(f"Failed to initialize usage data store: {e}")
+        # Statistics failure must not permanently disable the recovery loop.
+        self._flush_task = asyncio.create_task(self._periodic_flush())
 
     async def stop(self):
         if self._flush_task:
@@ -56,13 +98,32 @@ class UsageDataStore:
                 await self._flush_task
             except asyncio.CancelledError:
                 pass
-        await self._flush()
-        await self._backend_stop()
+        try:
+            while self._buffer or self._pending_groups:
+                await self._flush()
+        finally:
+            await self._backend_stop()
 
     def record(self, model: str, input_tokens: int, output_tokens: int,
                cache_creation_tokens: int = 0, cache_read_tokens: int = 0,
-               is_error: bool = False):
+               is_error: bool = False, *, provider: str = 'unknown',
+               tenant: str = 'default', request_id: Optional[str] = None):
+        if not isinstance(model,str) or not model or len(model)>128:
+            raise ValueError('Usage model must fit the persisted model identifier')
+        model.encode('utf-8')
+        if not all(type(value) is int and 0 <= value < 2**63 for value in
+                   (input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens)):
+            raise ValueError('Usage token counts must be nonnegative int64 values')
+        if self.persistence_stats()['pending_events'] >= MAX_BUFFER_EVENTS:
+            self._rejected_events += 1
+            raise BufferError('Usage event buffer is full; inference must not be replayed')
+        event_time = datetime.now().astimezone()
         self._buffer.append({
+            'event_id':str(uuid.uuid4()),
+            'event_date':event_time.date().isoformat(),
+            'recorded_at':event_time.isoformat(),
+            'recorded_at_unix':event_time.timestamp(),
+            'provider':provider,'tenant':tenant,'request_id':request_id,
             "model": model,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
@@ -78,11 +139,13 @@ class UsageDataStore:
     async def _periodic_flush(self):
         # P2.5 self-heal: 内层 try 已经把 flush + cleanup 包住；外层新增 sleep 也包
         # 在 try 里以防 CancelledError 之外的异常从 sleep 抛出（罕见但曾发生过）。
+        delay = 30
         while True:
             try:
-                await asyncio.sleep(30)
+                await asyncio.sleep(delay)
                 try:
                     await self._flush()
+                    delay = 0 if self.persistence_stats()['pending_events'] >= FLUSH_BATCH_EVENTS else 30
                     if self.retention_days > 0:
                         today = date.today()
                         if self._last_cleanup_date != today:
@@ -91,10 +154,12 @@ class UsageDataStore:
                                 logger.info(f"Daily cleanup: deleted {deleted} expired records")
                             self._last_cleanup_date = today
                 except Exception as e:
+                    delay = 30
                     logger.error(f"Usage data flush error: {e}")
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                delay = 30
                 logger.error(
                     f"Usage data periodic loop unexpected error, backing off 5s: {type(e).__name__}: {e}"
                 )
@@ -126,55 +191,80 @@ class UsageDataStore:
 
     async def _flush(self):
         async with self._lock:
-            pending, self._buffer = self._buffer, []
-            if not pending:
+            if not self._buffer and not self._pending_groups:
                 return
+            # Retain moved events before any await. New record() calls append to
+            # the independent buffer while this bounded snapshot is persisted.
+            if not self._pending_groups:
+                pending = self._buffer[:FLUSH_BATCH_EVENTS]
+                del self._buffer[:len(pending)]
+                groups = {}
+                for event in pending:
+                    groups.setdefault(event['event_date'],[]).append(event)
+                self._pending_groups.extend((date.fromisoformat(day),events) for day,events in sorted(groups.items()))
+            try:
+                await self._ensure_backend()
+                while self._pending_groups:
+                    day,events = self._pending_groups[0]
+                    if self._inflight_batch is None:
+                        if day == self._today_date and self._today_cache:
+                            base = self._today_cache
+                        else:
+                            async with asyncio.timeout(IO_TIMEOUT):
+                                base = await self._load_day(day)
+                        cumulative = copy.deepcopy(base) if base.get('models') else self._empty_day(day)
+                        batch = self._empty_day(day)
+                        batch.update(batch_id=str(uuid.uuid4()),schema_version=1,events=copy.deepcopy(events))
+                        for event in events:
+                            for target in (batch,cumulative):
+                                m = target['models'].setdefault(event['model'],self._empty_model())
+                                totals = target['totals']
+                                for key in ('input_tokens','output_tokens','cache_creation_tokens','cache_read_tokens'):
+                                    m[key] += event[key];totals[key] += event[key]
+                                m['requests'] += 1;totals['requests'] += 1
+                                if event.get('is_error'):
+                                    m['errors'] += 1;totals['errors'] += 1
+                        stamp = datetime.now().astimezone().isoformat()
+                        batch['last_updated'] = cumulative['last_updated'] = stamp
+                        self._inflight_batch = (day,batch,cumulative)
+                    day,batch,cumulative = self._inflight_batch
+                    async with asyncio.timeout(IO_TIMEOUT):
+                        await self._save_day_delta(day,batch,cumulative)
+                    # No await between acknowledgement and local settlement.
+                    if day == date.today():
+                        self._today_date,self._today_cache = day,cumulative
+                    self._pending_groups.popleft()
+                    self._inflight_batch = None
+                    self._flush_successes += 1
+                    self._last_success = time.time()
+                    self._backend_ready = True
+                    self._last_error_type = None
+            except Exception as exc:
+                self._flush_failures += 1
+                self._backend_ready = False
+                self._last_error_type = type(exc).__name__
+                raise
 
-            today = date.today()
-            if self._today_date != today:
-                self._today_cache = await self._load_day(today)
-                self._today_date = today
+    async def _ensure_backend(self):
+        pass
 
-            if "models" not in self._today_cache:
-                self._today_cache = self._empty_day(today)
+    def persistence_stats(self):
+        return {'pending_events':len(self._buffer)+sum(len(events) for _,events in self._pending_groups),
+                'pending_groups':len(self._pending_groups),'inflight_batch':int(self._inflight_batch is not None),
+                'flush_failures_total':self._flush_failures,'flush_successes_total':self._flush_successes,
+                'rejected_events_total':self._rejected_events,'last_success_timestamp_seconds':self._last_success,
+                'backend_ready':int(self._backend_ready),'last_error_type':self._last_error_type}
 
-            # 两份数据同步累：
-            #   _today_cache —— 当天累计，/stats 与 dashboard 读它，重启时由
-            #                    _load_day 从后端种回，语义不变
-            #   batch        —— 仅本次 flush 的增量，交给 _save_day_delta。
-            #                    多写后端（MySQL）用它做 col = col + VALUES(col)，
-            #                    这样多副本不会互相覆盖对方的量
-            batch = self._empty_day(today)
-            models = self._today_cache["models"]
-            totals = self._today_cache["totals"]
-            b_models = batch["models"]
-            b_totals = batch["totals"]
-            for delta in pending:
-                m = delta["model"]
-                if m not in models:
-                    models[m] = self._empty_model()
-                if m not in b_models:
-                    b_models[m] = self._empty_model()
-                for field in ("input_tokens", "output_tokens",
-                              "cache_creation_tokens", "cache_read_tokens"):
-                    models[m][field] += delta[field]
-                    b_models[m][field] += delta[field]
-                    totals[field] += delta[field]
-                    b_totals[field] += delta[field]
-                models[m]["requests"] += 1
-                b_models[m]["requests"] += 1
-                totals["requests"] += 1
-                b_totals["requests"] += 1
-                if delta.get("is_error"):
-                    models[m]["errors"] = models[m].get("errors", 0) + 1
-                    b_models[m]["errors"] = b_models[m].get("errors", 0) + 1
-                    totals["errors"] += 1
-                    b_totals["errors"] += 1
-
-            stamp = datetime.now().astimezone().isoformat()
-            self._today_cache["last_updated"] = stamp
-            batch["last_updated"] = stamp
-            await self._save_day_delta(today, batch, self._today_cache)
+    def render_metrics(self):
+        lines = []
+        for key,value in self.persistence_stats().items():
+            if key == 'last_error_type':
+                continue
+            name = 'lb_usage_'+key
+            kind = 'counter' if key.endswith('_total') else 'gauge'
+            lines.extend([f'# HELP {name} Usage persistence state; separate from generation outcome',
+                          f'# TYPE {name} {kind}',f'{name} {value}'])
+        return '\n'.join(lines)+'\n'
 
     def get_today_data(self) -> dict:
         return self._today_cache if self._today_cache else {}
@@ -234,25 +324,35 @@ class JsonUsageStore(UsageDataStore):
 
     async def _save_day(self, d: date, data: dict):
         path = self._day_path(d)
-        try:
+        def write():
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            tmp_path = path + ".tmp"
-            with open(tmp_path, "w") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            os.replace(tmp_path, path)
-        except IOError as e:
-            logger.error(f"Failed to write usage data {path}: {e}")
+            tmp_path = path + '.' + uuid.uuid4().hex + '.tmp'
+            try:
+                with open(tmp_path, 'x') as f:
+                    json.dump(data,f,indent=2,ensure_ascii=False,allow_nan=False)
+                    f.flush();os.fsync(f.fileno())
+                os.replace(tmp_path,path)
+                fd = os.open(os.path.dirname(path),os.O_RDONLY)
+                try:os.fsync(fd)
+                finally:os.close(fd)
+            finally:
+                if os.path.exists(tmp_path):os.unlink(tmp_path)
+        # Keep the worker owned on cancellation: a late old overwrite must not
+        # race a newer batch. Disk work no longer blocks the application's loop.
+        await _storage_cleanup(asyncio.to_thread(write))
 
     async def _load_day(self, d: date) -> dict:
         path = self._day_path(d)
-        if not os.path.exists(path):
-            return {}
-        try:
-            with open(path, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            logger.warning(f"Failed to load usage data {path}: {e}")
-            return {}
+        def read():
+            try:
+                with open(path,'r') as f:
+                    data = json.load(f)
+            except FileNotFoundError:
+                return {}
+            if not isinstance(data,dict) or not all(isinstance(data.get(k),dict) for k in ('models','totals')):
+                raise ValueError('Invalid persisted usage day shape; refusing to overwrite')
+            return data
+        return await _storage_cleanup(asyncio.to_thread(read))
 
     async def _delete_before(self, cutoff: date) -> int:
         deleted = 0
@@ -285,6 +385,7 @@ class MysqlUsageStore(UsageDataStore):
         super().__init__(retention_days)
         self._mysql_config = mysql_config
         self._pool = None
+        self._backend_lock = asyncio.Lock()
 
     async def _backend_start(self):
         import aiomysql
@@ -301,7 +402,23 @@ class MysqlUsageStore(UsageDataStore):
             autocommit=True,
             charset="utf8mb4",
             ssl=ssl_ctx,
+            connect_timeout=IO_TIMEOUT,
         )
+        try:
+            await self._create_schema()
+        except BaseException:
+            await self._backend_stop()
+            raise
+        logger.info(f"MySQL usage store initialized: {self._mysql_config.get('host')}:{self._mysql_config.get('port')}/{self._mysql_config.get('database')}")
+
+    async def _ensure_backend(self):
+        if self._pool is None or getattr(self._pool,'closed',False):
+            async with self._backend_lock:
+                if self._pool is None or getattr(self._pool,'closed',False):
+                    async with asyncio.timeout(IO_TIMEOUT):
+                        await self._backend_start()
+
+    async def _create_schema(self):
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute("""
@@ -318,12 +435,23 @@ class MysqlUsageStore(UsageDataStore):
                         PRIMARY KEY (date, model)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
-        logger.info(f"MySQL usage store initialized: {self._mysql_config.get('host')}:{self._mysql_config.get('port')}/{self._mysql_config.get('database')}")
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS usage_batch_ledger (
+                        batch_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+                        event_date DATE NOT NULL,
+                        payload_sha256 CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+                        payload JSON NULL,
+                        created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+                        PRIMARY KEY (batch_id),
+                        KEY usage_batch_event_date (event_date)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
 
     async def _backend_stop(self):
         if self._pool:
-            self._pool.close()
-            await self._pool.wait_closed()
+            pool,self._pool = self._pool,None
+            pool.close()
+            await _storage_cleanup(pool.wait_closed())
 
     async def _save_day_delta(self, d: date, delta: dict, cumulative: dict):
         """增量累加落盘 —— 多副本安全。
@@ -339,14 +467,38 @@ class MysqlUsageStore(UsageDataStore):
         这条路径。
         """
         if not self._pool:
-            return
+            raise RuntimeError('MySQL usage pool is unavailable; batch remains pending')
         models = delta.get("models", {})
         if not models:
             return
+        batch_id = delta.get('batch_id')
+        if not isinstance(batch_id,str) or not batch_id:
+            raise ValueError('A stable usage batch ID is required')
+        payload = json.dumps(delta,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False)
+        payload_hash = hashlib.sha256(payload.encode()).hexdigest()
+        import aiomysql
         async with self._pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                for model_name, mstats in models.items():
-                    await cur.execute("""
+            try:
+                await conn.begin()
+                async with conn.cursor() as cur:
+                    try:
+                        await cur.execute("""
+                            INSERT INTO usage_batch_ledger (batch_id, event_date, payload_sha256, payload)
+                            VALUES (%s, %s, %s, %s)
+                        """,(batch_id,d.isoformat(),payload_hash,payload))
+                    except aiomysql.IntegrityError as exc:
+                        if exc.args[0] != 1062:
+                            raise
+                        await cur.execute('SELECT payload_sha256 FROM usage_batch_ledger WHERE batch_id = %s FOR UPDATE',(batch_id,))
+                        row = await cur.fetchone()
+                        if not row or row[0] != payload_hash:
+                            raise ValueError('Usage batch ID was reused with different content') from exc
+                        await _storage_cleanup(conn.rollback())
+                        return  # The matching transaction was already committed.
+                    # Stable lock ordering reduces multi-writer deadlock risk.
+                    for model_name in sorted(models):
+                        mstats = models[model_name]
+                        await cur.execute("""
                         INSERT INTO usage_daily (date, model, input_tokens, output_tokens,
                             cache_creation_tokens, cache_read_tokens, requests, errors)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -357,15 +509,25 @@ class MysqlUsageStore(UsageDataStore):
                             cache_read_tokens = cache_read_tokens + VALUES(cache_read_tokens),
                             requests = requests + VALUES(requests),
                             errors = errors + VALUES(errors)
-                    """, (d.isoformat(), model_name,
+                        """, (d.isoformat(), model_name,
                           mstats.get("input_tokens", 0), mstats.get("output_tokens", 0),
                           mstats.get("cache_creation_tokens", 0), mstats.get("cache_read_tokens", 0),
                           mstats.get("requests", 0),
-                          mstats.get("errors", 0)))
+                              mstats.get("errors", 0)))
+                await conn.commit()
+            except BaseException:
+                try:
+                    await _storage_cleanup(conn.rollback())
+                except asyncio.CancelledError:
+                    conn.close()
+                    raise
+                except BaseException:
+                    conn.close()  # Never return a connection with uncertain transaction state.
+                raise
 
     async def _load_day(self, d: date) -> dict:
         if not self._pool:
-            return {}
+            raise RuntimeError('MySQL usage pool is unavailable')
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -389,13 +551,35 @@ class MysqlUsageStore(UsageDataStore):
             totals["errors"] += errs
         return {"date": d.isoformat(), "models": models, "totals": totals}
 
+    async def get_day_data(self, d: date) -> Optional[dict]:
+        # The backend, rather than a per-process cache, owns the multi-pod total.
+        await self._ensure_backend()
+        async with asyncio.timeout(IO_TIMEOUT):
+            return await self._load_day(d) or None
+
     async def _delete_before(self, cutoff: date) -> int:
         if not self._pool:
-            return 0
+            raise RuntimeError('MySQL usage pool is unavailable')
         async with self._pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute("DELETE FROM usage_daily WHERE date < %s", (cutoff.isoformat(),))
-                return cur.rowcount
+            try:
+                await conn.begin()
+                async with conn.cursor() as cur:
+                    await cur.execute("DELETE FROM usage_daily WHERE date < %s", (cutoff.isoformat(),))
+                    deleted = cur.rowcount
+                    # Keep only the minimum idempotency receipt. Event details
+                    # follow the same retention cutoff as the daily aggregate.
+                    await cur.execute('UPDATE usage_batch_ledger SET payload = NULL WHERE event_date < %s', (cutoff.isoformat(),))
+                await conn.commit()
+                return deleted
+            except BaseException:
+                try:
+                    await _storage_cleanup(conn.rollback())
+                except asyncio.CancelledError:
+                    conn.close()
+                    raise
+                except BaseException:
+                    conn.close()
+                raise
 
 
 def create_usage_store(storage_config: dict) -> UsageDataStore:
@@ -412,4 +596,3 @@ def create_usage_store(storage_config: dict) -> UsageDataStore:
             sys.exit(1)
         return MysqlUsageStore(storage_config, retention)
     return JsonUsageStore(storage_config.get("path", "./usage_data"), retention)
-

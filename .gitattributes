@@ -1,0 +1,2 @@
+# Preserve original context whitespace in the read-only production source diff.
+docs/reviews/2026-09-20-service-optimization/production-main-diff.patch -whitespace

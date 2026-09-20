@@ -58,7 +58,7 @@ jobs:
             set -e
             cd /app
             # 首先所有已拆模块/资源必须都在镜像里
-            for f in main.py usage_store.py otel_setup.py dashboard.html; do
+            for f in main.py effort_compat.py request_telemetry.py request_budget.py admission.py gateway_lifecycle.py upstream_body.py usage_store.py otel_setup.py dashboard.html; do
               [ -f "$f" ] || { echo "MISSING: $f"; exit 1; }
             done
             # 其次 main.py 顶层能 import，OSErr 不降级隐藏
@@ -91,3 +91,30 @@ jobs:
           print(f"dashboard OK: {len(h)} chars")
           PY
           '
+
+  mysql-usage:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          # Disposable CI service only; no production credentials or data.
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_ROOT_HOST: "%"
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 --silent"
+          --health-interval=5s --health-timeout=3s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install runtime dependencies
+        run: pip install -r requirements.txt
+      - name: Verify real MySQL usage transactions
+        env:
+          LB_TEST_MYSQL_ISOLATED: "1"
+        run: python -m unittest discover -s tests/integration -p test_mysql_usage.py -v

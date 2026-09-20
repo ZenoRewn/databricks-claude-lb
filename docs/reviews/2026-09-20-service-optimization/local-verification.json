@@ -1,0 +1,37 @@
+{
+  "author": "Zeno Ren",
+  "scope": "Local synthetic storage failure using unchanged usage_store.py; no real database or production call",
+  "failure_snapshot": {
+    "pending": 0,
+    "cached_requests": 1,
+    "durable_batches": 0
+  },
+  "subsequent_flush_after_backend_recovery": {
+    "pending": 0,
+    "durable_batches": 0
+  },
+  "interpretation": "Failed delta is not retained for a later flush; cache count is not a persistence receipt. Production data loss is not established.",
+  "baseline_suite": {
+    "command": "python3 -m pytest tests -q",
+    "python": "3.14.5",
+    "passed": 469,
+    "subtests_passed": 421,
+    "seconds": 36.65,
+    "production_validation": false
+  },
+  "document_qa": {
+    "markdown_parsed": true,
+    "tables": 9,
+    "mermaid_svg_rendered": true,
+    "mermaid_syntax_error": false,
+    "desktop_viewport_width": 1280,
+    "document_scroll_width": 1280,
+    "visual_review": [
+      "opening summary",
+      "architecture diagram",
+      "implementation table"
+    ],
+    "relative_links_valid": true,
+    "report_sha256": "833a4d06822ce77ae3468c2a5234310baeb775bfa5e434e81c2bc4ecbf8b0081"
+  }
+}

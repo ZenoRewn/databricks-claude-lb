@@ -131,6 +131,13 @@ class RejectionShapeTests(_Client):
         self.assertTrue(r.headers["content-type"].startswith("application/json"))
         self.assertEqual(r.json()["detail"]["error"]["type"], "request_too_large")
 
+    def test_json_body_must_be_an_object_before_routing(self):
+        for path in ('/v1/messages', '/v1/responses', '/v1/chat/completions'):
+            for value in ([], None, 'not-an-object'):
+                with self.subTest(path=path, value=value):
+                    response = self.client.post(path, content=json.dumps(value),
+                                                headers={'Authorization': f'Bearer {KEY}', 'Content-Type':'application/json'})
+                    self.assertEqual(response.status_code, 400)
     def test_invalid_json_returns_400_json(self):
         r = self.client.post("/v1/responses", content=b"{not json",
                              headers={"Authorization": f"Bearer {KEY}",
@@ -193,6 +200,14 @@ class ImageAdmissionOverHttpTests(_Client):
         self.assertEqual(r.status_code, 413)
         self.assertTrue(r.headers["content-type"].startswith("application/json"))
         self.assertEqual(r.json()["detail"]["error"]["type"], "request_too_large")
+
+
+class ModelShapeTests(_Client):
+    def test_provided_model_must_be_a_nonempty_string(self):
+        for path in ('/v1/messages','/v1/responses','/v1/chat/completions'):
+            for model in (None,[],0,'   '):
+                with self.subTest(path=path,model=model):
+                    self.assertEqual(self.post(path,{'model':model}).status_code,400)
 
 
 if __name__ == "__main__":

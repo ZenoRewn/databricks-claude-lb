@@ -1,0 +1,162 @@
+{
+  "author": "Zeno Ren",
+  "validated_at_utc": "2026-09-20T09:04:45.381367+00:00",
+  "scope": "Local candidate only. No production or OpenClaw mutations; no real model inference.",
+  "runtime_commit": "e4dde8df39060f8b6b2df60ea32d38d9077c607f",
+  "branch": "codex/service-reliability-20260920",
+  "local_suite": {
+    "python": "3.14.5",
+    "passed": 568,
+    "skipped": 6,
+    "subtests_passed": 481,
+    "skips": "Real MySQL cases are run separately."
+  },
+  "baked_image_suite": {
+    "python": "3.12.14 (main, Sep 19 2026, 01:04:57) [GCC 14.2.0]",
+    "platform": "linux/amd64",
+    "passed": 567,
+    "skipped": 7,
+    "subtests_passed": 481,
+    "skips": "Six isolated MySQL cases run separately; one optional OTel enabled test skipped because default image excludes its dependencies.",
+    "application_code_overlay": false
+  },
+  "real_mysql": {
+    "version": "8.0.46",
+    "passed": 6,
+    "isolated_network": true,
+    "application_code_overlay": false
+  },
+  "startup_drain_smoke": {
+    "before_drain": {
+      "status": "accepting",
+      "initialized": true,
+      "draining": false,
+      "active_requests": 0,
+      "queued_requests": 0
+    },
+    "settings": {
+      "inference_total_timeout_seconds": 1800.0,
+      "upstream_startup_timeout_seconds": 180.0,
+      "inference_max_active": 128,
+      "inference_body_memory_bytes": 134217728,
+      "usage_io_timeout_seconds": 10.0
+    },
+    "drain_command": {
+      "draining_requested": true,
+      "drained": true,
+      "marker": "/tmp/claude-lb-draining"
+    },
+    "after_drain": {
+      "status": "draining",
+      "initialized": true,
+      "draining": true,
+      "active_requests": 0,
+      "queued_requests": 0
+    },
+    "rejected_request": {
+      "error": {
+        "code": "lb_overloaded",
+        "reason": "draining",
+        "message": "Local inference admission unavailable; retry after cooldown."
+      }
+    },
+    "upstream_send_invocations": 0
+  },
+  "image": {
+    "tag": "claude-lb:reliability-review-20260920-r2",
+    "local_image_id": "sha256:eefe8f7e02bf3c983a31f7498965bbbbe1b948b3a5fe0b739712c6869c488347",
+    "architecture": "amd64",
+    "registry_pushed": false
+  },
+  "source_hashes": {
+    "requirements.txt": "463982d4f43a7f79abef6878304de017533b4446f7afde279e075ff376241703",
+    "main.py": "d2557262d21c25f9828ea4c1a22adddb7f33327f392fcc974c0efac544b66e95",
+    "effort_compat.py": "fbf6bcdd8cc2093245e2d94036d532016d9661fc7768c0b435b77963225dc47c",
+    "request_telemetry.py": "2a2ad7d162e8b7bd6389a0070cc13a62a17a65e50c0ba440daf5737284c6122a",
+    "request_budget.py": "0e26b6b14135461a8ae6ab86aa0e4234e5b507d6261b2bcbefcfad6ce9c2b4a4",
+    "admission.py": "6bc512c6423091cedec77fd0905a183792691c501127fbc91412983015afc54c",
+    "gateway_lifecycle.py": "69f636e5565d99d1d42304cfedcdacb59ca428928cca33cf8792bc2f0b029489",
+    "upstream_body.py": "639f2416464e39b850af94ab037713d2a8bc03b66ea73cc64e0d9c7d60c7d4fd",
+    "usage_store.py": "52a4e7a5ecd3b935a3157fed323d2df5bfdbc9187a86523024b363dd703bb787",
+    "otel_setup.py": "e68dfe8cef208c42d39f14ad8d5cc3d9b4eb909c68e3336d22937669ebba1cce",
+    "dashboard.html": "9de9a5ee438ce8a85795b6217f85ef0639fc7059f3fd821e3d8cb617bed11d4a"
+  },
+  "dependency_versions": {
+    "fastapi": "0.141.1",
+    "httpx": "0.28.1",
+    "starlette": "1.6.0",
+    "pydantic": "2.13.5",
+    "anyio": "4.15.1",
+    "aiomysql": "0.3.2"
+  },
+  "wheel_hashes": {
+    "aiomysql-0.3.2-py3-none-any.whl": "c82c5ba04137d7afd5c693a258bea8ead2aad77101668044143a991e04632eb2",
+    "annotated_doc-0.0.5-py3-none-any.whl": "117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101",
+    "annotated_types-0.8.0-py3-none-any.whl": "f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0",
+    "anyio-4.15.1-py3-none-any.whl": "6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101",
+    "certifi-2026.7.22-py3-none-any.whl": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+    "click-8.5.0-py3-none-any.whl": "255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360",
+    "fastapi-0.141.1-py3-none-any.whl": "bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3",
+    "h11-0.16.0-py3-none-any.whl": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86",
+    "h2-4.4.1-py3-none-any.whl": "0e25f1462b23c9cb82d9eb02e28bc706dac2a68cb457c6a0d74d63c8a2a5d0e6",
+    "hpack-4.2.0-py3-none-any.whl": "858ac0b02280fa582b5080d68db0899c62a80375e0e5413a74970c5e518b6986",
+    "httpcore-1.0.9-py3-none-any.whl": "2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55",
+    "httpx-0.28.1-py3-none-any.whl": "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad",
+    "hyperframe-6.1.0-py3-none-any.whl": "b03380493a519fce58ea5af42e4a42317bf9bd425596f7a0835ffce80f1a42e5",
+    "idna-3.19-py3-none-any.whl": "815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4",
+    "pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl": "78cb2c6865a35ab8ff8b75fd122f6033b92a62c82801110e48ddd6c936a45d91",
+    "pydantic-2.13.5-py3-none-any.whl": "346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73",
+    "pydantic_core-2.46.5-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl": "0fc5be0abd4a407e200d844b404e33639a554e7bd0d448e7b9ae181be4789ac2",
+    "pymysql-1.2.0-py3-none-any.whl": "62169ce6d5510f08e140c5e7990ee884a9764024e4a9a27b2cc11f1099322ae0",
+    "pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl": "ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc",
+    "starlette-1.6.0-py3-none-any.whl": "a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c",
+    "typing_extensions-4.16.0-py3-none-any.whl": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+    "typing_inspection-0.4.4-py3-none-any.whl": "65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147",
+    "uvicorn-0.52.4-py3-none-any.whl": "f86e41a149d7d05a9969337e3946a9c171c06a5d42680896daaba624aeac8da1"
+  },
+  "build": {
+    "mode": "Local PyPI wheelhouse replaces dependency download only; application COPY list unchanged.",
+    "ordinary_online_build": "blocked by container PyPI TLS EOF; no certificate validation was disabled",
+    "repository_dockerfile_sha256": "2f2fa7f4c6520cb53330a0a58544ef2f964d0d8643f079833b324e4274faad15",
+    "validation_dockerfile_sha256": "99f667766c89595c4e20d020caa0a0b3c0d3a5807d10beaa5939ba80a56a6a32"
+  },
+  "not_validated": [
+    "Production rollout",
+    "Real OpenClaw/SDK/model E2E",
+    "Provider feature/capacity contracts",
+    "Sustained load and node maintenance",
+    "OTel exporter pipeline"
+  ],
+  "known_boundaries": [
+    "Pending usage events are in memory; no zero-RPO claim on process/Pod loss.",
+    "New MySQL ledger requires schema review before deployment.",
+    "Local budgets need real-workload calibration.",
+    "No broad 503 replay or automatic model/provider substitution was added."
+  ],
+  "shutdown_smoke": {
+    "application_shutdown_complete_log": true,
+    "container_exit_code": 143,
+    "stop_signal": "SIGTERM; 143 is the signal exit after Uvicorn cleanup, not a claimed exit 0"
+  },
+  "document_qa": {
+    "markdown_rendered": true,
+    "desktop_viewport_width": 1280,
+    "document_scroll_width": 1280,
+    "table_count": 5,
+    "visual_review": [
+      "completion summary",
+      "OpenClaw metric handoff table"
+    ],
+    "relative_links_valid": true,
+    "document_hashes": {
+      "docs/SERVICE_RELIABILITY.md": "596e47c413b1bfcde661da82423a4847e298e79dd56c2b9d0483df2d7036a627",
+      "docs/OPENCLAW_UPDATE_HANDOFF.md": "8d8088728ee7d9b10fb535191f63ecbf9d8a5876124dc994ff1918f3431a8125",
+      "docs/OPTIMIZATION_PROGRESS.md": "92a37212db6ce6a425d187fa828c68e5e8a653ae1f8c173d70df78ff3eb2ad23"
+    }
+  },
+  "fixture_cleanup": {
+    "owned_mysql_container_removed": true,
+    "owned_smoke_container_removed": true,
+    "production_untouched": true
+  }
+}

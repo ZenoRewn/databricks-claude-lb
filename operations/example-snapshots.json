@@ -1,0 +1,32 @@
+{
+  "author": "Zeno Ren",
+  "description": "Synthetic fixture only; not production observations.",
+  "metric_units": {
+    "copilot_endpoint_requests_total": "endpoint_admissions",
+    "copilot_endpoint_errors_total": "endpoint_errors",
+    "copilot_input_item_ids_stripped_total": "fields"
+  },
+  "snapshots": [
+    {
+      "timestamp": "2026-09-19T01:30:12Z",
+      "pod_uid": "synthetic-pod-a",
+      "container_start_time": "2026-09-18T00:00:00Z",
+      "collection_status": "ok",
+      "metrics": {"copilot_endpoint_requests_total": 10, "copilot_endpoint_errors_total": 1, "copilot_input_item_ids_stripped_total": 20}
+    },
+    {
+      "timestamp": "2026-09-19T02:00:00Z",
+      "pod_uid": "synthetic-pod-a",
+      "container_start_time": "2026-09-18T00:00:00Z",
+      "collection_status": "ok",
+      "metrics": {"copilot_endpoint_requests_total": 14, "copilot_endpoint_errors_total": 1, "copilot_input_item_ids_stripped_total": 24}
+    },
+    {
+      "timestamp": "2026-09-19T02:30:12Z",
+      "pod_uid": "synthetic-pod-a",
+      "container_start_time": "2026-09-18T00:00:00Z",
+      "collection_status": "ok",
+      "metrics": {"copilot_endpoint_requests_total": 19, "copilot_endpoint_errors_total": 1, "copilot_input_item_ids_stripped_total": 30}
+    }
+  ]
+}

@@ -1,5 +1,9 @@
 # Databricks Claude Load Balancer
 
+Author: Zeno Ren
+
+可靠性优化的实现范围、指标口径和验证边界见 [服务可靠性说明](docs/SERVICE_RELIABILITY.md)。
+
 一个智能负载均衡代理，统一对接 **Databricks Claude**、**Azure OpenAI** 和 **GitHub Copilot** 三套上游，按模型自动路由。
 
 **运行契约：** [SSE framing、8 MiB/64 MiB 可配置资源策略、Copilot `api_types` 兼容性](docs/STREAM_PROTOCOL.md)。这些字节预算不是模型 token 上限或上游截断结论。
@@ -190,14 +194,15 @@ docker-compose up -d
 | `/v1/chat/completions` | POST | 需要 | OpenAI Chat Completions API（按模型分流：同上） |
 | `/health`、`/health/live` | GET | 不需要 | Liveness probe（仅检查进程） |
 | `/health/ready` | GET | 不需要 | Readiness probe（检查依赖；故障返回 503 + `issues` 数组） |
+| `/health/accepting` | GET | 不需要 | 本地接流量就绪：初始化完成、路由已配置且未 draining；上游健康另查 `/health/ready` |
 | `/metrics` | GET | 不需要 | Prometheus 文本格式 metrics（K8s / Azure Monitor 抓取） |
 | `/admin/copilot/reload` | POST | 需要 | 运维端点：从源重读所有 Copilot endpoint 的 long-lived token + 强制刷新 session（K8s Secret rotation 后立刻生效） |
 | `/admin/copilot/reset-pool` | POST | 需要 | 运维端点：重建共享 httpx.AsyncClient，逐出所有 keepalive/半开连接（怀疑连接池泄漏或 upstream_stall 持续增长时使用） |
 | `/stats` | GET | 不需要 | 端点统计（含成本估算、Azure OpenAI、GitHub Copilot） |
 | `/stats/history` | GET | 不需要 | 历史用量数据（`?days=7`） |
-| `/stats/history` | DELETE | 不需要 | 清理历史数据（`?keep_days=30`） |
+| `/stats/history` | DELETE | 需要 | 清理历史数据（`?keep_days=30`） |
 | `/stats/dashboard` | GET | 不需要 | 可视化监控面板（四标签页 + 主题切换） |
-| `/reset` | POST | 不需要 | 重置内存统计（持久化数据保留） |
+| `/reset` | POST | 需要 | 重置内存统计（持久化数据保留） |
 
 ### Dashboard
 

@@ -1,0 +1,130 @@
+{
+  "author": "Zeno Ren",
+  "captured_at_utc": "2026-09-20T06:17:27.307495+00:00",
+  "scope": "Read-only selected deployment/configuration/health evidence; no inference requests or production mutations.",
+  "local_commit": "2cc4111b2768ba4f9245c1db2cf597d8dc5d82e6",
+  "deployment": {
+    "generation": 58,
+    "observed_generation": 58,
+    "replicas": 1,
+    "ready_replicas": 1,
+    "strategy": {
+      "rollingUpdate": {
+        "maxSurge": 0,
+        "maxUnavailable": 1
+      },
+      "type": "RollingUpdate"
+    },
+    "grace_seconds": 30,
+    "containers": [
+      {
+        "name": "claude-lb",
+        "image": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:00437a6ed3e9fc96a552e04d8a69eca8aeafa3a434080a9846edb4be89495596",
+        "resources": {
+          "limits": {
+            "cpu": "500m",
+            "memory": "2Gi"
+          },
+          "requests": {
+            "cpu": "100m",
+            "memory": "256Mi"
+          }
+        },
+        "readinessProbe": {
+          "failureThreshold": 3,
+          "httpGet": {
+            "path": "/health",
+            "port": 8000,
+            "scheme": "HTTP"
+          },
+          "initialDelaySeconds": 5,
+          "periodSeconds": 10,
+          "successThreshold": 1,
+          "timeoutSeconds": 1
+        },
+        "livenessProbe": {
+          "failureThreshold": 3,
+          "httpGet": {
+            "path": "/health",
+            "port": 8000,
+            "scheme": "HTTP"
+          },
+          "initialDelaySeconds": 10,
+          "periodSeconds": 30,
+          "successThreshold": 1,
+          "timeoutSeconds": 1
+        },
+        "startupProbe": null,
+        "lifecycle": null
+      }
+    ]
+  },
+  "pods": [
+    {
+      "name": "claude-lb-78cbbb8c4b-ggvsb",
+      "uid": "11986d7e-596e-4d0f-9b08-100d84f1cbb4",
+      "start_time": "2026-09-16T20:12:03Z",
+      "phase": "Running",
+      "containers": [
+        {
+          "name": "claude-lb",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:00437a6ed3e9fc96a552e04d8a69eca8aeafa3a434080a9846edb4be89495596"
+        }
+      ]
+    }
+  ],
+  "hashes": {
+    "local": {
+      "main.py": "9dda7cad83fb7fcaeade836642bba39d24664b0142394dd0a14c1444ff99987a",
+      "usage_store.py": "fad280b54520562e9b463b2079e355b978f612dceabab1a2a65be975b32babe9",
+      "otel_setup.py": "e68dfe8cef208c42d39f14ad8d5cc3d9b4eb909c68e3336d22937669ebba1cce"
+    },
+    "live": [
+      "f9ad2781e492fd15e444522b69bd76352db88518ad02f61292e321e83c9f49f0  /app/main.py",
+      "75eefaf3d111c8d04e9c5c667acd0d4029a09db10fbc72105696123801c27436  /app/effort_compat.py",
+      "fad280b54520562e9b463b2079e355b978f612dceabab1a2a65be975b32babe9  /app/usage_store.py",
+      "e68dfe8cef208c42d39f14ad8d5cc3d9b4eb909c68e3336d22937669ebba1cce  /app/otel_setup.py"
+    ]
+  },
+  "selected_runtime_config": {
+    "usage_backend": "mysql",
+    "copilot_endpoints": 1,
+    "azure_models": [
+      "gpt-5.4"
+    ],
+    "databricks_endpoints": 9,
+    "otel_enabled_env": "unset"
+  },
+  "http_reads": {
+    "/health/live": {
+      "status": 200,
+      "content_type": "application/json",
+      "authenticated": false,
+      "body": "{\"status\":\"alive\"}"
+    },
+    "/health/ready": {
+      "status": 200,
+      "content_type": "application/json",
+      "authenticated": false,
+      "body": "{\"status\":\"ready\"}"
+    },
+    "/metrics": {
+      "status": 200,
+      "content_type": "text/plain; version=0.0.4; charset=utf-8",
+      "authenticated": false
+    },
+    "/stats": {
+      "status": 302,
+      "content_type": "text/html",
+      "authenticated": false
+    },
+    "/config/effective": {
+      "status": 401,
+      "content_type": "application/json",
+      "authenticated": false
+    }
+  },
+  "capture_completed_at_utc": "2026-09-20T06:17:31.737384+00:00"
+}
