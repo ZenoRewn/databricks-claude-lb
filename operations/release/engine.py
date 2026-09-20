@@ -1,6 +1,8 @@
 """Restartable single-writer release state machine. Author: Zeno Ren."""
 import copy
+import json
 import re
+import sys
 import time
 
 TERMINAL = {'succeeded','rolled_back','cancelled','needs_attention'}
@@ -40,8 +42,16 @@ class Engine:
             # Storage failure cannot skip recovery. The adapter fences a durable
             # recovery-only marker on the workload before reopening a healthy old
             # backend. Subsequent leaders observe it and cannot gate again.
-            try:self.backend.emergency_restore(record)
-            except Exception:pass  # Neither a failed save nor cleanup is success.
+            recovery_error=None
+            try:restored=self.backend.emergency_restore(record) is True
+            except Exception as exc:
+                restored=False;recovery_error=type(exc).__name__
+            if not restored:
+                # The journal is unavailable: emit a separate, sanitized failure
+                # signal instead of hiding an unsuccessful recovery behind it.
+                print(json.dumps({'kind':'release_emergency_recovery_unverified',
+                    'release_id':record['plan']['release_id'],'phase':record['phase'],
+                    'error_type':recovery_error}),file=sys.stderr,flush=True)
             raise
 
     def _phase(self,record,phase,reason=None):

@@ -98,6 +98,25 @@ class ReleaseEngineTests(unittest.TestCase):
         while self.store.read()['phase']!='starting':self.step()
         self.backend.healthy=False;self.backend.fault='start_new'
         r=self.finish();self.assertEqual(r['phase'],'needs_attention');self.assertFalse(self.backend.routes)
+    def test_emergency_recovery_failure_is_reported_when_journal_is_unavailable(self):
+        import contextlib
+        import io
+        import json
+        from unittest.mock import patch
+        for failure in (False, RuntimeError('private backend detail')):
+            with self.subTest(failure_type=type(failure).__name__):
+                self.setup_release()
+                while self.store.read()['phase']!='draining':self.step()
+                self.store.fail=True;output=io.StringIO()
+                behavior={'side_effect':failure} if isinstance(failure,Exception) else {'return_value':failure}
+                with patch.object(self.backend,'emergency_restore',**behavior),contextlib.redirect_stderr(output):
+                    record=self.step()
+                event=json.loads(output.getvalue())
+                self.assertEqual(event['kind'],'release_emergency_recovery_unverified')
+                self.assertEqual(event['release_id'],'test-r')
+                self.assertNotIn('private backend detail',output.getvalue())
+                self.assertEqual(record['final_result'],'not_completed')
+                self.assertFalse(self.backend.routes)
     def test_lost_owner_does_not_restore_someone_elses_routes(self):
         self.setup_release();self.backend.owned=False
         r=self.step();self.assertEqual(self.backend.calls,[]);self.assertNotEqual(r['phase'],'succeeded')
