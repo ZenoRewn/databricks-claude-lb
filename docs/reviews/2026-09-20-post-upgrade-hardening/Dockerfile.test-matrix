@@ -1,0 +1,6 @@
+ARG PYTHON_VERSION=3.12
+FROM python:${PYTHON_VERSION}-slim
+WORKDIR /app
+COPY requirements-test.lock /app/requirements-test.lock
+RUN --mount=type=bind,source=.test-wheelhouse,target=/wheels,readonly pip install --no-index --find-links=/wheels -r requirements-test.lock
+COPY main.py effort_compat.py request_telemetry.py request_budget.py admission.py gateway_lifecycle.py upstream_body.py usage_store.py otel_setup.py response_semantics.py cleanup_observability.py release_probe.py dashboard.html /app/

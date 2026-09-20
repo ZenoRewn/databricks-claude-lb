@@ -1,0 +1,10 @@
+{
+  "author": "Zeno Ren",
+  "kind_cluster_removed": true,
+  "task_nodes_remaining": [],
+  "loopback_registry_removed": true,
+  "preview_server_stopped": true,
+  "private_task_directory_removed": true,
+  "final_candidate_images_retained": true,
+  "unrelated_resources_modified": false
+}

@@ -1,0 +1,47 @@
+{
+  "author": "Zeno Ren",
+  "context": "kind-lb-release-lab-20260920",
+  "scope": "Disposable Kind only",
+  "controllers": [
+    {
+      "name": "lb-release-controller-6fc78bfcc-hn25n",
+      "uid": "948f9dac-d769-4b16-b231-6b3cf96c0608",
+      "node": "lb-release-lab-20260920-worker",
+      "statuses": [
+        {
+          "name": "controller",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "localhost:5008/controller@sha256:f74ea96d3060c0113ff8d9e0ee568c96daa1ef632bf8e4c214067d5a5737b533"
+        }
+      ]
+    },
+    {
+      "name": "lb-release-controller-6fc78bfcc-md9ts",
+      "uid": "7d4cf182-0658-43fd-9761-d433e1559137",
+      "node": "lb-release-lab-20260920-worker2",
+      "statuses": [
+        {
+          "name": "controller",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "localhost:5008/controller@sha256:f74ea96d3060c0113ff8d9e0ee568c96daa1ef632bf8e4c214067d5a5737b533"
+        }
+      ]
+    }
+  ],
+  "services": [
+    {
+      "name": "claude-lb",
+      "selector": {
+        "app": "claude-lb"
+      }
+    },
+    {
+      "name": "claude-lb-internal",
+      "selector": {
+        "app": "claude-lb"
+      }
+    }
+  ]
+}

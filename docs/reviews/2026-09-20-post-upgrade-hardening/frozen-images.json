@@ -1,0 +1,58 @@
+[
+  {
+    "author": "Zeno Ren",
+    "label": "application-amd64",
+    "image": "claude-lb:hardening-candidate-final",
+    "platform": "linux/amd64",
+    "local_image_id": "sha256:c2b1582ffd486bee3d626e9e7122554152a296a4435543e49f7d9df0933823c1",
+    "registry_digests": [],
+    "git_comparison_revision": "17597ca895d114c8a0310c719efa14ad34719753",
+    "runtime_files_match_git": true
+  },
+  {
+    "author": "Zeno Ren",
+    "label": "application-arm64",
+    "image": "claude-lb:hardening-lab-final",
+    "platform": "linux/arm64",
+    "local_image_id": "sha256:49166293d0f4c1787584261860c04dc25cdad34d1ffaa69ebc5a2dbaaf5f3e6f",
+    "registry_digests": [
+      "localhost:5008/new@sha256:d518de478ef3a95540e4db9943c133b875503f47b2454fc82ad87f2d54387081"
+    ],
+    "git_comparison_revision": "17597ca895d114c8a0310c719efa14ad34719753",
+    "runtime_files_match_git": true
+  },
+  {
+    "author": "Zeno Ren",
+    "label": "coordinator-amd64",
+    "image": "lb-release-controller:hardening-candidate-final",
+    "platform": "linux/amd64",
+    "local_image_id": "sha256:f87a589fda512583cc99d7446edae9f4ec778154a50c594fe110c64177b16982",
+    "registry_digests": [],
+    "git_comparison_revision": "17597ca895d114c8a0310c719efa14ad34719753",
+    "runtime_files_match_git": true
+  },
+  {
+    "author": "Zeno Ren",
+    "label": "coordinator-arm64",
+    "image": "lb-release-controller:hardening-lab-final",
+    "platform": "linux/arm64",
+    "local_image_id": "sha256:80f9db4cf5585bf2ca6bf1701b5cfd9f6b6a70cf220f9b5bedb95479052adb15",
+    "registry_digests": [
+      "localhost:5008/controller@sha256:4d175b81aa949aa57d06cc961d6ebbbb1dc10f311aae66b8ff860230caf4e64e"
+    ],
+    "git_comparison_revision": "17597ca895d114c8a0310c719efa14ad34719753",
+    "runtime_files_match_git": true
+  },
+  {
+    "image": "lb-hardening-tests:py311-verified",
+    "local_image_id": "sha256:01dc854ceb5c790f73ad2952ceede3aaa0499edc48c44c7c91c5a3919993b509",
+    "runtime_files_match_git": true,
+    "platform": "linux/amd64"
+  },
+  {
+    "image": "lb-hardening-tests:py313-verified",
+    "local_image_id": "sha256:cc0d81f1ccf09096cd1bf38cdd3576128ed1311de2010e5032e42fb929074638",
+    "runtime_files_match_git": true,
+    "platform": "linux/amd64"
+  }
+]

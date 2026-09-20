@@ -8,8 +8,8 @@ metadata:
     description: "Databricks Claude / Azure OpenAI / GitHub Copilot 统一负载均衡代理"
 spec:
   replicas: 1
-  # ReadWriteOnce PVC 与 RollingUpdate 不兼容（旧 Pod 持有 PVC，新 Pod 无法挂）
-  # → Recreate strategy 短暂 downtime（~10s）但安全
+  # 此模板的 JSON 后端需要单写者。RWO 本身不保证单个应用写者，
+  # Recreate/短暂不可用也不证明旧进程已经退出；具体发布时间须实测。
   strategy:
     type: Recreate
   # ─── 零断服变体（MySQL 后端）────────────────────────────────────────────
@@ -29,9 +29,10 @@ spec:
   #
   # ⚠️ 一次性迁移注意：引入增量 upsert 的**那一次**发布不要让新旧代码并存。
   #    旧代码写「当天累计绝对值」、新代码写增量，两者同时在跑时旧 Pod 的绝对
-  #    写会把新 Pod 已累加的量冲掉。当前的 Recreate（以及 live 的
-  #    maxSurge=0）天然无重叠窗口，所以按现状发布是安全的；等两边都是新代码
-  #    之后再切 maxSurge=1。
+  #    写会把新 Pod 已累加的量冲掉。迁移须先取得旧 writer 退出证据；
+  #    Recreate/maxSurge=0 不证明终止中的进程已经停止。节点失联时不能
+  #    用 Pod 对象消失或 force delete 代替 fencing。两边均验证新写入语义、
+  #    容量与亲和后，才另行评估 maxSurge=1。参见 docs/RELEASE_TOOL.md。
   #
   # 三条都满足后，把上面的 strategy 换成：
   #
@@ -146,7 +147,8 @@ spec:
           #   b) 已建立的流有时间自然结束
           # 之后 SIGTERM 才发给 uvicorn，触发它的 graceful shutdown。
           # 时间预算：preStop 15s + uvicorn --timeout-graceful-shutdown 30s = 45s
-          # < terminationGracePeriodSeconds 60s，不会被 SIGKILL 截断。
+          # < terminationGracePeriodSeconds 60s，但仍需清理余量，不能保证
+          # 所有长流都自然结束或所有 cleanup 都在 grace 内完成。
           # 注意 preStop 超时不单独计时，它占用的是 grace period 的额度。
           lifecycle:
             preStop:

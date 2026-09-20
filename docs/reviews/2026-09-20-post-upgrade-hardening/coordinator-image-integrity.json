@@ -1,0 +1,18 @@
+{
+  "author": "Zeno Ren",
+  "source_revision": "5a6038d5589cd17e8c2ceea22d3e813605462406",
+  "all_modules_match": true,
+  "source_hashes": {
+    "operations/release/backend.py": "a88cf69ad1cfa7eda0d3af8a24db8e3b3107638355bed9092b51513e9a1412e1",
+    "operations/release/controller.py": "011948dd9de77c39ac51494f9682d25f84d5448ccc060b5ecae40e279f7b42ea",
+    "operations/release/manifests.py": "b09fbab4297fe297c51341b1e1720430d1b7c9178d2f92ebdf7b340d12e1ed8b",
+    "operations/release/__init__.py": "146a588be030f7a4fa10e1cf24044d80b9bafaeb1f4a23985cad12123caa34d4",
+    "operations/release/kube.py": "32e01ed882f7e557fb253b3f014949d0a4e099bee8cddc1dd89be2800dc20fae",
+    "operations/release/model.py": "687a8ebfb27d08c4a598f3328c7b9b789df4b5b81d2d2ec123d6deb172deaf6b",
+    "operations/release/lab_faults.py": "5c702e78017222aac007ff19f14cc58ff160e5e617561024401a3d2e6f07aa22",
+    "operations/release/engine.py": "cff2bea7b2c308ee3a22bf2df2d86e243a3fac84443f26a6c89ab0d92da93f42",
+    "operations/release/__main__.py": "4a4751b67897de56ceb035ca4fd88620b89983d588ed3a16285b7c90e5c359ac",
+    "operations/release/snapshot.py": "4fb923029219a383e9814cc3ea447dc2c24b683d7a716fa10f4a477ba3fa9f0b"
+  },
+  "local_image_id": "sha256:85bf2f095b1bbe2746bcac87b7d1a329380af02d2b30c20f8993cabf688ad65c"
+}

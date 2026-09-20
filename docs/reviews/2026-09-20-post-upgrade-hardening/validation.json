@@ -1,0 +1,278 @@
+{
+  "author": "Zeno Ren",
+  "scope": "local and disposable Kind only",
+  "date": "2026-09-21",
+  "source_revision": "a24d48cc8de038a54e8246c87b71a2f4c89647d5",
+  "branch": "codex/protocol-release-hardening-20260920",
+  "production_modified": false,
+  "github_pushed": false,
+  "openclaw_modified": false,
+  "real_provider_calls": 0,
+  "tests": {
+    "host": {
+      "result": "618 passed, 6 skipped, 538 subtests passed in 38.28s",
+      "evidence": "test-logs/host-release-final.txt"
+    },
+    "python311": {
+      "result": "617 passed, 7 skipped, 538 subtests passed in 40.72s",
+      "evidence": "test-logs/py311-release-final.txt"
+    },
+    "python312_candidate": {
+      "result": "617 passed, 7 skipped, 538 subtests passed in 40.67s",
+      "evidence": "test-logs/image312-release-final.txt"
+    },
+    "python313": {
+      "result": "617 passed, 7 skipped, 538 subtests passed in 41.78s",
+      "evidence": "test-logs/py313-release-final.txt"
+    },
+    "controller_candidate": {
+      "result": "18 passed, 20 subtests passed in 0.19s",
+      "evidence": "test-logs/controller-release-final.txt"
+    },
+    "mysql80": {
+      "passed": 6,
+      "evidence": "test-logs/mysql80-tests.txt"
+    },
+    "mysql84": {
+      "passed": 6,
+      "evidence": "test-logs/mysql84-tests.txt"
+    }
+  },
+  "images": [
+    {
+      "author": "Zeno Ren",
+      "label": "application-amd64",
+      "image": "claude-lb:hardening-final-v3",
+      "platform": "linux/amd64",
+      "local_image_id": "sha256:95a306b5b495a9def95d9e31fb62835842c6c153160861e7eb868a958e6efcd0",
+      "registry_digests": [],
+      "git_comparison_revision": "a24d48cc8de038a54e8246c87b71a2f4c89647d5",
+      "runtime_files_match_git": true
+    },
+    {
+      "author": "Zeno Ren",
+      "label": "application-arm64",
+      "image": "localhost:5008/new:final-v3",
+      "platform": "linux/arm64",
+      "local_image_id": "sha256:35bf14ff64bb724b0c905c5505dd2f65d3a21ef329f41e21d0f55b24e446780f",
+      "registry_digests": [
+        "localhost:5008/new@sha256:ea65d7f974f0b0ac6dc8fcc20a0e07a528646e6d449362f0a31f614e91af97ab"
+      ],
+      "git_comparison_revision": "a24d48cc8de038a54e8246c87b71a2f4c89647d5",
+      "runtime_files_match_git": true
+    },
+    {
+      "author": "Zeno Ren",
+      "label": "coordinator-amd64",
+      "image": "lb-release-controller:hardening-final-v3",
+      "platform": "linux/amd64",
+      "local_image_id": "sha256:403407acc0edf6daf6461a3a618f066ea0656982b2189fdfee3d2d5ac031269c",
+      "registry_digests": [],
+      "git_comparison_revision": "a24d48cc8de038a54e8246c87b71a2f4c89647d5",
+      "runtime_files_match_git": true
+    },
+    {
+      "author": "Zeno Ren",
+      "label": "coordinator-arm64",
+      "image": "localhost:5008/controller:final-v3",
+      "platform": "linux/arm64",
+      "local_image_id": "sha256:91903504aec4fc7b5c2bb72b67858d6ef49f8d936e537bd1546d694162547c72",
+      "registry_digests": [
+        "localhost:5008/controller@sha256:f74ea96d3060c0113ff8d9e0ee568c96daa1ef632bf8e4c214067d5a5737b533"
+      ],
+      "git_comparison_revision": "a24d48cc8de038a54e8246c87b71a2f4c89647d5",
+      "runtime_files_match_git": true
+    },
+    {
+      "image": "lb-hardening-tests:py311-final-v3",
+      "local_image_id": "sha256:05248bbad4458ca88e2a185febece51a8ff607a246dc61acc8b5d30430023690",
+      "runtime_files_match_git": true,
+      "platform": "linux/amd64"
+    },
+    {
+      "image": "lb-hardening-tests:py313-final-v3",
+      "local_image_id": "sha256:b88a4fec96333381a350a6bdf4b3d359813f7820a320249a43a7a54f7c6ba1fb",
+      "runtime_files_match_git": true,
+      "platform": "linux/amd64"
+    }
+  ],
+  "kind_cases": [
+    {
+      "case": "ack-gate-01",
+      "phase": "succeeded",
+      "provider_sends": 3,
+      "maintenance_seconds": 17.322,
+      "evidence": "ack-gate-01.json"
+    },
+    {
+      "case": "crash-draining-01",
+      "phase": "succeeded",
+      "provider_sends": 3,
+      "maintenance_seconds": 47.273,
+      "evidence": "crash-draining-01.json"
+    },
+    {
+      "case": "crash-finalizing-01",
+      "phase": "succeeded",
+      "provider_sends": 3,
+      "maintenance_seconds": 16.943,
+      "evidence": "crash-finalizing-01.json"
+    },
+    {
+      "case": "crash-gating-01",
+      "phase": "succeeded",
+      "provider_sends": 3,
+      "maintenance_seconds": 17.688,
+      "evidence": "crash-gating-01.json"
+    },
+    {
+      "case": "crash-pausing-01",
+      "phase": "succeeded",
+      "provider_sends": 3,
+      "maintenance_seconds": 46.829,
+      "evidence": "crash-pausing-01.json"
+    },
+    {
+      "case": "crash-restoring-routes-01",
+      "phase": "succeeded",
+      "provider_sends": 3,
+      "maintenance_seconds": 47.253,
+      "evidence": "crash-restoring-routes-01.json"
+    },
+    {
+      "case": "crash-starting-01",
+      "phase": "succeeded",
+      "provider_sends": 3,
+      "maintenance_seconds": 48.042,
+      "evidence": "crash-starting-01.json"
+    },
+    {
+      "case": "crash-stopping-01",
+      "phase": "succeeded",
+      "provider_sends": 3,
+      "maintenance_seconds": 51.577,
+      "evidence": "crash-stopping-01.json"
+    },
+    {
+      "case": "crash-verifying-backend-01",
+      "phase": "succeeded",
+      "provider_sends": 3,
+      "maintenance_seconds": 43.695,
+      "evidence": "crash-verifying-backend-01.json"
+    },
+    {
+      "case": "crash-verifying-business-01",
+      "phase": "succeeded",
+      "provider_sends": 3,
+      "maintenance_seconds": 17.027,
+      "evidence": "crash-verifying-business-01.json"
+    },
+    {
+      "case": "exec-ack-loss-01",
+      "phase": "succeeded",
+      "provider_sends": 3,
+      "maintenance_seconds": 16.591,
+      "evidence": "exec-ack-loss-01.json"
+    },
+    {
+      "case": "final-runtime-03",
+      "phase": "succeeded",
+      "provider_sends": 3,
+      "maintenance_seconds": 16.489,
+      "evidence": "final-runtime-03.json"
+    },
+    {
+      "case": "frozen-journal-04",
+      "phase": "rolled_back",
+      "provider_sends": 0,
+      "maintenance_seconds": 4.101,
+      "evidence": "frozen-journal-04.json"
+    },
+    {
+      "case": "frozen-runtime-04",
+      "phase": "succeeded",
+      "provider_sends": 3,
+      "maintenance_seconds": 16.923,
+      "evidence": "frozen-runtime-04.json"
+    },
+    {
+      "case": "journal-02",
+      "phase": "rolled_back",
+      "provider_sends": 0,
+      "maintenance_seconds": 6.307,
+      "evidence": "journal-02.json"
+    },
+    {
+      "case": "long-stream-01",
+      "phase": "rolled_back",
+      "provider_sends": 1,
+      "maintenance_seconds": 13.59,
+      "evidence": "long-stream-01.json"
+    },
+    {
+      "case": "manual-takeover-01",
+      "phase": "rolled_back",
+      "provider_sends": 0,
+      "maintenance_seconds": 7.828,
+      "evidence": "manual-takeover-01.json"
+    },
+    {
+      "case": "release-final-05",
+      "phase": "succeeded",
+      "provider_sends": 3,
+      "maintenance_seconds": 19.751,
+      "evidence": "release-final-05.json"
+    },
+    {
+      "case": "rollback-01",
+      "phase": "rolled_back",
+      "provider_sends": 0,
+      "maintenance_seconds": 19.76,
+      "evidence": "rollback-01.json"
+    },
+    {
+      "case": "runtime-02",
+      "phase": "succeeded",
+      "provider_sends": 3,
+      "maintenance_seconds": 21.011,
+      "evidence": "runtime-02.json"
+    },
+    {
+      "case": "scheduling-04",
+      "phase": "rolled_back",
+      "provider_sends": 0,
+      "maintenance_seconds": 57.923,
+      "evidence": "scheduling-04.json"
+    },
+    {
+      "case": "unavailable-rollback-01",
+      "phase": "rolled_back",
+      "provider_sends": 0,
+      "maintenance_seconds": 28.22,
+      "evidence": "unavailable-rollback-01.json"
+    }
+  ],
+  "kind_bootstrap": "kind-bootstrap-r1.json",
+  "kind_lease_competition": "kind-lease-contention.json",
+  "kind_namespace": "lb-lab",
+  "kind_context": "kind-lb-release-lab-20260920",
+  "independent_review": "pending before publication or production deployment",
+  "production_acceptance": "not performed",
+  "cleanup": {
+    "status": "complete",
+    "evidence": "cleanup.json"
+  },
+  "limits": [
+    "Synthetic upstream and isolated MySQL only",
+    "Kind service DNS is not public TLS ingress acceptance",
+    "Original upstream SSE error bytes are preserved; gateway errors carry structured retry hints",
+    "Raw incident evidence and failed test receipts are retained",
+    "Older fault receipts were not all rerun against the final image identity"
+  ],
+  "documentation_qa": {
+    "local_links_checked": 68,
+    "missing_local_links": 0,
+    "rendered_documents": 3,
+    "visual_inspection": "Validation report desktop screenshot and rendered accessibility structure checked"
+  }
+}

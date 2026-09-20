@@ -1,0 +1,13 @@
+test_cancel_after_commit_is_recoverable_without_duplicate_usage (test_mysql_usage.RealMysqlUsageTests.test_cancel_after_commit_is_recoverable_without_duplicate_usage) ... /usr/local/lib/python3.12/site-packages/aiomysql/cursors.py:239: Warning: 'VALUES function' is deprecated and will be removed in a future release. Please use an alias (INSERT INTO ... VALUES (...) AS alias) and replace VALUES(col) in the ON DUPLICATE KEY UPDATE clause with alias.col instead
+  await self._query(query)
+ok
+test_commit_ack_loss_is_idempotent (test_mysql_usage.RealMysqlUsageTests.test_commit_ack_loss_is_idempotent) ... ok
+test_concurrent_retries_of_same_batch_apply_once (test_mysql_usage.RealMysqlUsageTests.test_concurrent_retries_of_same_batch_apply_once) ... ok
+test_partial_write_rolls_back_both_rows_and_ledger (test_mysql_usage.RealMysqlUsageTests.test_partial_write_rolls_back_both_rows_and_ledger) ... ok
+test_retention_erases_event_details_but_keeps_retry_receipt (test_mysql_usage.RealMysqlUsageTests.test_retention_erases_event_details_but_keeps_retry_receipt) ... ok
+test_two_writers_read_the_shared_daily_total (test_mysql_usage.RealMysqlUsageTests.test_two_writers_read_the_shared_daily_total) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.335s
+
+OK

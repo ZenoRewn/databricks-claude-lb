@@ -1,0 +1,29 @@
+...........                                   [100%]
+=================================== FAILURES ===================================
+_ ResultConsistencyTests.test_unknown_empty_stream_has_both_retry_suppression_signals (provider='databricks', api='messages') _
+tests/test_result_consistency.py:107: in test_unknown_empty_stream_has_both_retry_suppression_signals
+    self.assertEqual(r['headers'].get('x-should-retry'),'false')
+E   AssertionError: None != 'false'
+_ ResultConsistencyTests.test_unknown_empty_stream_has_both_retry_suppression_signals (provider='azure', api='responses') _
+tests/test_result_consistency.py:107: in test_unknown_empty_stream_has_both_retry_suppression_signals
+    self.assertEqual(r['headers'].get('x-should-retry'),'false')
+E   AssertionError: None != 'false'
+_ ResultConsistencyTests.test_unknown_empty_stream_has_both_retry_suppression_signals (provider='azure', api='chat') _
+tests/test_result_consistency.py:107: in test_unknown_empty_stream_has_both_retry_suppression_signals
+    self.assertEqual(r['headers'].get('x-should-retry'),'false')
+E   AssertionError: None != 'false'
+_ ResultConsistencyTests.test_unknown_empty_stream_has_both_retry_suppression_signals (provider='copilot', api='responses') _
+tests/test_result_consistency.py:107: in test_unknown_empty_stream_has_both_retry_suppression_signals
+    self.assertEqual(r['headers'].get('x-should-retry'),'false')
+E   AssertionError: None != 'false'
+_ ResultConsistencyTests.test_unknown_empty_stream_has_both_retry_suppression_signals (provider='copilot', api='chat') _
+tests/test_result_consistency.py:107: in test_unknown_empty_stream_has_both_retry_suppression_signals
+    self.assertEqual(r['headers'].get('x-should-retry'),'false')
+E   AssertionError: None != 'false'
+=========================== short test summary info ============================
+SUBFAILED(provider='databricks', api='messages') tests/test_result_consistency.py::ResultConsistencyTests::test_unknown_empty_stream_has_both_retry_suppression_signals
+SUBFAILED(provider='azure', api='responses') tests/test_result_consistency.py::ResultConsistencyTests::test_unknown_empty_stream_has_both_retry_suppression_signals
+SUBFAILED(provider='azure', api='chat') tests/test_result_consistency.py::ResultConsistencyTests::test_unknown_empty_stream_has_both_retry_suppression_signals
+SUBFAILED(provider='copilot', api='responses') tests/test_result_consistency.py::ResultConsistencyTests::test_unknown_empty_stream_has_both_retry_suppression_signals
+SUBFAILED(provider='copilot', api='chat') tests/test_result_consistency.py::ResultConsistencyTests::test_unknown_empty_stream_has_both_retry_suppression_signals
+5 failed, 11 passed, 22 subtests passed in 0.72s

@@ -4,6 +4,8 @@ Author: Zeno Ren
 
 可靠性优化的实现范围、指标口径和验证边界见 [服务可靠性说明](docs/SERVICE_RELIABILITY.md)。
 
+后续协议、记账和类型化监控变更见 [升级后加固说明](docs/POST_UPGRADE_HARDENING.md)；集群内发布与恢复工具见 [操作指南](docs/RELEASE_TOOL.md)。本地验证不等于已经更新生产，实际交付状态以对应验证回执为准。
+
 一个智能负载均衡代理，统一对接 **Databricks Claude**、**Azure OpenAI** 和 **GitHub Copilot** 三套上游，按模型自动路由。
 
 **运行契约：** [SSE framing、8 MiB/64 MiB 可配置资源策略、Copilot `api_types` 兼容性](docs/STREAM_PROTOCOL.md)。这些字节预算不是模型 token 上限或上游截断结论。

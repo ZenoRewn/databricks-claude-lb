@@ -1,0 +1,67 @@
+{
+  "author": "Zeno Ren",
+  "scope": "Disposable Kind API, no production",
+  "rounds": [
+    {
+      "single_winner": true,
+      "previous_epoch_fenced": true,
+      "previous_epoch": 1,
+      "new_epoch": 2
+    },
+    {
+      "single_winner": true,
+      "previous_epoch_fenced": true,
+      "previous_epoch": 1,
+      "new_epoch": 2
+    },
+    {
+      "single_winner": true,
+      "previous_epoch_fenced": true,
+      "previous_epoch": 1,
+      "new_epoch": 2
+    },
+    {
+      "single_winner": true,
+      "previous_epoch_fenced": true,
+      "previous_epoch": 1,
+      "new_epoch": 2
+    },
+    {
+      "single_winner": true,
+      "previous_epoch_fenced": true,
+      "previous_epoch": 1,
+      "new_epoch": 2
+    },
+    {
+      "single_winner": true,
+      "previous_epoch_fenced": true,
+      "previous_epoch": 1,
+      "new_epoch": 2
+    },
+    {
+      "single_winner": true,
+      "previous_epoch_fenced": true,
+      "previous_epoch": 1,
+      "new_epoch": 2
+    },
+    {
+      "single_winner": true,
+      "previous_epoch_fenced": true,
+      "previous_epoch": 1,
+      "new_epoch": 2
+    },
+    {
+      "single_winner": true,
+      "previous_epoch_fenced": true,
+      "previous_epoch": 1,
+      "new_epoch": 2
+    },
+    {
+      "single_winner": true,
+      "previous_epoch_fenced": true,
+      "previous_epoch": 1,
+      "new_epoch": 2
+    }
+  ],
+  "verified": true
+}
