@@ -202,5 +202,13 @@ class ImageAdmissionOverHttpTests(_Client):
         self.assertEqual(r.json()["detail"]["error"]["type"], "request_too_large")
 
 
+class ModelShapeTests(_Client):
+    def test_provided_model_must_be_a_nonempty_string(self):
+        for path in ('/v1/messages','/v1/responses','/v1/chat/completions'):
+            for model in (None,[],0,'   '):
+                with self.subTest(path=path,model=model):
+                    self.assertEqual(self.post(path,{'model':model}).status_code,400)
+
+
 if __name__ == "__main__":
     unittest.main()

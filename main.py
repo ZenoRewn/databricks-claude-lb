@@ -1,8 +1,9 @@
-from effort_compat import preserve_native_effort, effort_response_headers
+from effort_compat import preserve_native_effort, effort_response_headers, databricks_parameter_drops
 from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_call,
                                note_admission, note_admission_end, note_generation,
                                note_json_result, note_candidate_selection, note_retry_decision,
-                               current_request_id as telemetry_request_id)
+                               current_request_id as telemetry_request_id,
+                               set_parameter_policy, note_parameter_drops)
 from upstream_body import (read_error_body, render_metrics as error_body_metrics,
                            MAX_BYTES as UPSTREAM_ERROR_BODY_MAX_BYTES,
                            TIMEOUT as UPSTREAM_ERROR_BODY_TIMEOUT_SECONDS)
@@ -2552,6 +2553,7 @@ class ClaudeProxy:
             body["model"] = get_databricks_model(original_model)
         
         # 移除 Databricks 不支持的顶层字段（如新版 Claude Code 发送的 context_management 等）
+        note_parameter_drops(databricks_parameter_drops(body,adaptive_supported=supports_adaptive_thinking(body.get('model',''))))
         unsupported_fields = ["context_management"]
         preserve_native_effort(body)
         for field_name in unsupported_fields:
@@ -6493,6 +6495,7 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
     # P3.2: 记录租户名到 request.state，供 metrics / structured log 打 label
     request.state.tenant = _lookup_tenant(actual_key) or "default"
     _CURRENT_TENANT.set(request.state.tenant)
+    set_parameter_policy(request.headers.get('x-lb-strict-parameters'))
 
     # 读取原始请求体，先做粗暴上限保护避免 OOM，然后尝试压图
     body_bytes = await _read_bounded_request_body(request)
@@ -6511,6 +6514,8 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
         body = json.loads(body_bytes)
         if not isinstance(body, dict):
             raise ValueError('JSON body must be an object')
+        if 'model' in body and (not isinstance(body['model'],str) or not body['model'].strip()):
+            raise ValueError('model must be a nonempty string')
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
 
@@ -7018,6 +7023,7 @@ async def _route_chat_via_responses(body: dict, stream: bool, request_id: Option
     model = responses_body.get("model", body.get("model", "unknown"))
     rid = request_id or "-"
     removed_sampling_fields = _responses_adapter_removed_sampling_fields(body)
+    note_parameter_drops(removed_sampling_fields)
     if removed_sampling_fields:
         logger.info(
             f"[Chat->Responses][{rid}] removed unsupported Responses params for model={model}: "
@@ -7268,6 +7274,7 @@ async def _route_openai_chat(body: dict, stream: bool, request_id: Optional[str]
 async def _route_openai_responses(body: dict, stream: bool, request_id: Optional[str] = None,
                                   disconnect_checker=None):
     removed_sampling_fields = _strip_unsupported_responses_sampling_fields(body)
+    note_parameter_drops(removed_sampling_fields)
     if removed_sampling_fields:
         rid = request_id or "-"
         logger.info(
@@ -7401,6 +7408,7 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
     request.state.tenant = _lookup_tenant(actual_key) or "default"  # P3.2
     _CURRENT_TENANT.set(request.state.tenant)
+    set_parameter_policy(request.headers.get('x-lb-strict-parameters'))
 
     body_bytes = await _read_bounded_request_body(request)
     if len(body_bytes) > MAX_RAW_REQUEST_SIZE:
@@ -7410,6 +7418,8 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
         body = json.loads(body_bytes)
         if not isinstance(body, dict):
             raise ValueError('JSON body must be an object')
+        if 'model' in body and (not isinstance(body['model'],str) or not body['model'].strip()):
+            raise ValueError('model must be a nonempty string')
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
     stream = body.get("stream", False)
@@ -7469,6 +7479,7 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
     request.state.tenant = _lookup_tenant(actual_key) or "default"  # P3.2
     _CURRENT_TENANT.set(request.state.tenant)
+    set_parameter_policy(request.headers.get('x-lb-strict-parameters'))
 
     body_bytes = await _read_bounded_request_body(request)
     if len(body_bytes) > MAX_RAW_REQUEST_SIZE:
@@ -7478,6 +7489,8 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
         body = json.loads(body_bytes)
         if not isinstance(body, dict):
             raise ValueError('JSON body must be an object')
+        if 'model' in body and (not isinstance(body['model'],str) or not body['model'].strip()):
+            raise ValueError('model must be a nonempty string')
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
     stream = body.get("stream", False)

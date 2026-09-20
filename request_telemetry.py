@@ -13,6 +13,7 @@ import logging
 import re
 import time
 import uuid
+from fastapi import HTTPException
 from request_budget import startup_budget, UpstreamStartupTimeout, remaining_seconds
 
 logger = logging.getLogger('main')
@@ -23,6 +24,9 @@ OUTCOMES = ('completed','failed','incomplete','unknown','http_error','rejected',
             'overloaded','cancelled','client_disconnected','internal_error','deadline_exceeded')
 BUCKETS = (.1,.5,1,2,5,10,30,60,120,300,600,1800)
 CURRENT = ContextVar('lb_request_lifecycle', default=None)
+PARAMETERS = ('context_management','output_config','output_config.effort','output_config.format',
+              'output_config.other','tools.defer_loading','tools.input_examples','messages.tool_reference',
+              'cache_control.extras','thinking.budget_tokens','temperature','top_p','other')
 
 
 def safe_id(value):
@@ -46,6 +50,7 @@ class RequestTelemetry:
         self.sends = Counter()
         self.send_results = Counter()
         self.retry_decisions = Counter()
+        self.parameter_decisions = Counter()
         self.latency_sum = Counter()
         self.latency_buckets = Counter()
 
@@ -70,6 +75,9 @@ class RequestTelemetry:
         metric('lb_retry_decisions_total','HTTP retry decisions under existing replay policy','counter',
                [f'lb_retry_decisions_total{{reason="{reason}"}} {self.retry_decisions[reason]}'
                 for reason in ('retry_429','upstream_cooldown','attempt_budget_exhausted','status_not_retryable')])
+        metric('lb_parameter_policy_requests_total','Requests affected by each named local parameter decision, not token counts','counter',
+               [f'lb_parameter_policy_requests_total{{action="{action}",parameter="{parameter}"}} {self.parameter_decisions[(action,parameter)]}'
+                for action in ('dropped','rejected') for parameter in PARAMETERS])
         samples = []
         for api in APIS:
             for outcome in OUTCOMES:
@@ -97,6 +105,39 @@ class RequestRecord:
     admissions: int = 0
     sends: int = 0
     last_admission: str = 'unknown'
+    parameter_policy: str = 'compat'
+    dropped_parameters: set = field(default_factory=set)
+    rejected_parameters: set = field(default_factory=set)
+
+
+def set_parameter_policy(value):
+    record = CURRENT.get()
+    normalized = (value or 'false').strip().lower()
+    if normalized not in ('false','0','true','1'):
+        if record:
+            record.parameter_policy = 'invalid'
+        raise HTTPException(status_code=400,detail={'error':{'code':'invalid_parameter_policy',
+            'message':'X-LB-Strict-Parameters must be true, false, 1 or 0.'}})
+    if record:
+        record.parameter_policy = 'strict' if normalized in ('true','1') else 'compat'
+
+
+def note_parameter_drops(fields):
+    record = CURRENT.get()
+    if not record or not fields:
+        return
+    fields = {value if value in PARAMETERS else 'other' for value in fields}
+    strict = record.parameter_policy=='strict'
+    seen = record.rejected_parameters if strict else record.dropped_parameters
+    action = 'rejected' if strict else 'dropped'
+    for name in fields-seen:
+        record.metrics.parameter_decisions[(action,name)] += 1
+    seen.update(fields)
+    log_event({'kind':'lb_parameter_policy','lb_request_id':record.request_id,'action':action,'parameters':sorted(fields)})
+    if strict:
+        raise HTTPException(status_code=400,detail={'error':{'code':'parameter_not_forwarded',
+            'message':'The local gateway compatibility policy would remove requested parameters.',
+            'parameters':sorted(fields)}})
 
 
 def note_admission():
@@ -233,8 +274,13 @@ class RequestTelemetryMiddleware:
             nonlocal status, body_complete, disconnected
             if message['type']=='http.response.start':
                 status=message['status']
-                message={**message,'headers':[(k,v) for k,v in message.get('headers',[]) if k.lower()!=b'x-lb-request-id']+
-                         [(b'x-lb-request-id',record.request_id.encode('ascii'))]}
+                headers=[(k,v) for k,v in message.get('headers',[]) if k.lower() not in
+                         (b'x-lb-request-id',b'x-lb-parameter-policy',b'x-lb-dropped-parameters')]
+                headers.extend([(b'x-lb-request-id',record.request_id.encode('ascii')),
+                                (b'x-lb-parameter-policy',record.parameter_policy.encode('ascii'))])
+                if record.dropped_parameters:
+                    headers.append((b'x-lb-dropped-parameters',','.join(sorted(record.dropped_parameters)).encode('ascii')))
+                message={**message,'headers':headers}
             try:
                 await send(message)
             except OSError:
@@ -283,6 +329,8 @@ class RequestTelemetryMiddleware:
                     'request_id':safe_id(scope.get('state',{}).get('request_id')),
                     'operation_id':operation_id,
                     'draining_at_finish':bool(scope.get('state',{}).get('lb_draining_at_finish')),
+                    'parameter_policy':record.parameter_policy,'dropped_parameters':sorted(record.dropped_parameters),
+                    'rejected_parameters':sorted(record.rejected_parameters),
                     'outcome':outcome,'http_status':status,'generation_outcome':record.generation,
                     'downstream_body_completed':body_complete,'admissions':record.admissions,
                     'upstream_sends':record.sends,'duration_seconds':round(elapsed,6)}
