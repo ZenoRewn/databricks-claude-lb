@@ -63,11 +63,32 @@ send started 不证明字节已经上网或上游已执行；PoolTimeout 也属�
 
 预算到期会取消业务等待并等待原 owner 清理，不能给清理时间“硬上限”后丢弃它。错误终态通知另有 1 秒写出余量；因此总预算是业务取消时点，不是对所有 cleanup 都已完成的严格墙钟保证。已有长流部分输出不能因为本地 deadline 再次生成。
 
-## 日报与归档组件
+## 候选端点与重试决策
 
 第三批还增加了请求内候选记录：DB/Azure 优先选择尚未尝试且模型兼容、满足熔断/软冷却条件的候选；候选都尝试过后仍沿用原有有界同端重试。Copilot 的 pinned account 和已命中的 session affinity 优先于此策略，避免为了轮换破坏会话状态。没有自动更换模型或 provider，也没有把所有 workspace 视为独立配额。
 
 Databricks 可选 `endpoints[].models` 白名单使用转换后的原生模型名；缺省或空列表维持兼容的通配行为，非空列表不匹配返回 unsupported_model。配置本身不是能力验证证据。`lb_retry_decisions_total` 和结构化候选/重试日志解释状态白名单、Retry-After、剩余循环次数、候选/已尝试数量及总预算；仍只有原先允许的 429 条件可触发状态码重试。
+
+## 本地准入与请求体预算
+
+入口新增进程级并发上限、有限等待队列和请求体字节预留。先识别已验证的 LB 凭据；未认证请求继续走原鉴权错误路径，不占模型准入槽。队列满或等待超时返回 503 `lb_overloaded` + Retry-After，计入请求级 overloaded，不惩罚任何上游端点。
+
+| 环境变量 | 本地默认 |
+|---|---:|
+| `INFERENCE_MAX_ACTIVE` | 128 |
+| `INFERENCE_MAX_QUEUED` | 64 |
+| `INFERENCE_QUEUE_TIMEOUT_SECONDS` | 10 |
+| `INFERENCE_BODY_MEMORY_BYTES` | 134217728（128 MiB） |
+| `REQUEST_BODY_TIMEOUT_SECONDS` | 120 |
+| `INFERENCE_TENANT_LIMITS` | `{}`，可配 `{"monitor":1}` 等已配置 tenant 的并发限制 |
+
+这些是本地保护参数，尚未部署或按生产负载校准；它们不代表供应商配额。队列在同一 tenant 内保持先来先服务，可跳过已用满自身额度的 tenant 给其他 tenant 空闲槽；取消和“槽刚被授予时取消”的竞态都回收预留。生成完成及其 cleanup 结束后释放槽。
+
+三个推理入口改为边读边检查 64 MiB 单请求上限，同时在整个请求生命周期预留原始输入字节；超过进程输入预算在调用上游前拒绝。上传超时为 408。保留原 Request.body 缓存语义，JSON 根节点不是 object 时明确返回 400。输入预算不是整个 Python 进程 RSS 的硬上限，JSON、图片解码、SSE 缓冲及依赖仍有额外开销，需继续测量 RSS/throttling。
+
+新增 `lb_admission_active/queued/body_bytes/draining`、`lb_admission_rejected_total{reason}` 与排队耗时指标。这里是进程内限制，多副本会使总额度随实例数变化；需要全局配额时不能直接假设这些值跨 Pod 共享。
+
+## 日报与归档组件
 
 `operations.reporting` 是纯 Python 标准库工具，不调用模型、不发送消息、不修改 scheduler。现有 OpenClaw watcher 应将其快照适配成 [example-snapshots.json](../operations/example-snapshots.json) 的结构，再使用计算结果生成解释。示例数据完全为合成数据。
 

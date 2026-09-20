@@ -250,6 +250,8 @@ class RequestTelemetryMiddleware:
                 outcome='client_disconnected'
             elif scope.get('state',{}).get('lb_deadline_exceeded'):
                 outcome='deadline_exceeded'
+            elif scope.get('state',{}).get('lb_overloaded'):
+                outcome='overloaded'
             elif error:
                 outcome=error
             elif status == 429:

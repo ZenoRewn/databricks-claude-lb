@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 #   usage_store.py  —— 顶层 import（main.py:1888），无保护；缺失 → ModuleNotFoundError，启动即崩
 #   otel_setup.py   —— lifespan 内 import + except Exception 兜底；缺失 tracing 静默失能
 #   dashboard.html  —— import 时按 __file__ 同级路径读取，except OSError 降级空壳
-COPY main.py effort_compat.py request_telemetry.py request_budget.py upstream_body.py usage_store.py otel_setup.py dashboard.html ./
+COPY main.py effort_compat.py request_telemetry.py request_budget.py admission.py upstream_body.py usage_store.py otel_setup.py dashboard.html ./
 
 # 非 root 用户 + 准备目录（usage_data + token 缓存挂载点）
 RUN useradd -m -u 1000 -s /bin/bash app \

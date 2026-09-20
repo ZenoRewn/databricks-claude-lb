@@ -8,6 +8,9 @@ from upstream_body import (read_error_body, render_metrics as error_body_metrics
 from request_budget import (RequestBudgetMiddleware, headers_received,
                             TOTAL_TIMEOUT as INFERENCE_TOTAL_TIMEOUT_SECONDS,
                             STARTUP_TIMEOUT as UPSTREAM_STARTUP_TIMEOUT_SECONDS)
+from admission import (AdmissionMiddleware, AdmissionError, CURRENT_LEASE,
+                       CONTROLLER as INFERENCE_ADMISSION,
+                       BODY_READ_TIMEOUT as REQUEST_BODY_TIMEOUT_SECONDS)
 """
 Databricks Claude Load Balancer Proxy for Claude Code
 使用 Databricks 原生 Anthropic 端点 (/anthropic/v1/messages)
@@ -100,6 +103,12 @@ class LBSettings:
     upstream_error_body_timeout_seconds: float
     inference_total_timeout_seconds: float
     upstream_startup_timeout_seconds: float
+    inference_max_active: int
+    inference_max_queued: int
+    inference_queue_timeout_seconds: float
+    inference_body_memory_bytes: int
+    request_body_timeout_seconds: float
+    inference_tenant_limits: dict
     # ---- Image compression ----
     img_admission_enabled: bool        # IMG_ADMISSION_ENABLED
     img_compress_concurrency: int      # IMG_COMPRESS_CONCURRENCY=2
@@ -164,6 +173,12 @@ class LBSettings:
             upstream_error_body_timeout_seconds=UPSTREAM_ERROR_BODY_TIMEOUT_SECONDS,
             inference_total_timeout_seconds=INFERENCE_TOTAL_TIMEOUT_SECONDS,
             upstream_startup_timeout_seconds=UPSTREAM_STARTUP_TIMEOUT_SECONDS,
+            inference_max_active=INFERENCE_ADMISSION.max_active,
+            inference_max_queued=INFERENCE_ADMISSION.max_queued,
+            inference_queue_timeout_seconds=INFERENCE_ADMISSION.wait_timeout,
+            inference_body_memory_bytes=INFERENCE_ADMISSION.body_budget,
+            request_body_timeout_seconds=REQUEST_BODY_TIMEOUT_SECONDS,
+            inference_tenant_limits=dict(INFERENCE_ADMISSION.tenant_limits),
             img_admission_enabled=_env_bool("IMG_ADMISSION_ENABLED", True),
             img_compress_concurrency=_env_int("IMG_COMPRESS_CONCURRENCY", 2),
             img_max_count=_env_int("IMG_MAX_COUNT", 50),
@@ -6376,12 +6391,52 @@ async def _inject_request_id_middleware(request: Request, call_next):
     return response
 
 
-# Outermost user middleware: observe the full ASGI body lifetime, not only headers.
+def _admission_tenant(scope):
+    key = _extract_api_key(Request(scope))
+    return (_lookup_tenant(key) or 'default') if _verify_lb_api_key(key) else None
+
+
+# Queue waiting is inside the total budget; telemetry wraps the full lifetime.
+app.add_middleware(AdmissionMiddleware, tenant_for_scope=_admission_tenant)
 app.add_middleware(RequestBudgetMiddleware, error_frame_factory=_sse_terminal_error)
 app.add_middleware(RequestTelemetryMiddleware)
 
 MAX_REQUEST_SIZE = 4 * 1024 * 1024  # Databricks 4MB 上游硬限制（压缩后仍超才 413）
 MAX_RAW_REQUEST_SIZE = 64 * 1024 * 1024  # LB 入口宽容上限：压缩前最大 64MB，避免 OOM
+
+
+async def _read_bounded_request_body(request: Request):
+    """Keep Request.body caching semantics while checking size before retention."""
+    def too_large():
+        return HTTPException(status_code=413, detail={'error':{
+            'type':'request_too_large','message':'Request exceeds LB raw body limit.'}})
+    try:
+        declared = int(request.headers.get('content-length','0'))
+    except ValueError:
+        declared = 0
+    if declared > MAX_RAW_REQUEST_SIZE:
+        raise too_large()
+    parts = []
+    size = 0
+    lease = CURRENT_LEASE.get()
+    try:
+        async with asyncio.timeout(REQUEST_BODY_TIMEOUT_SECONDS):
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_RAW_REQUEST_SIZE:
+                    raise too_large()
+                if lease:
+                    lease.reserve_body(len(chunk))
+                parts.append(chunk)
+    except AdmissionError as exc:
+        request.state.lb_overloaded = True
+        raise HTTPException(status_code=503, headers={'Retry-After':'1'}, detail={'error':{
+            'code':'lb_overloaded','reason':exc.reason,'message':'Local request body memory budget exhausted.'}}) from None
+    except TimeoutError:
+        raise HTTPException(status_code=408, detail={'error':{
+            'code':'request_body_timeout','message':'Request upload did not finish within the body read budget.'}}) from None
+    request._body = b''.join(parts)
+    return request._body
 
 
 @app.post("/v1/messages")
@@ -6404,7 +6459,7 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
     _CURRENT_TENANT.set(request.state.tenant)
 
     # 读取原始请求体，先做粗暴上限保护避免 OOM，然后尝试压图
-    body_bytes = await request.body()
+    body_bytes = await _read_bounded_request_body(request)
     body_size = len(body_bytes)
 
     if body_size > MAX_RAW_REQUEST_SIZE:
@@ -6418,6 +6473,8 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
 
     try:
         body = json.loads(body_bytes)
+        if not isinstance(body, dict):
+            raise ValueError('JSON body must be an object')
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
 
@@ -7309,12 +7366,14 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
     request.state.tenant = _lookup_tenant(actual_key) or "default"  # P3.2
     _CURRENT_TENANT.set(request.state.tenant)
 
-    body_bytes = await request.body()
+    body_bytes = await _read_bounded_request_body(request)
     if len(body_bytes) > MAX_RAW_REQUEST_SIZE:
         raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large",
             "message": f"Request exceeds LB raw limit ({MAX_RAW_REQUEST_SIZE/1024/1024:.0f}MB)"}})
     try:
         body = json.loads(body_bytes)
+        if not isinstance(body, dict):
+            raise ValueError('JSON body must be an object')
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
     stream = body.get("stream", False)
@@ -7375,12 +7434,14 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
     request.state.tenant = _lookup_tenant(actual_key) or "default"  # P3.2
     _CURRENT_TENANT.set(request.state.tenant)
 
-    body_bytes = await request.body()
+    body_bytes = await _read_bounded_request_body(request)
     if len(body_bytes) > MAX_RAW_REQUEST_SIZE:
         raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large",
             "message": f"Request exceeds LB raw limit ({MAX_RAW_REQUEST_SIZE/1024/1024:.0f}MB)"}})
     try:
         body = json.loads(body_bytes)
+        if not isinstance(body, dict):
+            raise ValueError('JSON body must be an object')
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
     stream = body.get("stream", False)
@@ -7796,6 +7857,7 @@ async def metrics():
 
     lines.append(TELEMETRY.render().rstrip())
     lines.append(error_body_metrics().rstrip())
+    lines.append(INFERENCE_ADMISSION.render_metrics().rstrip())
     body = "\n".join(lines) + "\n" if lines else "# no providers configured\n"
     return Response(content=body, media_type="text/plain; version=0.0.4")
 
