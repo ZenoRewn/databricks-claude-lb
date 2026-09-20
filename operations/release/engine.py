@@ -147,7 +147,8 @@ class Engine:
             message=str(exc)
             record['last_failure']={'action':(record.get('intent') or {}).get('action',record['phase']),
                                     'error_type':type(exc).__name__,
-                                    'code':message if re.fullmatch(r'[a-z0-9_]{1,80}',message) else None}
+                                    'code':message if re.fullmatch(r'[a-z0-9_]{1,80}',message) else None,
+                                    'api_status':getattr(exc,'status',None) if type(getattr(exc,'status',None)) is int else None}
             try:
                 if record['phase']=='recovering':self._phase(record,'needs_attention','recovery_failed')
                 else:self._phase(record,'recovering',type(exc).__name__)

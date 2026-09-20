@@ -5,7 +5,7 @@ import json
 import threading
 import time
 
-from .engine import OwnershipLost, UncertainOperation
+from .engine import OwnershipLost, UncertainOperation, PendingOperation
 
 RESOURCES={'deployment':('/apis/apps/v1','deployments'),'replicaset':('/apis/apps/v1','replicasets'),
            'namespace':('/api/v1','namespaces'),
@@ -15,6 +15,17 @@ RESOURCES={'deployment':('/apis/apps/v1','deployments'),'replicaset':('/apis/app
            'endpointslice':('/apis/discovery.k8s.io/v1','endpointslices'),
            'ingress':('/apis/networking.k8s.io/v1','ingresses'),
            'lease':('/apis/coordination.k8s.io/v1','leases')}
+
+
+def conditional_conflict(error,method,body,readback):
+    status=getattr(error,'status',None)
+    if status==409:return True
+    if status!=422 or method!='PATCH' or not isinstance(body,list):return False
+    expected={op['path'].rsplit('/',1)[-1]:op.get('value') for op in body if op.get('op')=='test'
+              and op.get('path') in ('/metadata/uid','/metadata/resourceVersion')}
+    if not expected:return False
+    current=readback()
+    return current is None or any(current['metadata'].get(key)!=value for key,value in expected.items())
 
 
 class KubeAPI:
@@ -37,7 +48,10 @@ class KubeAPI:
                 header_params={'Accept':'application/json','Content-Type':'application/json-patch+json' if patch else 'application/json'},
                 query_params=list((query or {}).items()),body=body,response_type='object',
                 auth_settings=['BearerToken'],_return_http_data_only=True,_request_timeout=(3,8))
-        except ApiException:raise
+        except ApiException as exc:
+            if conditional_conflict(exc,method,body,lambda:self.optional(kind,namespace,name)):
+                raise PendingOperation('conditional_write_requires_fresh_readback') from exc
+            raise
         except Exception as exc:
             if method!='GET':raise UncertainOperation(type(exc).__name__) from exc
             raise

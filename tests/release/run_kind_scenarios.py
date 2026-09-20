@@ -116,7 +116,7 @@ print(json.dumps({'status':r.status,'marker':'LB_OK' in r.read().decode()}))
             deadline=time.monotonic()+10
             while self.upstream_count()==sends and time.monotonic()<deadline:time.sleep(.2)
             if self.upstream_count()!=sends+1:raise AssertionError('Long request did not begin')
-            old,new=self.submit(rid,drain_seconds=5,forward_seconds=40,maintenance_seconds=190)
+            old,new=self.submit(rid,drain_seconds=10,forward_seconds=50,maintenance_seconds=200)
             record=self.wait(rid);thread.join(timeout=95)
             if failures or not result or result[0]!={'status':200,'marker':True}:raise AssertionError('Long request was interrupted')
             if self.api.list('pod',NS,'app=claude-lb')[0]['metadata']['uid']!=pod['metadata']['uid']:raise AssertionError('Old writer was replaced despite drain timeout')
@@ -149,7 +149,7 @@ print(json.dumps({'status':r.status,'marker':'LB_OK' in r.read().decode()}))
 
     def scheduling(self,rid):
         self.fault({'release_id':rid,'mode':'pause_phase','phase':'starting'})
-        sends=self.upstream_count();old,new=self.submit(rid,drain_seconds=5,forward_seconds=40,maintenance_seconds=190)
+        sends=self.upstream_count();old,new=self.submit(rid,drain_seconds=10,forward_seconds=50,maintenance_seconds=200)
         self.wait(rid,'starting');nodes=[n for n in self.api.list('node',None) if 'control-plane' not in n['metadata']['name']]
         try:
             for node in nodes:self.api.patch('node',None,node,[{'op':'add','path':'/spec/unschedulable','value':True}])

@@ -26,3 +26,13 @@ class LeaseTests(unittest.TestCase):
     def test_other_live_owner_cannot_be_preempted(self):
         api=API();first=Lease(api,'ops','workload','first');self.assertTrue(first.acquire())
         self.assertFalse(Lease(api,'ops','workload','other').acquire())
+
+    def test_generic_422_is_a_conflict_only_when_readback_changed(self):
+        from operations.release.kube import conditional_conflict
+        from types import SimpleNamespace
+        error=SimpleNamespace(status=422)
+        guards=[{'op':'test','path':'/metadata/uid','value':'u'},
+                {'op':'test','path':'/metadata/resourceVersion','value':'10'}]
+        self.assertTrue(conditional_conflict(error,'PATCH',guards,lambda:{'metadata':{'uid':'u','resourceVersion':'11'}}))
+        self.assertTrue(conditional_conflict(error,'PATCH',guards,lambda:None))
+        self.assertFalse(conditional_conflict(error,'PATCH',guards,lambda:{'metadata':{'uid':'u','resourceVersion':'10'}}))
