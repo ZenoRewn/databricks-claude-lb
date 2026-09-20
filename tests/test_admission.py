@@ -68,6 +68,7 @@ class AdmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_middleware_holds_slot_until_response_and_cleanup_end(self):
         c=self.controller();states=[]
         async def app(scope,receive,send):
+            self.assertEqual(scope['state']['lb_source_tenant'],'a')
             states.append((c.active,CURRENT_LEASE.get() is not None))
             await send({'type':'http.response.start','status':200,'headers':[]})
             await send({'type':'http.response.body','body':b'{}'})

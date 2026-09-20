@@ -328,6 +328,7 @@ class RequestTelemetryMiddleware:
             fields={'kind':'lb_request_end','lb_request_id':record.request_id,'api_type':api_type,
                     'request_id':safe_id(scope.get('state',{}).get('request_id')),
                     'operation_id':operation_id,
+                    'source_tenant':scope.get('state',{}).get('lb_source_tenant'),
                     'draining_at_finish':bool(scope.get('state',{}).get('lb_draining_at_finish')),
                     'parameter_policy':record.parameter_policy,'dropped_parameters':sorted(record.dropped_parameters),
                     'rejected_parameters':sorted(record.rejected_parameters),

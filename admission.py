@@ -171,6 +171,7 @@ class AdmissionMiddleware:
             # The existing handler retains its auth/provider error contract and
             # rejects before body parsing; unauthenticated traffic gets no slot.
             return await self.app(scope,receive,send)
+        scope.setdefault('state',{})['lb_source_tenant'] = tenant
         try:
             lease = await self.controller.acquire(tenant)
         except AdmissionError as exc:

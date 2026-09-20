@@ -30,6 +30,8 @@ Author: Zeno Ren
 
 send started 不证明字节已经上网或上游已执行；PoolTimeout 也属于一次发送尝试。所有 ID 仅在日志/响应头中，指标维度固定为 provider、API 和有限结果枚举。
 
+终态日志的 source_tenant 来自服务端凭据映射，含准入拒绝场景；不采用调用方任意声明的来源标签。不分配独立 tenant/凭据时只能归为 default，不能据此推断某次调用来自 OpenClaw。
+
 请求结果分为 completed、failed、incomplete、unknown、http_error、rejected、overloaded、cancelled、client_disconnected、internal_error。HTTP 200 不自动视为 completed；有效生成终态与 ASGI body 完成同时成立才会得到相应完成结果。JSON failed/incomplete 与流式错误有独立分类，缺少结果证据为 unknown。日志 `downstream_body_completed` 表示 ASGI send 返回，不证明客户端收到或工具任务完成。
 
 第一批复用现有 SSE 协议观察器；没有增加第二份无限流缓存。非流式的显式结果语义只用于观测，尚未改成更严格的 serving 拒绝策略。完整客户端 schema/业务验收、首语义事件延迟、下游逐帧 terminal 确认属于后续批次。
