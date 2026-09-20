@@ -58,7 +58,7 @@ jobs:
             set -e
             cd /app
             # 首先所有已拆模块/资源必须都在镜像里
-            for f in main.py effort_compat.py request_telemetry.py usage_store.py otel_setup.py dashboard.html; do
+            for f in main.py effort_compat.py request_telemetry.py upstream_body.py usage_store.py otel_setup.py dashboard.html; do
               [ -f "$f" ] || { echo "MISSING: $f"; exit 1; }
             done
             # 其次 main.py 顶层能 import，OSErr 不降级隐藏

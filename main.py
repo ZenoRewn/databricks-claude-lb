@@ -2,6 +2,9 @@ from effort_compat import preserve_native_effort, effort_response_headers
 from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_call,
                                note_admission, note_admission_end, note_generation,
                                note_json_result)
+from upstream_body import (read_error_body, render_metrics as error_body_metrics,
+                           MAX_BYTES as UPSTREAM_ERROR_BODY_MAX_BYTES,
+                           TIMEOUT as UPSTREAM_ERROR_BODY_TIMEOUT_SECONDS)
 """
 Databricks Claude Load Balancer Proxy for Claude Code
 使用 Databricks 原生 Anthropic 端点 (/anthropic/v1/messages)
@@ -90,6 +93,8 @@ class LBSettings:
     log_level: str             # LOG_LEVEL (default INFO)
     # ---- Streaming heartbeat ----
     stream_heartbeat_interval: float   # STREAM_HEARTBEAT_INTERVAL=15
+    upstream_error_body_max_bytes: int
+    upstream_error_body_timeout_seconds: float
     # ---- Image compression ----
     img_admission_enabled: bool        # IMG_ADMISSION_ENABLED
     img_compress_concurrency: int      # IMG_COMPRESS_CONCURRENCY=2
@@ -150,6 +155,8 @@ class LBSettings:
             log_format=_env_str("LOG_FORMAT", "text"),
             log_level=_env_str("LOG_LEVEL", "INFO"),
             stream_heartbeat_interval=_env_float("STREAM_HEARTBEAT_INTERVAL", 15.0),
+            upstream_error_body_max_bytes=UPSTREAM_ERROR_BODY_MAX_BYTES,
+            upstream_error_body_timeout_seconds=UPSTREAM_ERROR_BODY_TIMEOUT_SECONDS,
             img_admission_enabled=_env_bool("IMG_ADMISSION_ENABLED", True),
             img_compress_concurrency=_env_int("IMG_COMPRESS_CONCURRENCY", 2),
             img_max_count=_env_int("IMG_MAX_COUNT", 50),
@@ -398,6 +405,24 @@ async def _close_stream_resources(pump_task, response):
             await _close_owned_response(response)
         except Exception:
             pass  # Preserve existing stream-error handling.
+
+
+async def _bounded_error_body(response):
+    if (isinstance(response, httpx.Response)
+            and isinstance(response.stream, httpx.AsyncByteStream)
+            and not isinstance(response.stream, _OwnedResponseStream)):
+        response.stream = _OwnedResponseStream(response.stream)
+
+    async def close_owned(current):
+        await _finish_cleanup(_close_owned_response(current))
+
+    return await read_error_body(response, close=close_owned)
+
+
+async def _guard_upstream_error_response(response):
+    # HTTPX hooks run before non-stream post() automatically buffers the body.
+    if response.status_code >= 400 or response.headers.get('content-type', '').lower().startswith('text/html'):
+        await _bounded_error_body(response)
 
 
 async def _await_with_heartbeat(awaitable, heartbeat: bytes, interval: float = STREAM_HEARTBEAT_INTERVAL):
@@ -2393,6 +2418,7 @@ class ClaudeProxy:
                 keepalive_expiry=30.0,
             ),
             http2=False,
+            event_hooks={'response': [_guard_upstream_error_response]},
         )
         self.global_stats = GlobalStats()
         self.today_model_stats: dict = {}
@@ -2736,7 +2762,7 @@ class ClaudeProxy:
                                 response = payload
 
                     if response.status_code >= 400:
-                        error_body = await response.aread()
+                        error_body = await _bounded_error_body(response)
                         # 429 rate limit 也触发熔断
                         is_client_error = 400 <= response.status_code < 500 and response.status_code not in (401, 403, 429)
 
@@ -2906,6 +2932,7 @@ class AzureOpenAIProxy:
                 keepalive_expiry=30.0,
             ),
             http2=False,
+            event_hooks={'response': [_guard_upstream_error_response]},
         )
         self.global_stats = GlobalStats()
         # P1.3: HTML soft cooldown counters（与 CopilotProxy 对齐）
@@ -3149,7 +3176,7 @@ class AzureOpenAIProxy:
                                 response = payload
 
                     if response.status_code >= 400:
-                        error_body = await response.aread()
+                        error_body = await _bounded_error_body(response)
                         is_client_error = 400 <= response.status_code < 500 and response.status_code not in (401, 403, 429)
                         try:
                             error_text = error_body.decode("utf-8") if isinstance(error_body, bytes) else str(error_body)
@@ -3607,6 +3634,7 @@ class CopilotProxy:
                 keepalive_expiry=self.POOL_KEEPALIVE_EXPIRY,
             ),
             http2=self.HTTP2_ENABLED,
+            event_hooks={'response': [_guard_upstream_error_response]},
         )
         # 三种状态要区分，别让"我以为开了 h2 实际没开"这种坑再发生
         if self.HTTP2_ENABLED:
@@ -5445,7 +5473,7 @@ class CopilotProxy:
                     upstream_ct = response.headers.get("content-type", "") if response is not None else ""
                     upstream_ct_is_html = upstream_ct.strip().lower().startswith("text/html")
                     if response.status_code >= 400 or upstream_ct_is_html:
-                        error_body = await response.aread()
+                        error_body = await _bounded_error_body(response)
                         try:
                             error_text = error_body.decode("utf-8") if isinstance(error_body, bytes) else str(error_body)
                         except Exception:
@@ -7714,6 +7742,7 @@ async def metrics():
         lines.append(hist_text.rstrip())
 
     lines.append(TELEMETRY.render().rstrip())
+    lines.append(error_body_metrics().rstrip())
     body = "\n".join(lines) + "\n" if lines else "# no providers configured\n"
     return Response(content=body, media_type="text/plain; version=0.0.4")
 
@@ -7756,6 +7785,7 @@ async def admin_copilot_reset_pool(request: Request, x_api_key: Optional[str] = 
             keepalive_expiry=copilot_proxy.POOL_KEEPALIVE_EXPIRY,
         ),
         http2=copilot_proxy.HTTP2_ENABLED,
+        event_hooks={'response': [_guard_upstream_error_response]},
     )
     copilot_proxy.client = new_client
     logger.warning(
