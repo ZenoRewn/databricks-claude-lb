@@ -1,4 +1,7 @@
 from effort_compat import preserve_native_effort, effort_response_headers
+from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_call,
+                               note_admission, note_admission_end, note_generation,
+                               note_json_result)
 """
 Databricks Claude Load Balancer Proxy for Claude Code
 使用 Databricks 原生 Anthropic 端点 (/anthropic/v1/messages)
@@ -1028,12 +1031,16 @@ class _SSEObservation:
         self.first_event = None
         self.last_event = None
         self.terminal = None
+        self.finish_reason = None
         self.neutral = False
         self.input_tokens = self.output_tokens = self.cache_read_tokens = self.cache_creation_tokens = 0
 
     def observe(self, frame):
         try:
             self._observe(frame)
+            if self.terminal:
+                note_generation('incomplete' if self.terminal == 'completed' and self.finish_reason in
+                                ('max_tokens', 'length', 'content_filter') else self.terminal)
         except Exception as exc:
             # A bug in local observation is never evidence of endpoint failure.
             raise _LocalObserverError("Local stream observer failed; upstream outcome unknown") from exc
@@ -1079,6 +1086,9 @@ class _SSEObservation:
                 self.terminal = "completed"
             elif data:
                 self._usage(data.get("usage"), "prompt_tokens", "completion_tokens", "prompt_tokens_details")
+                for choice in data.get('choices', []) if isinstance(data.get('choices'), list) else []:
+                    if isinstance(choice, dict) and choice.get('finish_reason') in ('length', 'content_filter'):
+                        self.finish_reason = choice['finish_reason']
         else:
             if kind == "message_stop":
                 self.terminal = "completed"
@@ -1087,6 +1097,8 @@ class _SSEObservation:
                 self._usage(message.get("usage") if isinstance(message, dict) else None)
             elif kind == "message_delta":
                 self._usage(data.get("usage"))
+                if isinstance(data.get('delta'), dict):
+                    self.finish_reason = data['delta'].get('stop_reason') or self.finish_reason
         if data and (kind == "error" or self.api_type == "chat" and isinstance(data.get("error"), dict)):
             self.terminal = "error"
             error = data.get("error", data)
@@ -2283,6 +2295,7 @@ class LoadBalancer:
         self._attempts.setdefault(id(endpoint), {})[id(lease)] = lease
         endpoint.active_requests += 1
         endpoint.total_requests += 1
+        note_admission()
         return lease
 
     async def on_request_end(self, endpoint: WorkspaceEndpoint, success: bool,
@@ -2293,6 +2306,7 @@ class LoadBalancer:
         if lease.ended:
             return
         lease.ended = True
+        note_admission_end(success, cancelled=cancelled, neutral=is_client_error)
         self._attempts.get(id(endpoint), {}).pop(id(lease), None)
         endpoint.active_requests = max(0, endpoint.active_requests - 1)
         failed = not success and not is_client_error and not cancelled
@@ -2653,11 +2667,12 @@ class ClaudeProxy:
     async def _normal_request(self, endpoint, url, body, headers, model: str = "unknown", start_time: float = 0,
                                 request_id: Optional[str] = None) -> JSONResponse:
         """非流式请求 - 直接透传"""
-        response = await self.client.post(url, json=body, headers=headers)
+        response = await inference_call(self.client.post(url, json=body, headers=headers), 'databricks', 'messages')
         response.raise_for_status()
 
         elapsed = time.time() - start_time
         resp_json = response.json()
+        note_json_result(resp_json, 'messages')
         usage = resp_json.get("usage", {})
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
@@ -2712,7 +2727,7 @@ class ClaudeProxy:
                 try:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
                     async with aclosing(_await_with_heartbeat(
-                        proxy_self.client.send(req, stream=True), HEARTBEAT
+                        inference_call(proxy_self.client.send(req, stream=True), 'databricks', 'messages'), HEARTBEAT
                     )) as pending_headers:
                         async for kind, payload in pending_headers:
                             if kind == "heartbeat":
@@ -3062,11 +3077,12 @@ class AzureOpenAIProxy:
 
     async def _normal_request(self, endpoint, url, body, headers, model: str, api_type: str, start_time: float) -> JSONResponse:
         """非流式请求；request lease 由调用方 exactly-once 结算。"""
-        response = await self.client.post(url, json=body, headers=headers)
+        response = await inference_call(self.client.post(url, json=body, headers=headers), 'azure_openai', api_type)
         response.raise_for_status()
 
         elapsed = time.time() - start_time
         resp_json = response.json()
+        note_json_result(resp_json, api_type)
         usage = resp_json.get("usage", {})
         if api_type == "chat":
             input_tokens = usage.get("prompt_tokens", 0)
@@ -3124,7 +3140,7 @@ class AzureOpenAIProxy:
                 try:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
                     async with aclosing(_await_with_heartbeat(
-                        proxy_self.client.send(req, stream=True), HEARTBEAT
+                        inference_call(proxy_self.client.send(req, stream=True), 'azure_openai', api_type), HEARTBEAT
                     )) as pending_headers:
                         async for kind, payload in pending_headers:
                             if kind == "heartbeat":
@@ -5118,7 +5134,7 @@ class CopilotProxy:
                                recovery: Optional["_OpaqueStateRecovery"] = None) -> JSONResponse:
         if recovery is None:  # 直接调用（测试 / 低层调用者）也要有预算
             recovery = _OpaqueStateRecovery(self, api_type)
-        response = await self.client.post(url, json=body, headers=headers)
+        response = await inference_call(self.client.post(url, json=body, headers=headers), 'copilot', api_type)
         try:
             self.last_negotiated_http_version = response.http_version
         except Exception:  # noqa: BLE001
@@ -5196,6 +5212,7 @@ class CopilotProxy:
                 response.raise_for_status()
         elapsed = time.time() - start_time
         resp_json = response.json()
+        note_json_result(resp_json, api_type)
         usage = resp_json.get("usage", {}) or {}
         if api_type == "responses":
             input_tokens = usage.get("input_tokens", 0)
@@ -5403,7 +5420,7 @@ class CopilotProxy:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
                     body_bytes_size = len(req.content)
                     async with aclosing(_await_with_heartbeat(
-                        proxy_self.client.send(req, stream=True), HEARTBEAT
+                        inference_call(proxy_self.client.send(req, stream=True), 'copilot', api_type), HEARTBEAT
                     )) as pending_headers:
                         async for kind, payload in pending_headers:
                             if kind == "heartbeat":
@@ -6279,6 +6296,9 @@ async def _inject_request_id_middleware(request: Request, call_next):
     return response
 
 
+# Outermost user middleware: observe the full ASGI body lifetime, not only headers.
+app.add_middleware(RequestTelemetryMiddleware)
+
 MAX_REQUEST_SIZE = 4 * 1024 * 1024  # Databricks 4MB 上游硬限制（压缩后仍超才 413）
 MAX_RAW_REQUEST_SIZE = 64 * 1024 * 1024  # LB 入口宽容上限：压缩前最大 64MB，避免 OOM
 
@@ -6300,6 +6320,7 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
     # P3.2: 记录租户名到 request.state，供 metrics / structured log 打 label
     request.state.tenant = _lookup_tenant(actual_key) or "default"
+    _CURRENT_TENANT.set(request.state.tenant)
 
     # 读取原始请求体，先做粗暴上限保护避免 OOM，然后尝试压图
     body_bytes = await request.body()
@@ -7375,6 +7396,7 @@ async def health_ready():
 async def metrics():
     """Prometheus 文本格式 metrics，供 AKS / Azure Monitor / Prometheus 抓取"""
     lines = []
+    now = int(time.time())
 
     def emit(name: str, help_text: str, kind: str, samples: list):
         lines.append(f"# HELP {name} {help_text}")
@@ -7383,7 +7405,6 @@ async def metrics():
 
     # Copilot endpoint metrics
     if copilot_proxy:
-        now = int(time.time())
         token_expires_samples = []
         token_remaining_samples = []
         refresh_total_samples = []
@@ -7692,6 +7713,7 @@ async def metrics():
     if hist_text.strip():
         lines.append(hist_text.rstrip())
 
+    lines.append(TELEMETRY.render().rstrip())
     body = "\n".join(lines) + "\n" if lines else "# no providers configured\n"
     return Response(content=body, media_type="text/plain; version=0.0.4")
 
