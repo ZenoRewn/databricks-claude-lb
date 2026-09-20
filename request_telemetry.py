@@ -13,13 +13,14 @@ import logging
 import re
 import time
 import uuid
+from request_budget import startup_budget, UpstreamStartupTimeout
 
 logger = logging.getLogger('main')
 ROUTES = {'/v1/messages':'messages', '/v1/responses':'responses', '/v1/chat/completions':'chat'}
 APIS = ('messages','responses','chat')
 PROVIDERS = ('databricks','azure_openai','copilot')
 OUTCOMES = ('completed','failed','incomplete','unknown','http_error','rejected',
-            'overloaded','cancelled','client_disconnected','internal_error')
+            'overloaded','cancelled','client_disconnected','internal_error','deadline_exceeded')
 BUCKETS = (.1,.5,1,2,5,10,30,60,120,300,600,1800)
 CURRENT = ContextVar('lb_request_lifecycle', default=None)
 
@@ -157,12 +158,16 @@ async def inference_call(awaitable, provider, api_type):
     result = 'transport_error'
     status = None
     try:
-        response = await awaitable
+        async with startup_budget():
+            response = await awaitable
         status = getattr(response,'status_code',None)
         result = f'http_{status//100}xx' if type(status) is int and 100 <= status < 600 else 'unknown'
         return response
     except asyncio.CancelledError:
         result = 'cancelled'
+        raise
+    except UpstreamStartupTimeout:
+        result = 'startup_timeout'
         raise
     finally:
         metrics.send_results[(provider,api_type,result)] += 1
@@ -220,6 +225,8 @@ class RequestTelemetryMiddleware:
         finally:
             if disconnected:
                 outcome='client_disconnected'
+            elif scope.get('state',{}).get('lb_deadline_exceeded'):
+                outcome='deadline_exceeded'
             elif error:
                 outcome=error
             elif status == 429:

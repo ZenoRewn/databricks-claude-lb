@@ -1,4 +1,4 @@
-# 服务可靠性：第一批实现与验收边界
+# 服务可靠性：本地实现与验收边界
 
 Author: Zeno Ren  
 日期：2026-09-20
@@ -49,7 +49,19 @@ send started 不证明字节已经上网或上游已执行；PoolTimeout 也属�
 
 `lb_upstream_error_body_reads_total{result}` 区分 complete、timeout、too_large、unsupported_encoding、invalid_encoding、read_error。正常成功流不会被该 hook 读取，因此本批不会给长 thinking 添加短 read timeout。
 
-复用原响应 ownership 和 shielded cleanup。正文读取时限不取消清理 owner；清理延迟监控及请求总 deadline 后续单独实现。本批默认值经过本地故障注入，仍需用目标镜像、真实客户端和运行配置完成发布验收。
+复用原响应 ownership 和 shielded cleanup。正文读取时限不取消清理 owner；清理耗时的独立监控仍待补充。本批默认值经过本地故障注入，仍需用目标镜像、真实客户端和运行配置完成发布验收。
+
+## 请求预算
+
+第二批新增 `INFERENCE_TOTAL_TIMEOUT_SECONDS=1800`（整次推理 30 分钟）与 `UPSTREAM_STARTUP_TIMEOUT_SECONDS=180`（每次上游发送等待响应头 3 分钟），均要求有限正数并在 `/config/effective` 可见。这是待生产验收的保守本地默认值，真实工作负载需要时可调整。
+
+总预算从推理入口开始，覆盖请求读取、排队/鉴权、重试退避、上游调用与流式输出；heartbeat 不延长它。响应头到达后立即解除该次启动计时，非流式请求的长正文读取也不会继续受启动时限约束。HTTPX 成功正文同样使用已有 ownership 保护，使取消期间的首次 close 保持可等待。
+
+总预算超时：headers 前返回 HTTP 504 和 `request_deadline_exceeded`；已进入 SSE 时按 Messages/Responses/Chat 对应协议发错误终态。不会拼接另一次推理或伪造完成。已结束的响应不会在 cleanup 阶段被补发错误；已提交的非 SSE 部分响应只能结束传输，不能再改状态或混入 SSE。
+
+启动超时属于执行不明的读超时，非流式保留 HTTP 502 与 `failure_type=UpstreamStartupTimeout`，流式使用明确错误路径；它不进入安全 POST 重放白名单。`lb_requests_finished_total{outcome="deadline_exceeded"}` 单列总预算超时，发送结果中的 startup_timeout 单列启动超时。
+
+预算到期会取消业务等待并等待原 owner 清理，不能给清理时间“硬上限”后丢弃它。错误终态通知另有 1 秒写出余量；因此总预算是业务取消时点，不是对所有 cleanup 都已完成的严格墙钟保证。已有长流部分输出不能因为本地 deadline 再次生成。
 
 ## 日报与归档组件
 

@@ -5,6 +5,9 @@ from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_
 from upstream_body import (read_error_body, render_metrics as error_body_metrics,
                            MAX_BYTES as UPSTREAM_ERROR_BODY_MAX_BYTES,
                            TIMEOUT as UPSTREAM_ERROR_BODY_TIMEOUT_SECONDS)
+from request_budget import (RequestBudgetMiddleware, headers_received,
+                            TOTAL_TIMEOUT as INFERENCE_TOTAL_TIMEOUT_SECONDS,
+                            STARTUP_TIMEOUT as UPSTREAM_STARTUP_TIMEOUT_SECONDS)
 """
 Databricks Claude Load Balancer Proxy for Claude Code
 使用 Databricks 原生 Anthropic 端点 (/anthropic/v1/messages)
@@ -95,6 +98,8 @@ class LBSettings:
     stream_heartbeat_interval: float   # STREAM_HEARTBEAT_INTERVAL=15
     upstream_error_body_max_bytes: int
     upstream_error_body_timeout_seconds: float
+    inference_total_timeout_seconds: float
+    upstream_startup_timeout_seconds: float
     # ---- Image compression ----
     img_admission_enabled: bool        # IMG_ADMISSION_ENABLED
     img_compress_concurrency: int      # IMG_COMPRESS_CONCURRENCY=2
@@ -157,6 +162,8 @@ class LBSettings:
             stream_heartbeat_interval=_env_float("STREAM_HEARTBEAT_INTERVAL", 15.0),
             upstream_error_body_max_bytes=UPSTREAM_ERROR_BODY_MAX_BYTES,
             upstream_error_body_timeout_seconds=UPSTREAM_ERROR_BODY_TIMEOUT_SECONDS,
+            inference_total_timeout_seconds=INFERENCE_TOTAL_TIMEOUT_SECONDS,
+            upstream_startup_timeout_seconds=UPSTREAM_STARTUP_TIMEOUT_SECONDS,
             img_admission_enabled=_env_bool("IMG_ADMISSION_ENABLED", True),
             img_compress_concurrency=_env_int("IMG_COMPRESS_CONCURRENCY", 2),
             img_max_count=_env_int("IMG_MAX_COUNT", 50),
@@ -421,6 +428,11 @@ async def _bounded_error_body(response):
 
 async def _guard_upstream_error_response(response):
     # HTTPX hooks run before non-stream post() automatically buffers the body.
+    if (isinstance(response, httpx.Response)
+            and isinstance(response.stream, httpx.AsyncByteStream)
+            and not isinstance(response.stream, _OwnedResponseStream)):
+        response.stream = _OwnedResponseStream(response.stream)
+    headers_received()
     if response.status_code >= 400 or response.headers.get('content-type', '').lower().startswith('text/html'):
         await _bounded_error_body(response)
 
@@ -594,6 +606,9 @@ def _sse_terminal_error(api_type: str, code: str, message: str,
     if api_type == "responses":
         payload = {"type": "response.failed", "response": {"error": error_body}}
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
+    if api_type == "messages":
+        payload = {"type": "error", "error": error_body}
+        return f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
     payload = {"error": error_body}
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\ndata: [DONE]\n\n".encode()
 
@@ -6325,6 +6340,7 @@ async def _inject_request_id_middleware(request: Request, call_next):
 
 
 # Outermost user middleware: observe the full ASGI body lifetime, not only headers.
+app.add_middleware(RequestBudgetMiddleware, error_frame_factory=_sse_terminal_error)
 app.add_middleware(RequestTelemetryMiddleware)
 
 MAX_REQUEST_SIZE = 4 * 1024 * 1024  # Databricks 4MB 上游硬限制（压缩后仍超才 413）
