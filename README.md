@@ -200,9 +200,9 @@ docker-compose up -d
 | `/admin/copilot/reset-pool` | POST | 需要 | 运维端点：重建共享 httpx.AsyncClient，逐出所有 keepalive/半开连接（怀疑连接池泄漏或 upstream_stall 持续增长时使用） |
 | `/stats` | GET | 不需要 | 端点统计（含成本估算、Azure OpenAI、GitHub Copilot） |
 | `/stats/history` | GET | 不需要 | 历史用量数据（`?days=7`） |
-| `/stats/history` | DELETE | 不需要 | 清理历史数据（`?keep_days=30`） |
+| `/stats/history` | DELETE | 需要 | 清理历史数据（`?keep_days=30`） |
 | `/stats/dashboard` | GET | 不需要 | 可视化监控面板（四标签页 + 主题切换） |
-| `/reset` | POST | 不需要 | 重置内存统计（持久化数据保留） |
+| `/reset` | POST | 需要 | 重置内存统计（持久化数据保留） |
 
 ### Dashboard
 

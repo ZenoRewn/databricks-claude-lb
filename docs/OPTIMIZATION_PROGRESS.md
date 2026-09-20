@@ -2,49 +2,46 @@
 
 Author: Zeno Ren
 
-范围：只优化 `databricks-claude-lb` 本地代码、测试、构建与文档。暂不部署 AKS，不改 OpenClaw Gateway 任务、脚本、历史数据或调度。用户提供的 OpenClaw 输出是运行背景，不是执行清理或修改自动化的授权。
+日期：2026-09-20
 
-## 已完成的本地批次
+**本地核心优化已完成并验证；AKS、OpenClaw 和生产数据库未修改。** 工作分支为 `codex/service-reliability-20260920`，运行代码候选提交为 `e4dde8d`。当前部署仍需另行确认，本文不是发布回执。
 
-| 批次 | 状态 | 提交/证据 |
-|---|---|---|
-| 线上 effort 基线、Docker/CI 打包清单 | 完成 | `3a807af`；主程序与 effort 模块字节 hash 对齐线上 |
-| request/admission/send 独立观测 | 完成 | `211d706`；完整 ASGI 生命周期、JSON/SSE 结果分类 |
-| 上游错误体时间/字节双限额 | 完成 | `c40a96f`；真实 TCP、无限正文、gzip、重复取消测试 |
-| 确定性窗口和本地归档 | 完成，未接入 OpenClaw | `operations.reporting`；12 项测试与 2 个子测试 |
+## 已完成
 
-本地 Python 3.14 全量：501 passed、433 subtests passed。Linux/amd64/Python 3.12 镜像：500 passed、1 skipped（默认镜像没有可选 OTel 依赖）、433 subtests passed。镜像应用代码全部来自 baked files，没有挂载主程序覆盖；监控工具和文档仅作为测试材料挂载。
-
-正常 Docker 构建的 PyPI 下载遇到 TLS EOF；离线验证构建使用宿主机经 TLS 从 PyPI 下载的 wheel，仅替换依赖安装来源，保留相同应用 COPY 清单。第一批验证镜像 `claude-lb:review-20260920-amd64` 尚未推送或部署。第一批构建时新运行模块的镜像 hash 与当时本地一致；后续批次需要重新构建验收，不能复用旧镜像结论。
-
-后续本地进度（尚未最终发布验收）：
-
-- `6ccfa10`：请求总预算 1800s、上游响应头预算 180s，真实 TCP 停滞/取消回收测试；全量 511 passed、438 subtests。
-- `5cb5329`：模型兼容白名单、请求内 tried-set、重试决策观测；全量 520 passed、446 subtests 后，补回空池 503 契约并单独验证相关 10 项测试。
-- 最新准入批次：进程并发/队列/tenant 限制、128 MiB 输入预留、120s 上传预算、JSON object 校验；全量 533 passed、457 subtests。
-- `eeb3aee` 为上述准入批次提交。
-- usage 失败恢复、事务批次幂等、跨午夜事件归属、JSON 错误传播/原子写、source 元数据和新持久化指标已实现。全量 551 passed、6 skipped（隔离 MySQL 场景）、462 subtests；另用 Linux/amd64 baked image 在真实 MySQL 8.0.46 跑通全部 6 个事务/回执/并发/retention 场景。CI 已加独立 mysql-usage job；正常 CI unit job 保持隔离场景跳过。
-- 后续需本地 readiness/drain、参数兼容可见性、最终镜像验收与更新交接说明。所有生产/OpenClaw修改仍未执行。
-
-工作分支为 `codex/service-reliability-20260920`。离线 PyPI wheel 在 `/tmp/lb-wheelhouse-20260920`（linux/amd64/Python 3.12），pytest wheel 在 `/tmp/lb-test-wheels-20260920`。旧镜像构建目录路径保存于 `/tmp/lb-offline-build-path-20260920.txt`；不得将旧源码副本用于后续最终构建。Docker 已启动；所有生产访问均只读。
-
-最新 storage 验证镜像为 `claude-lb:usage-review-20260920-v2`，源码副本路径记录在 `/tmp/lb-usage-v2-build-path-20260920.txt`。隔离数据库容器 `lb-usage-test-20260920` 使用 network=none，无挂载用户数据；通过 `--network container:lb-usage-test-20260920` 运行测试客户端。收尾时只清理这个本任务创建的测试容器及其匿名卷，不动其他容器。
-
-## 接下来按顺序推进
-
-1. 请求总预算、上游启动预算与超时终态，保持现有 cleanup ownership。
-2. 兼容候选、tried-set 和有界准入；精确容量 503 保持独立开关，不扩大通用 POST 重放。
-3. usage 失败恢复与幂等持久化；readiness/drain 与双副本的本地支持。
-4. 逐批回归与镜像验收，整理给 OpenClaw 的指标/行为更新摘要。
-
-## OpenClaw 后续同步边界
-
-运行环境：`zeno-oc` 的 `/openclaw`；配置备份 remote 为 `ZenoRewn/openclaw_configuration_backup`，不是完整监控系统备份。
-
-| 任务 | ID |
+| 范围 | 主要提交 |
 |---|---|
-| LB 异常 watcher | `29abb4b6-a517-4ab5-99be-bed87049a6cf` |
-| LB 小时数据归档 | `d33f2cb3-09bc-407e-a5f1-318b8cfc9abb` |
-| LB 每日汇总 | `b268ddf5-5c72-4dd9-92c5-51b9ec1ab00f` |
+| 线上 effort 基线与打包 | `3a807af` |
+| 请求/准入/实际发送观测 | `211d706`、`70ee7f3` |
+| 错误体字节/时间上限 | `c40a96f` |
+| 本地确定性窗口与归档组件 | `f396800`，未接入 OpenClaw |
+| 请求总预算和启动预算 | `6ccfa10` |
+| 兼容候选与请求内 tried-set | `5cb5329` |
+| 有界准入、输入预留和上传预算 | `eeb3aee` |
+| 失败用量恢复、事务幂等与事件归属 | `05cc69f` |
+| 本地 readiness/drain 和 shutdown | `76eb1ed` |
+| 参数移除可见性及严格选项 | `025796b` |
+| 复核修正：重连所有权、取消清理、排空归属 | `089cae9`、`e4dde8d` |
 
-此表仅用于后续交接，不代表已读取或修改任务。当前权威 watcher 是 Gateway 的 `trigger.script`/`payload.message`；不存在的旧 `tmp/lb-watcher-trigger-v2.js` 不能当作来源。保留 `tmp/lb-monitor-probe.sh`、未跟踪的采集脚本、`data/lb-monitor/` 及既有任务。后续更新说明需要明确新指标单位、默认值、终态和仍未完成的验证。
+## 最终验证
+
+- 本地 Python 3.14：568 passed、6 skipped、481 subtests passed。六个跳过项为单独运行的 MySQL 场景。
+- Linux/amd64/Python 3.12 baked image：567 passed、7 skipped、481 subtests passed。除上述六项外，默认镜像未安装可选 OTel SDK，因此跳过该启用测试；没有宣称 exporter 链路通过。
+- 隔离真实 MySQL 8.0.46：6/6 通过，覆盖部分写入、ACK 丢失、并发写者、同批并发重投、提交后取消与 retention。
+- 容器启动、就绪→draining、拒绝新请求、零上游调用与应用 shutdown complete 检查通过。docker stop 后 exit=143，为 SIGTERM 信号退出记录，不伪写为 exit 0。
+- 应用源文件 hash 与验证镜像逐一一致。只挂载测试/运维工具/文档，没有挂载主程序覆盖镜像。
+
+最终本地镜像为 `claude-lb:reliability-review-20260920-r2`，image ID 为 `sha256:eefe8f7e02bf3c983a31f7498965bbbbe1b948b3a5fe0b739712c6869c488347`。这是本地 image ID，尚未推送 ACR，不是已发布的 registry digest。
+
+普通在线构建遇到容器访问 PyPI 的 TLS EOF。验证构建使用宿主机经 TLS 下载的离线 wheel，仅替换依赖安装来源；未关闭证书验证。原 Dockerfile、验证 Dockerfile、wheel 和源码 hash 及日志见 [验证记录](reviews/2026-09-20-service-optimization/implementation-r2/validation.json)。
+
+## 实施边界
+
+运行时没有放宽 503/执行不明 POST 重放，也没有自动更换模型/provider。新预算和并发值尚未按真实负载校准；新增 MySQL 账本需在未来部署前审阅权限与迁移。pending usage 仍是内存队列，不承诺 Pod 硬丢失零 RPO。
+
+真实 OpenClaw/SDK/模型端到端、长期压力、供应商能力/容量域、节点维护和生产灰度仍属后续运行验证。管理权限细分、公网 metrics 访问控制、共享配额与 durable outbox 根据接入范围和环境另行安排，不把本地测试当生产认证。
+
+独立发布复核按现有 RESILIENCE.md 门禁保留；本轮只完成本地实现与技术检查，没有 push、PR、部署或对外消息。
+
+## OpenClaw 交接
+
+参见 [OPENCLAW_UPDATE_HANDOFF.md](OPENCLAW_UPDATE_HANDOFF.md)。其 Gateway task 定义仍是 watcher 的权威来源；`/openclaw/tmp/lb-monitor-probe.sh`、未跟踪采集脚本、历史数据和三个既有自动化均未修改或清理。用户提供的“清理 subagent”文字是背景，不是本次执行指令。

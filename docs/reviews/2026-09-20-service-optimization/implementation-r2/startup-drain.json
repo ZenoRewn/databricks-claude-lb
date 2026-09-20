@@ -1,0 +1,36 @@
+{
+  "before_drain": {
+    "status": "accepting",
+    "initialized": true,
+    "draining": false,
+    "active_requests": 0,
+    "queued_requests": 0
+  },
+  "settings": {
+    "inference_total_timeout_seconds": 1800.0,
+    "upstream_startup_timeout_seconds": 180.0,
+    "inference_max_active": 128,
+    "inference_body_memory_bytes": 134217728,
+    "usage_io_timeout_seconds": 10.0
+  },
+  "drain_command": {
+    "draining_requested": true,
+    "drained": true,
+    "marker": "/tmp/claude-lb-draining"
+  },
+  "after_drain": {
+    "status": "draining",
+    "initialized": true,
+    "draining": true,
+    "active_requests": 0,
+    "queued_requests": 0
+  },
+  "rejected_request": {
+    "error": {
+      "code": "lb_overloaded",
+      "reason": "draining",
+      "message": "Local inference admission unavailable; retry after cooldown."
+    }
+  },
+  "upstream_send_invocations": 0
+}

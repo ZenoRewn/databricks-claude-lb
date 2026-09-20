@@ -1,0 +1,33 @@
+Looking in links: /wheels
+Processing /wheels/pytest-9.1.1-py3-none-any.whl
+Processing /wheels/pytest_subtests-0.15.0-py3-none-any.whl
+Processing /wheels/iniconfig-2.3.0-py3-none-any.whl (from pytest)
+Processing /wheels/packaging-26.3-py3-none-any.whl (from pytest)
+Processing /wheels/pluggy-1.6.0-py3-none-any.whl (from pytest)
+Processing /wheels/pygments-2.21.0-py3-none-any.whl (from pytest)
+Processing /wheels/attrs-26.1.0-py3-none-any.whl (from pytest-subtests)
+Installing collected packages: pygments, pluggy, packaging, iniconfig, attrs, pytest, pytest-subtests
+Successfully installed attrs-26.1.0 iniconfig-2.3.0 packaging-26.3 pluggy-1.6.0 pygments-2.21.0 pytest-9.1.1 pytest-subtests-0.15.0
+ssssss................................................................................................................ [ 20%]
+............................................................ [ 31%]
+............................................... [ 39%]
+...................................s......................................................... [ 55%]
+............................................................................................................................................................ [ 82%]
+........................... [ 87%]
+............................... [ 92%]
+..........................................                          [100%]
+=============================== warnings summary ===============================
+tests/test_api_surface_contract.py:25
+  /app/tests/test_api_surface_contract.py:25: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+SKIPPED [1] tests/integration/test_mysql_usage.py:122: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:96: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:113: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:88: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:131: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:104: requires disposable loopback MySQL test server
+SKIPPED [1] tests/test_databricks_payload_compat.py:574: opentelemetry tracing deps incomplete: missing opentelemetry.trace
+567 passed, 7 skipped, 1 warning, 481 subtests passed in 39.75s

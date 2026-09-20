@@ -1,9 +1,10 @@
 # 服务可靠性：本地实现与验收边界
 
-Author: Zeno Ren  
+Author: Zeno Ren
+
 日期：2026-09-20
 
-本批覆盖线上 effort 基线、请求/准入/发送的独立观测、上游错误体双限额，以及可独立运行的确定性日报与归档组件。应用变更没有开启新的 503 重试，没有修改生产调度、探针、副本或数据库。
+本地实现覆盖线上 effort 基线、请求观测、等待与准入预算、候选端点、参数兼容可见性、用量幂等持久化和就绪/排空，另提供可选的确定性日报与归档组件。应用变更没有开启新的 503 重试，没有修改生产调度、探针、副本或数据库。
 
 ## 线上基线
 
@@ -32,7 +33,7 @@ send started 不证明字节已经上网或上游已执行；PoolTimeout 也属�
 
 终态日志的 source_tenant 来自服务端凭据映射，含准入拒绝场景；不采用调用方任意声明的来源标签。不分配独立 tenant/凭据时只能归为 default，不能据此推断某次调用来自 OpenClaw。
 
-请求结果分为 completed、failed、incomplete、unknown、http_error、rejected、overloaded、cancelled、client_disconnected、internal_error。HTTP 200 不自动视为 completed；有效生成终态与 ASGI body 完成同时成立才会得到相应完成结果。JSON failed/incomplete 与流式错误有独立分类，缺少结果证据为 unknown。日志 `downstream_body_completed` 表示 ASGI send 返回，不证明客户端收到或工具任务完成。
+请求结果分为 completed、failed、incomplete、unknown、http_error、rejected、overloaded、cancelled、client_disconnected、internal_error、deadline_exceeded。HTTP 200 不自动视为 completed；有效生成终态与 ASGI body 完成同时成立才会得到相应完成结果。JSON failed/incomplete 与流式错误有独立分类，缺少结果证据为 unknown。日志 `downstream_body_completed` 表示 ASGI send 返回，不证明客户端收到或工具任务完成。
 
 第一批复用现有 SSE 协议观察器；没有增加第二份无限流缓存。非流式的显式结果语义只用于观测，尚未改成更严格的 serving 拒绝策略。完整客户端 schema/业务验收、首语义事件延迟、下游逐帧 terminal 确认属于后续批次。
 
@@ -108,7 +109,7 @@ JSON 后端仍只支持单写者；磁盘操作移到工作线程，取消时等
 
 新增 `/health/accepting` 只判断本地初始化、路由配置和 draining 状态；共享上游故障不会把整个已初始化网关摘除。原 `/health/ready` 保留为严格的 provider 诊断，`/health/live` 保留为进程存活检查。此批**没有修改 AKS Deployment 探针**。
 
-`LB_DRAIN_FILE` 默认 `/tmp/claude-lb-draining`。文件出现后，接流量检查和推理准入会进入不可逆的进程内 draining 状态：拒绝新工作、唤醒排队请求返回明确 503，允许已准入工作结束。请求终态日志记录 draining_at_finish，不能仅凭该标记断言客户端取消的具体原因。
+`LB_DRAIN_FILE` 默认 `/tmp/claude-lb-draining`，应放在每个 Pod 独立的临时文件系统，不能跨 Pod 共享。文件出现后，接流量检查和推理准入会进入不可逆的进程内 draining 状态：拒绝新工作、唤醒排队请求返回明确 503，允许已准入工作结束。请求终态日志记录 draining_at_finish，不能仅凭该标记断言客户端取消的具体原因。
 
 未来经部署评审可将 `python /app/gateway_lifecycle.py --wait-seconds 45` 用于 preStop。它只创建该 marker、轮询 loopback `/health/accepting`，不调用模型、不删除文件；确认 active/queued 都为 0 才返回 drained=true，状态未知或超时返回 false/退出码 2。等待另有单次 HTTP 读取最多 1 秒的余量。
 
@@ -156,4 +157,4 @@ python3 -m operations.reporting \
 
 发布前继续遵守 [RESILIENCE.md 的独立复核门禁](RESILIENCE.md#tests-and-review-gate)。不能全量 apply 当前仓库的 K8s 模板覆盖现场。
 
-后续顺序：有界启动/总 deadline 与客户端契约 → 能力候选/tried-set/有界排队 → 幂等 usage、readiness/drain 与双副本。精确容量 503 是独立开关实验，接受重复计费风险的决策与新生产参数应随具体发布方案审阅；本批没有提前开启。
+后续运行验证：用真实客户端验证协议与长 thinking、校准预算/容量、审阅新增账本迁移，再评估双副本与节点余量。实际 capacity domain、供应商 feature 支持、全局配额协调、零 RPO outbox、管理权限细分和公网 metrics 访问控制仍需结合运行环境及接入范围处理。精确容量 503 的重试需要单独评估重复计费风险；本批保留原有保守策略。
