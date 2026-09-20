@@ -1,7 +1,7 @@
 from effort_compat import preserve_native_effort, effort_response_headers
 from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_call,
                                note_admission, note_admission_end, note_generation,
-                               note_json_result)
+                               note_json_result, note_candidate_selection, note_retry_decision)
 from upstream_body import (read_error_body, render_metrics as error_body_metrics,
                            MAX_BYTES as UPSTREAM_ERROR_BODY_MAX_BYTES,
                            TIMEOUT as UPSTREAM_ERROR_BODY_TIMEOUT_SECONDS)
@@ -1785,6 +1785,12 @@ class WorkspaceEndpoint:
     api_base: str
     token: str
     weight: int = 1
+    models: list = field(default_factory=list)
+
+    def __post_init__(self):
+        if not isinstance(self.models, list) or not all(isinstance(m, str) and m.strip() for m in self.models):
+            raise ValueError('Databricks models must be a list of nonempty native model names')
+        self.models = [m.strip().lower() for m in self.models]
     
     active_requests: int = field(default=0, repr=False)
     total_requests: int = field(default=0, repr=False)
@@ -2081,8 +2087,10 @@ def _replay_safe_transport_failure(exc):
 def _retry_rejected_response(response, attempt, max_attempts):
     # Only explicit admission rejection is safe. If upstream supplies Retry-After,
     # return it rather than holding a request or shortening its requested cooldown.
-    return (response.status_code == 429 and attempt < max_attempts - 1
-            and not getattr(response, "headers", {}).get("Retry-After"))
+    retry_after = getattr(response, "headers", {}).get("Retry-After")
+    allowed = response.status_code == 429 and attempt < max_attempts - 1 and not retry_after
+    note_retry_decision(response.status_code, attempt, max_attempts, retry_after, allowed)
+    return allowed
 
 
 def _upstream_html_status_bucket(status: int) -> str:
@@ -2250,8 +2258,20 @@ class LoadBalancer:
         fresh = [ep for ep in candidates if getattr(ep, "html_soft_cooldown_until", 0.0) <= now]
         return fresh if fresh else candidates
 
-    def select_endpoint(self) -> Optional[WorkspaceEndpoint]:
-        available = self._prefer_html_fresh(self.get_available_endpoints())
+    @staticmethod
+    def _prefer_untried(candidates, tried):
+        if not tried:
+            return candidates
+        untried = [ep for ep in candidates if ep.name not in tried]
+        note_candidate_selection(len(candidates), len(tried), len(untried))
+        # All preferred candidates have been tried: retain the existing bounded
+        # same-endpoint policy, rather than inventing a new retry or fallback.
+        return untried or candidates
+
+    def select_endpoint(self, *, model=None, tried=None) -> Optional[WorkspaceEndpoint]:
+        compatible = [ep for ep in self.get_available_endpoints()
+                      if model is None or not getattr(ep, 'models', []) or model in ep.models]
+        available = self._prefer_untried(self._prefer_html_fresh(compatible), tried)
         if not available:
             logger.error("No available endpoints!")
             return None
@@ -2290,11 +2310,11 @@ class LoadBalancer:
             weights = [ep.weight for ep in available]
             return random.choices(available, weights=weights, k=1)[0]
 
-    def select_endpoint_for_model(self, model: str):
+    def select_endpoint_for_model(self, model: str, *, tried=None):
         """从可用端点中筛选支持指定模型的端点，再按策略选择。
         P1.3: HTML 软熔断优先跳过；全冷却时降级到"最小活跃"（同 CopilotProxy._select_endpoint 语义）。"""
         available = self.get_available_endpoints()
-        matched = self._prefer_html_fresh([ep for ep in available if model in ep.deployments])
+        matched = self._prefer_untried(self._prefer_html_fresh([ep for ep in available if model in ep.deployments]), tried)
         if not matched:
             return None
 
@@ -2610,11 +2630,16 @@ class ClaudeProxy:
         last_error = None
         model = body.get("model", "unknown")
         start_time = time.time()
+        tried = set()
 
         for attempt in range(max_retries):
-            endpoint = self.load_balancer.select_endpoint()
+            endpoint = self.load_balancer.select_endpoint(model=model, tried=tried)
             if not endpoint:
+                if self.load_balancer.endpoints and not any(not ep.models or model in ep.models for ep in self.load_balancer.endpoints):
+                    raise HTTPException(status_code=404, detail={'error': {'code': 'unsupported_model',
+                        'message': 'No configured Databricks endpoint permits this model'}})
                 raise self.load_balancer.unavailable()
+            tried.add(endpoint.name)
 
             attempt_lease = await self.load_balancer.on_request_start(endpoint)
 
@@ -2729,6 +2754,7 @@ class ClaudeProxy:
         """流式请求 - 直接透传 Databricks 的 Anthropic 格式响应，支持重试"""
 
         proxy_self = self
+        tried = {endpoint.name}
 
         request_lease = {"endpoint": endpoint, "active": True,
                          "lease": attempt_lease if attempt_lease is not None else self.load_balancer.current_attempt(endpoint)}
@@ -2746,6 +2772,7 @@ class ClaudeProxy:
             if request_lease["active"]:
                 raise RuntimeError("Databricks stream request lease already active")
             request_lease["endpoint"] = current
+            tried.add(current.name)
             request_lease["lease"] = await proxy_self.load_balancer.on_request_start(current)
             request_lease["active"] = True
 
@@ -2807,7 +2834,7 @@ class ClaudeProxy:
                         if _retry_rejected_response(response, attempt, max_retries):
                             logger.warning(f"{current_endpoint.name} returned {response.status_code}, retrying stream...")
                             await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
-                            new_endpoint = proxy_self.load_balancer.select_endpoint()
+                            new_endpoint = proxy_self.load_balancer.select_endpoint(model=model, tried=tried)
                             if new_endpoint:
                                 current_endpoint = new_endpoint
                                 current_url = f"{current_endpoint.api_base}/anthropic/v1/messages"
@@ -2874,7 +2901,7 @@ class ClaudeProxy:
 
                     if response is None and not sent_any_content and _replay_safe_transport_failure(e) and attempt < max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
-                        new_endpoint = proxy_self.load_balancer.select_endpoint()
+                        new_endpoint = proxy_self.load_balancer.select_endpoint(model=model, tried=tried)
                         if new_endpoint:
                             current_endpoint = new_endpoint
                             current_url = f"{current_endpoint.api_base}/anthropic/v1/messages"
@@ -3005,12 +3032,13 @@ class AzureOpenAIProxy:
         max_retries = 3
         last_error = None
         start_time = time.time()
+        tried = set()
 
         if stream and api_type == "chat" and "stream_options" not in body:
             body["stream_options"] = {"include_usage": True}
 
         for attempt in range(max_retries):
-            endpoint = self.load_balancer.select_endpoint_for_model(model)
+            endpoint = self.load_balancer.select_endpoint_for_model(model, tried=tried)
             if not endpoint:
                 if any(model in ep.deployments for ep in self.load_balancer.endpoints):
                     raise self.load_balancer.unavailable([ep for ep in self.load_balancer.endpoints if model in ep.deployments])
@@ -3020,6 +3048,7 @@ class AzureOpenAIProxy:
                 )
 
             attempt_lease = await self.load_balancer.on_request_start(endpoint)
+            tried.add(endpoint.name)
             attempt_ended = False
 
             async def end_attempt(success: bool, is_client_error: bool = False, *, cancelled=False):
@@ -3143,6 +3172,7 @@ class AzureOpenAIProxy:
         """流式请求 - 透传 SSE，支持流内重试"""
 
         proxy_self = self
+        tried = {endpoint.name}
         max_retries = 3
         request_lease = {"endpoint": endpoint, "active": True,
                          "lease": attempt_lease if attempt_lease is not None else self.load_balancer.current_attempt(endpoint)}
@@ -3161,6 +3191,7 @@ class AzureOpenAIProxy:
             if request_lease["active"]:
                 raise RuntimeError("Azure stream request lease already active")
             request_lease["endpoint"] = current
+            tried.add(current.name)
             request_lease["lease"] = await proxy_self.load_balancer.on_request_start(current)
             request_lease["active"] = True
 
@@ -3218,7 +3249,7 @@ class AzureOpenAIProxy:
                         if _retry_rejected_response(response, attempt, max_retries):
                             logger.warning(f"{current_endpoint.name} returned {response.status_code}, retrying stream...")
                             await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
-                            new_endpoint = proxy_self.load_balancer.select_endpoint_for_model(model)
+                            new_endpoint = proxy_self.load_balancer.select_endpoint_for_model(model, tried=tried)
                             if new_endpoint:
                                 current_endpoint = new_endpoint
                                 if api_type == "responses":
@@ -3275,7 +3306,7 @@ class AzureOpenAIProxy:
                     # 已向客户端输出过 chunk 就不能再重放; 否则可以切端点重试
                     if response is None and not sent_any_chunk and _replay_safe_transport_failure(e) and attempt < max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
-                        new_endpoint = proxy_self.load_balancer.select_endpoint_for_model(model)
+                        new_endpoint = proxy_self.load_balancer.select_endpoint_for_model(model, tried=tried)
                         if new_endpoint:
                             current_endpoint = new_endpoint
                             if api_type == "responses":
@@ -4365,7 +4396,7 @@ class CopilotProxy:
 
     def _select_endpoint(self, model: str, api_type: Optional[str] = None,
                           *, pinned: Optional[CopilotEndpoint] = None,
-                          session_key: Optional[str] = None) -> Optional[CopilotEndpoint]:
+                          session_key: Optional[str] = None, tried=None) -> Optional[CopilotEndpoint]:
         """从可用端点中筛选支持指定模型的端点。空 models = 通配。
 
         ``api_type``（e390237 引入）：按上游 API 类型过滤——账户可能只启用
@@ -4394,7 +4425,7 @@ class CopilotProxy:
         fresh = [ep for ep in matched if ep.html_soft_cooldown_until <= now]
         pool = fresh if fresh else matched  # 全部冷却时降级到"最小活跃"选一个而不是拒绝
         if len(pool) == 1:
-            return pool[0]
+            return self.load_balancer._prefer_untried(pool, tried)[0]
 
         # 会话亲和：同一会话的每一轮都落到同一个账户，否则跨账户回放 opaque state
         # 必然 401（实测 24/24）。哈希打在**配置态的合格集合**上而不是 pool 上 ——
@@ -4411,6 +4442,7 @@ class CopilotProxy:
                     return preferred
                 self._note_session_affinity("unavailable")
 
+        pool = self.load_balancer._prefer_untried(pool, tried)
         strategy = self.load_balancer.strategy
         if strategy == "least_requests":
             min_active = min(ep.active_requests / ep.weight for ep in pool)
@@ -4913,6 +4945,7 @@ class CopilotProxy:
         # 携带 opaque state 的请求首次选定后钉住，禁止跨 endpoint 重放（handoff §7.2）
         is_stateful = self._request_has_opaque_state(body, api_type)
         pinned_endpoint: Optional[CopilotEndpoint] = None
+        tried = set()
 
         # 流式请求注入 stream_options 以获取 usage（Copilot 兼容 OpenAI Chat 流约定）
         if stream and api_type == "chat" and "stream_options" not in body:
@@ -4954,7 +4987,7 @@ class CopilotProxy:
             endpoint = self._select_endpoint(
                 model, api_type,
                 pinned=pinned_endpoint if is_stateful else None,
-                session_key=session_key)
+                session_key=session_key, tried=tried)
             if not endpoint:
                 if is_stateful and pinned_endpoint is not None:
                     # pinned endpoint 掉线 → 直接抛 503，让客户端知道要重新构造会话
@@ -4979,6 +5012,7 @@ class CopilotProxy:
                 raise HTTPException(status_code=404, detail={"error": {"code": "unsupported_model", "message": "No configured Copilot route for this model"}})
             if is_stateful and pinned_endpoint is None:
                 pinned_endpoint = endpoint
+            tried.add(endpoint.name)
 
             attempt_lease = await self.load_balancer.on_request_start(endpoint)
             attempt_ended = False
@@ -5290,6 +5324,7 @@ class CopilotProxy:
                                 recovery: Optional["_OpaqueStateRecovery"] = None) -> StreamingResponse:
         """流式请求，复用 AzureOpenAIProxy._stream_response 同款 pump + heartbeat + sent_any_chunk 守卫架构"""
         proxy_self = self
+        tried = {endpoint.name}
         if recovery is None:  # 直接调用（测试 / 低层调用者）也要有预算
             recovery = _OpaqueStateRecovery(self, api_type)
         # 换端点时也要遵守会话亲和（pinned 优先级更高：它管的是同一请求内不许换）
@@ -5349,6 +5384,7 @@ class CopilotProxy:
             if request_lease["active"]:
                 raise RuntimeError("Copilot stream request lease already active")
             request_lease["endpoint"] = current
+            tried.add(current.name)
             request_lease["lease"] = await proxy_self.load_balancer.on_request_start(current)
             request_lease["active"] = True
             if connection_id and connection_id in proxy_self._stream_connections:
@@ -5605,7 +5641,7 @@ class CopilotProxy:
                             logger.warning(f"[Copilot] {current_endpoint.name} returned {response.status_code}, retrying stream...")
                             await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                             new_endpoint = proxy_self._select_endpoint(model, api_type, pinned=stateful_pin,
-                                                                 session_key=session_key)
+                                                                 session_key=session_key, tried=tried)
                             # stateful 请求且 pinned 已 unavailable → new_endpoint 为 None → 跳过 retry
                             if is_stateful and new_endpoint is None:
                                 proxy_self._note_stateful_pin("http_5xx")
@@ -5733,7 +5769,7 @@ class CopilotProxy:
                     ):
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         new_endpoint = proxy_self._select_endpoint(model, api_type, pinned=stateful_pin,
-                                                                 session_key=session_key)
+                                                                 session_key=session_key, tried=tried)
                         if is_stateful and new_endpoint is None:
                             proxy_self._note_stateful_pin("pool_acquire_timeout")
                             logger.warning(
@@ -5815,7 +5851,7 @@ class CopilotProxy:
                     if response is None and not sent_any_chunk and _replay_safe_transport_failure(e) and attempt < max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         new_endpoint = proxy_self._select_endpoint(model, api_type, pinned=stateful_pin,
-                                                                 session_key=session_key)
+                                                                 session_key=session_key, tried=tried)
                         if is_stateful and new_endpoint is None:
                             proxy_self._note_stateful_pin("network_error")
                             logger.warning(
@@ -6136,6 +6172,7 @@ def load_config(config_path: str = "config.yaml") -> tuple:
             api_base=ep["api_base"],
             token=expand_env_vars(ep["token"]),
             weight=ep.get("weight", 1),
+            models=ep.get("models", []),
         ))
         logger.info(f"Loaded Databricks endpoint: {ep['name']}")
 

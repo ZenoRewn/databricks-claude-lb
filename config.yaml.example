@@ -17,6 +17,9 @@ endpoints:
     api_base: https://adb-xxxxxxxxxxxx.xx.azuredatabricks.net/serving-endpoints
     token: ${DATABRICKS_TOKEN_1}  # 支持环境变量，或直接填写 token: dapixxxxxxxx
     weight: 1
+    # 可选模型白名单，使用转换后的 Databricks 原生模型名。
+    # 缺省/空列表保留旧的通配路由；列表是路由配置，不是上游能力验证证明。
+    # models: [databricks-claude-opus-5, databricks-claude-sonnet-5]
 
   - name: workspace-2
     api_base: https://adb-yyyyyyyyyyyy.yy.azuredatabricks.net/serving-endpoints

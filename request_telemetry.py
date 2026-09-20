@@ -13,7 +13,7 @@ import logging
 import re
 import time
 import uuid
-from request_budget import startup_budget, UpstreamStartupTimeout
+from request_budget import startup_budget, UpstreamStartupTimeout, remaining_seconds
 
 logger = logging.getLogger('main')
 ROUTES = {'/v1/messages':'messages', '/v1/responses':'responses', '/v1/chat/completions':'chat'}
@@ -45,6 +45,7 @@ class RequestTelemetry:
         self.admissions = Counter()
         self.sends = Counter()
         self.send_results = Counter()
+        self.retry_decisions = Counter()
         self.latency_sum = Counter()
         self.latency_buckets = Counter()
 
@@ -66,6 +67,9 @@ class RequestTelemetry:
         metric('lb_upstream_send_finished_total','Send result; response means headers or buffered body received, not generation success','counter',
                [f'lb_upstream_send_finished_total{{provider="{provider}",api_type="{api}",result="{result}"}} {count}'
                 for (provider,api,result),count in sorted(self.send_results.items())])
+        metric('lb_retry_decisions_total','HTTP retry decisions under existing replay policy','counter',
+               [f'lb_retry_decisions_total{{reason="{reason}"}} {self.retry_decisions[reason]}'
+                for reason in ('retry_429','upstream_cooldown','attempt_budget_exhausted','status_not_retryable')])
         samples = []
         for api in APIS:
             for outcome in OUTCOMES:
@@ -100,6 +104,25 @@ def note_admission():
     if record:
         record.admissions += 1
         record.metrics.admissions[record.api_type] += 1
+
+
+def note_candidate_selection(eligible_count, tried_count, untried_count):
+    record = CURRENT.get()
+    log_event({'kind':'lb_candidate_selection','lb_request_id':record.request_id if record else None,
+               'eligible_count':eligible_count,'tried_count':tried_count,'untried_count':untried_count,
+               'selection_reason':'untried_preferred' if untried_count else 'bounded_revisit'})
+
+
+def note_retry_decision(status, attempt, max_attempts, retry_after_present, allowed):
+    record = CURRENT.get()
+    reason = ('status_not_retryable' if status != 429 else 'attempt_budget_exhausted'
+              if attempt >= max_attempts-1 else 'upstream_cooldown' if retry_after_present else 'retry_429')
+    (record.metrics if record else TELEMETRY).retry_decisions[reason] += 1
+    log_event({'kind':'lb_retry_decision','lb_request_id':record.request_id if record else None,
+               'upstream_status':status,'reason':reason,'retry_allowed':bool(allowed),
+               'execution_certainty':'admission_rejected' if status==429 else 'unknown',
+               'retry_after_present':bool(retry_after_present),
+               'remaining_loop_attempts':max(0,max_attempts-attempt-1),'remaining_seconds':remaining_seconds()})
 
 
 def note_admission_end(success, *, cancelled=False, neutral=False):

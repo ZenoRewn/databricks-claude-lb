@@ -65,6 +65,10 @@ send started 不证明字节已经上网或上游已执行；PoolTimeout 也属�
 
 ## 日报与归档组件
 
+第三批还增加了请求内候选记录：DB/Azure 优先选择尚未尝试且模型兼容、满足熔断/软冷却条件的候选；候选都尝试过后仍沿用原有有界同端重试。Copilot 的 pinned account 和已命中的 session affinity 优先于此策略，避免为了轮换破坏会话状态。没有自动更换模型或 provider，也没有把所有 workspace 视为独立配额。
+
+Databricks 可选 `endpoints[].models` 白名单使用转换后的原生模型名；缺省或空列表维持兼容的通配行为，非空列表不匹配返回 unsupported_model。配置本身不是能力验证证据。`lb_retry_decisions_total` 和结构化候选/重试日志解释状态白名单、Retry-After、剩余循环次数、候选/已尝试数量及总预算；仍只有原先允许的 429 条件可触发状态码重试。
+
 `operations.reporting` 是纯 Python 标准库工具，不调用模型、不发送消息、不修改 scheduler。现有 OpenClaw watcher 应将其快照适配成 [example-snapshots.json](../operations/example-snapshots.json) 的结构，再使用计算结果生成解释。示例数据完全为合成数据。
 
 每条快照需要带时区的 `timestamp`、`pod_uid`、`container_start_time`、`collection_status` 和 `metrics`。指标单位由 `metric_units` 明确声明。字段剥离数的单位是 fields，不是 token。失败采集仍需保留一条快照记录，不能删掉失败样本后跨过去相减。
