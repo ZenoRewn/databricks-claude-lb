@@ -100,6 +100,21 @@ class ResultConsistencyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(error['retryable'])
                 self.assertEqual(r['sends'], 1)
 
+    async def test_unknown_empty_stream_has_both_retry_suppression_signals(self):
+        for provider, api in [('databricks','messages'),('azure','responses'),('azure','chat'),('copilot','responses'),('copilot','chat')]:
+            with self.subTest(provider=provider, api=api):
+                r=await self.drive(provider,api,b'',stream=True,content_type='text/event-stream')
+                self.assertEqual(r['headers'].get('x-should-retry'),'false')
+                events=[json.loads(line[5:]) for line in r['wire'].decode().splitlines()
+                        if line.startswith('data:') and line[5:].strip()!='[DONE]']
+                error=events[-1].get('error') or events[-1]['response']['error']
+                self.assertFalse(error['retryable'])
+                self.assertEqual(error['execution_certainty'],'unknown')
+                self.assertEqual(r['sends'],1)
+                self.assertEqual(r['ep'].completed_requests,0)
+                self.assertEqual(r['ep'].active_requests,0)
+                self.assertEqual(r['events'],[])
+
     async def test_context_rejection_is_neutral_in_both_modes(self):
         for stream in (False, True):
             r = await self.drive('databricks','messages', {'error': {'code':'context_length_exceeded','message':'input exceeds context window'}}, stream=stream, status=400)

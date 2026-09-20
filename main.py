@@ -577,6 +577,12 @@ class _LifecycleStreamingResponse(StreamingResponse):
     otherwise retain its httpx response and endpoint request slot.
     """
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Headers precede upstream execution in the existing streaming contract.
+        # Fence automatic replay up front, including a later ambiguous failure.
+        self.headers['X-Should-Retry'] = 'false'
+
     async def __call__(self, scope, receive, send):
         try:
             await super().__call__(scope, receive, send)
@@ -633,7 +639,8 @@ def _sse_terminal_error(api_type: str, code: str, message: str,
     OpenAI Python SDK, some enterprise wrappers).
     """
     message = _apply_request_id_prefix(message, metadata)
-    error_body: dict = {"code": code, "message": message}
+    error_body: dict = {"code": code, "message": message,
+                        "retryable": False, "execution_certainty": "unknown"}
     if metadata:
         error_body["metadata"] = metadata
     if api_type == "responses":
