@@ -6302,6 +6302,7 @@ usage_store: Optional[UsageDataStore] = None
 
 
 async def _stop_runtime(tasks, store, clients):
+    cancelled = None
     for task in tasks:
         if task is not None:
             task.cancel()
@@ -6316,14 +6317,20 @@ async def _stop_runtime(tasks, store, clients):
     if store:
         try:
             await store.stop()
+        except asyncio.CancelledError as exc:
+            cancelled = exc
         except Exception as exc:
             logger.error('Usage shutdown flush failed (%s); inference clients still close',type(exc).__name__)
     for instance in clients:
         if instance is not None:
             try:
                 await instance.close()
+            except asyncio.CancelledError as exc:
+                cancelled = exc
             except Exception as exc:
                 logger.error('Inference client close failed: %s',type(exc).__name__)
+    if cancelled is not None:
+        raise cancelled
 
 
 @asynccontextmanager

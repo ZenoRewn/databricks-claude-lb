@@ -206,6 +206,17 @@ class TransactionPool:
 
 
 class MysqlTransactionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_concurrent_reconnect_has_one_pool_owner(self):
+        from unittest.mock import AsyncMock
+        store=MysqlUsageStore({'host':'synthetic.invalid'})
+        async def connect():
+            await asyncio.sleep(0)
+            store._pool=TransactionPool()
+        start=AsyncMock(side_effect=connect)
+        with patch.object(store,'_backend_start',start):
+            await asyncio.gather(*(store._ensure_backend() for _ in range(5)))
+        self.assertEqual(start.await_count,1)
+
     def store(self):
         store=MysqlUsageStore({'host':'synthetic.invalid'})
         store._pool=TransactionPool();return store

@@ -41,6 +41,13 @@ class DrainTests(unittest.TestCase):
 
 
 class ReadinessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancelled_store_shutdown_still_closes_all_clients(self):
+        import asyncio
+        store=SimpleNamespace(stop=AsyncMock(side_effect=asyncio.CancelledError))
+        clients=[SimpleNamespace(close=AsyncMock()),SimpleNamespace(close=AsyncMock())]
+        with self.assertRaises(asyncio.CancelledError):await main._stop_runtime((),store,clients)
+        for client in clients:client.close.assert_awaited_once()
+
     async def test_shared_upstream_failure_does_not_remove_a_locally_ready_gateway(self):
         ep=main.WorkspaceEndpoint('fixture','https://fixture.invalid','synthetic')
         ep.circuit_open=True;ep.circuit_retry_at=float('inf')

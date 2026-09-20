@@ -385,6 +385,7 @@ class MysqlUsageStore(UsageDataStore):
         super().__init__(retention_days)
         self._mysql_config = mysql_config
         self._pool = None
+        self._backend_lock = asyncio.Lock()
 
     async def _backend_start(self):
         import aiomysql
@@ -412,8 +413,10 @@ class MysqlUsageStore(UsageDataStore):
 
     async def _ensure_backend(self):
         if self._pool is None or getattr(self._pool,'closed',False):
-            async with asyncio.timeout(IO_TIMEOUT):
-                await self._backend_start()
+            async with self._backend_lock:
+                if self._pool is None or getattr(self._pool,'closed',False):
+                    async with asyncio.timeout(IO_TIMEOUT):
+                        await self._backend_start()
 
     async def _create_schema(self):
         async with self._pool.acquire() as conn:
