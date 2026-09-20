@@ -69,8 +69,12 @@ class Scenarios:
         (self.output/(rid+'.json')).write_text(json.dumps(receipt,indent=2)+'\n')
         print(json.dumps({'case':rid,'phase':record['phase'],'provider_sends':sends}),flush=True)
     def ordinary(self,rid,mode=None,phase=None):
-        self.fault({'release_id':rid,'mode':mode,'phase':phase} if mode else {})
+        fault={'release_id':rid,'mode':mode} if mode else {}
+        if phase is not None:fault['phase']=phase
+        self.fault(fault)
         sends=self.upstream_count();old,new=self.submit(rid);record=self.wait(rid)
+        if mode and not json.loads(self.api.get('configmap',OPS,'lb-lab-fault')['data']['fault.json']).get('consumed'):
+            raise AssertionError('Requested fault was not injected')
         expected='rolled_back' if mode in ('journal_failure','verification_failure') else 'succeeded'
         self.verify(rid,record,expected,old if expected=='rolled_back' else new,sends,0 if expected=='rolled_back' else 3)
         self.fault({})

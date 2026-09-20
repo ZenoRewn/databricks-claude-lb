@@ -46,4 +46,6 @@ PYTHONPATH=. python tests/release/run_kind_scenarios.py \
 
 每个 case ID 只运行一次以保护原始材料。失败记录保留，修复后使用新 ID；不能重写成通过。测试结束后删除任务创建的 Kind 集群、本地 registry 和临时数据库容器，保留脱敏回执，私有目录不纳入 Git。
 
+`run_kind_contention.py` 使用相同的显式 context/kubeconfig 防护，对真实 API Server 执行十轮同时争抢 Lease，要求每轮仅一个所有者，并验证新执行代次会拒绝旧所有者。通过 `--output` 写入新的回执文件，测试只创建并清理临时 Lease。
+
 测试 profile 的全零 Git SHA 是明确的 lab fixture 标记；实际运行文件用逐项 hash 核对。它不是某个发布提交的证明。正式计划须从真实 Git SHA 读取源码，并用固定 registry digest 验证。
