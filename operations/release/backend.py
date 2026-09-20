@@ -244,6 +244,8 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
             self._patch('pod',current,[{'op':'replace','path':'/metadata/finalizers','value':[x for x in current['metadata'].get('finalizers',[]) if x!=FINALIZER]}])
             return
         if not current['metadata'].get('deletionTimestamp') or len(terminated)!=len(current['spec']['containers']):
+            if not current['spec'].get('nodeName'):
+                raise PendingOperation('unscheduled_writer_deletion_not_observed')
             node=self.api.get('node',None,current['spec']['nodeName'])
             if not any(c['type']=='Ready' and c['status']=='True' for c in node['status'].get('conditions',[])):
                 raise UnsafeState('writer_node_unavailable_without_fencing')
