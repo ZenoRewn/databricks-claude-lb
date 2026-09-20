@@ -176,6 +176,8 @@ class AdmissionMiddleware:
             lease = await self.controller.acquire(tenant)
         except AdmissionError as exc:
             scope.setdefault('state',{})['lb_overloaded'] = True
+            scope['state']['lb_draining_at_finish'] = self.controller.draining
+            scope['state']['lb_admission_reason'] = exc.reason
             body = json.dumps({'error':{'code':'lb_overloaded','reason':exc.reason,
                                        'message':'Local inference admission unavailable; retry after cooldown.'}}).encode()
             await send({'type':'http.response.start','status':503,

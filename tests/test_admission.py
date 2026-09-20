@@ -65,6 +65,13 @@ class AdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dict(sent[0]['headers'])[b'retry-after'],b'1')
         self.assertEqual(json.loads(sent[1]['body'])['error']['code'],'lb_overloaded')
         app.assert_not_awaited();first.release()
+
+    async def test_draining_rejection_carries_its_lifecycle_reason(self):
+        c=self.controller();c.drain()
+        scope={'type':'http','method':'POST','path':'/v1/messages','headers':[]}
+        await AdmissionMiddleware(AsyncMock(),controller=c,tenant_for_scope=lambda s:'a')(scope,AsyncMock(),AsyncMock())
+        self.assertTrue(scope['state']['lb_draining_at_finish'])
+        self.assertEqual(scope['state']['lb_admission_reason'],'draining')
     async def test_middleware_holds_slot_until_response_and_cleanup_end(self):
         c=self.controller();states=[]
         async def app(scope,receive,send):
