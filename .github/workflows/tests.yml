@@ -25,10 +25,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          # 生产依赖 + 测试依赖（pytest 用于 subtest 输出；anyio 用于 async 测试）
-          pip install -r requirements.txt
-          pip install pytest pytest-subtests anyio
+          python -m pip install -r requirements-test.lock
 
       - name: Show environment
         run: |
@@ -58,7 +55,7 @@ jobs:
             set -e
             cd /app
             # 首先所有已拆模块/资源必须都在镜像里
-            for f in main.py effort_compat.py request_telemetry.py request_budget.py admission.py gateway_lifecycle.py upstream_body.py usage_store.py otel_setup.py dashboard.html; do
+            for f in main.py effort_compat.py request_telemetry.py request_budget.py admission.py gateway_lifecycle.py upstream_body.py usage_store.py otel_setup.py response_semantics.py cleanup_observability.py release_probe.py dashboard.html; do
               [ -f "$f" ] || { echo "MISSING: $f"; exit 1; }
             done
             # 其次 main.py 顶层能 import，OSErr 不降级隐藏
@@ -94,9 +91,13 @@ jobs:
 
   mysql-usage:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mysql-version: ["8.0", "8.4"]
     services:
       mysql:
-        image: mysql:8.0
+        image: mysql:${{ matrix.mysql-version }}
         env:
           # Disposable CI service only; no production credentials or data.
           MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
