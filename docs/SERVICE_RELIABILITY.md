@@ -102,6 +102,18 @@ JSON 后端仍只支持单写者；磁盘操作移到工作线程，取消时等
 
 **仍然是内存待写队列，不承诺进程/Pod 硬丢失时零丢账。** 若必须零 RPO，需要可靠 outbox 或上游账单对账，这要结合实际存储部署选择。账本事件 payload 按 usage retention 清除，最小 batch ID/date/hash 回执保留以防旧批次重复；清除这些回执前必须确认没有可重试旧批次。用量估算仍不能代替供应商实际账单。
 
+## 本地就绪与排空
+
+新增 `/health/accepting` 只判断本地初始化、路由配置和 draining 状态；共享上游故障不会把整个已初始化网关摘除。原 `/health/ready` 保留为严格的 provider 诊断，`/health/live` 保留为进程存活检查。此批**没有修改 AKS Deployment 探针**。
+
+`LB_DRAIN_FILE` 默认 `/tmp/claude-lb-draining`。文件出现后，接流量检查和推理准入会进入不可逆的进程内 draining 状态：拒绝新工作、唤醒排队请求返回明确 503，允许已准入工作结束。请求终态日志记录 draining_at_finish，不能仅凭该标记断言客户端取消的具体原因。
+
+未来经部署评审可将 `python /app/gateway_lifecycle.py --wait-seconds 45` 用于 preStop。它只创建该 marker、轮询 loopback `/health/accepting`，不调用模型、不删除文件；确认 active/queued 都为 0 才返回 drained=true，状态未知或超时返回 false/退出码 2。等待另有单次 HTTP 读取最多 1 秒的余量。
+
+preStop 等待、Uvicorn 的 30 秒 shutdown timeout 与 cleanup 余量必须共同小于 K8s grace；不能把该命令直接塞入当前 30 秒 grace。单副本提前摘流会拒绝新请求，多副本/调度余量或明确维护窗口仍是采用前提。有限 grace 无法保证所有最长 30 分钟流都完成，也不会恢复已中断生成。
+
+lifespan 关闭现在使用 finally 和受保护的 cleanup owner；warmup、刷新和连接监控任务都被跟踪，usage stop 失败仍会关闭其他客户端。这里只完成了本地行为与测试，未执行生产节点维护演练。
+
 ## 日报与归档组件
 
 `operations.reporting` 是纯 Python 标准库工具，不调用模型、不发送消息、不修改 scheduler。现有 OpenClaw watcher 应将其快照适配成 [example-snapshots.json](../operations/example-snapshots.json) 的结构，再使用计算结果生成解释。示例数据完全为合成数据。

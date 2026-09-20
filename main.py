@@ -15,6 +15,7 @@ from admission import (AdmissionMiddleware, AdmissionError, CURRENT_LEASE,
 from usage_store import (IO_TIMEOUT as USAGE_IO_TIMEOUT_SECONDS,
                          MAX_BUFFER_EVENTS as USAGE_MAX_BUFFER_EVENTS,
                          FLUSH_BATCH_EVENTS as USAGE_FLUSH_BATCH_EVENTS)
+from gateway_lifecycle import sync_drain, DRAIN_MARKER_FILE
 """
 Databricks Claude Load Balancer Proxy for Claude Code
 使用 Databricks 原生 Anthropic 端点 (/anthropic/v1/messages)
@@ -116,6 +117,7 @@ class LBSettings:
     usage_io_timeout_seconds: float
     usage_max_buffer_events: int
     usage_flush_batch_events: int
+    drain_marker_file: str
     # ---- Image compression ----
     img_admission_enabled: bool        # IMG_ADMISSION_ENABLED
     img_compress_concurrency: int      # IMG_COMPRESS_CONCURRENCY=2
@@ -189,6 +191,7 @@ class LBSettings:
             usage_io_timeout_seconds=USAGE_IO_TIMEOUT_SECONDS,
             usage_max_buffer_events=USAGE_MAX_BUFFER_EVENTS,
             usage_flush_batch_events=USAGE_FLUSH_BATCH_EVENTS,
+            drain_marker_file=DRAIN_MARKER_FILE,
             img_admission_enabled=_env_bool("IMG_ADMISSION_ENABLED", True),
             img_compress_concurrency=_env_int("IMG_COMPRESS_CONCURRENCY", 2),
             img_max_count=_env_int("IMG_MAX_COUNT", 50),
@@ -1810,12 +1813,6 @@ class WorkspaceEndpoint:
     api_base: str
     token: str
     weight: int = 1
-    models: list = field(default_factory=list)
-
-    def __post_init__(self):
-        if not isinstance(self.models, list) or not all(isinstance(m, str) and m.strip() for m in self.models):
-            raise ValueError('Databricks models must be a list of nonempty native model names')
-        self.models = [m.strip().lower() for m in self.models]
     
     active_requests: int = field(default=0, repr=False)
     total_requests: int = field(default=0, repr=False)
@@ -1849,6 +1846,13 @@ class WorkspaceEndpoint:
     # 30s 到期即脱敏；不动 total_errors / circuit_open，语义与 CopilotEndpoint 对齐。
     html_soft_cooldown_until: float = field(default=0.0, repr=False)
     upstream_html_events_total: int = field(default=0, repr=False)
+    # Append new configuration fields to preserve legacy positional callers.
+    models: list = field(default_factory=list)
+
+    def __post_init__(self):
+        if not isinstance(self.models, list) or not all(isinstance(m, str) and m.strip() for m in self.models):
+            raise ValueError('Databricks models must be a list of nonempty native model names')
+        self.models = [m.strip().lower() for m in self.models]
 
 
 @dataclass
@@ -6295,9 +6299,35 @@ copilot_proxy: Optional[CopilotProxy] = None
 usage_store: Optional[UsageDataStore] = None
 
 
+async def _stop_runtime(tasks, store, clients):
+    for task in tasks:
+        if task is not None:
+            task.cancel()
+    for task in tasks:
+        if task is not None:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning('Background task ended during shutdown: %s',type(exc).__name__)
+    if store:
+        try:
+            await store.stop()
+        except Exception as exc:
+            logger.error('Usage shutdown flush failed (%s); inference clients still close',type(exc).__name__)
+    for instance in clients:
+        if instance is not None:
+            try:
+                await instance.close()
+            except Exception as exc:
+                logger.error('Inference client close failed: %s',type(exc).__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global proxy, azure_proxy, copilot_proxy, usage_store
+    app.state.lb_initialized = False
     # P3.1: OpenTelemetry tracing — opt-in via OTEL_ENABLED=true. Must run before
     # FastAPIInstrumentor sees any traffic, i.e. inside lifespan startup.
     try:
@@ -6342,11 +6372,12 @@ async def lifespan(app: FastAPI):
         logger.info(f"Azure OpenAI proxy enabled with {len(azure_proxy.load_balancer.endpoints)} endpoints")
     copilot_bg_task: Optional[asyncio.Task] = None
     copilot_connection_monitor_task: Optional[asyncio.Task] = None
+    copilot_warmup_task: Optional[asyncio.Task] = None
     if copilot_proxy:
         logger.info(f"GitHub Copilot proxy enabled with {len(copilot_proxy.load_balancer.endpoints)} endpoints")
         # 后台预热 token，避免阻塞启动；token 无效会在日志中暴露
-        asyncio.create_task(copilot_proxy.warmup())
-        # 后台主动刷新 task：5min 扫一次，session 剩 10min 就刷新（30min token 在 ~20min 处刷新）
+        copilot_warmup_task = asyncio.create_task(copilot_proxy.warmup())
+        # 刷新时机以上游 expires_at 为准，不假设固定 token TTL。
         refresh_interval = int(os.getenv("COPILOT_REFRESH_INTERVAL", "300"))
         refresh_threshold = int(os.getenv("COPILOT_REFRESH_THRESHOLD", "600"))
         copilot_bg_task = asyncio.create_task(
@@ -6355,30 +6386,15 @@ async def lifespan(app: FastAPI):
         copilot_connection_monitor_task = asyncio.create_task(
             copilot_proxy.connection_monitor_loop()
         )
-    yield
-    if copilot_connection_monitor_task:
-        copilot_connection_monitor_task.cancel()
-        try:
-            await copilot_connection_monitor_task
-        except (asyncio.CancelledError, Exception):
-            pass
-    if copilot_bg_task:
-        copilot_bg_task.cancel()
-        try:
-            await copilot_bg_task
-        except (asyncio.CancelledError, Exception):
-            pass
-    if usage_store:
-        try:
-            await usage_store.stop()
-        except Exception as exc:
-            logger.error('Usage shutdown flush failed (%s); inference clients still close', type(exc).__name__)
-    if proxy:
-        await proxy.close()
-    if azure_proxy:
-        await azure_proxy.close()
-    if copilot_proxy:
-        await copilot_proxy.close()
+    tasks = (copilot_warmup_task,copilot_bg_task,copilot_connection_monitor_task)
+    clients = (proxy,azure_proxy,copilot_proxy)
+    store = usage_store
+    app.state.lb_initialized = True
+    try:
+        yield
+    finally:
+        app.state.lb_initialized = False
+        await _finish_cleanup(_stop_runtime(tasks,store,clients))
 
 
 app = FastAPI(title="Databricks Claude Proxy (Native Anthropic)", lifespan=lifespan)
@@ -6411,6 +6427,7 @@ async def _inject_request_id_middleware(request: Request, call_next):
 
 
 def _admission_tenant(scope):
+    sync_drain(INFERENCE_ADMISSION)
     key = _extract_api_key(Request(scope))
     return (_lookup_tenant(key) or 'default') if _verify_lb_api_key(key) else None
 
@@ -7551,6 +7568,19 @@ async def health_ready():
     if issues:
         raise HTTPException(status_code=503, detail={"status": "not_ready", "issues": issues})
     return {"status": "ready"}
+
+
+@app.get('/health/accepting')
+async def health_accepting():
+    """Local routing readiness; shared provider faults remain /health/ready diagnostics."""
+    draining = sync_drain(INFERENCE_ADMISSION)
+    initialized = bool(getattr(app.state,'lb_initialized',False))
+    configured = any(instance and instance.load_balancer.endpoints for instance in (proxy,azure_proxy,copilot_proxy))
+    accepting = initialized and configured and not draining
+    status = 'accepting' if accepting else 'draining' if draining else 'starting' if not initialized else 'not_configured'
+    return JSONResponse(status_code=200 if accepting else 503,content={
+        'status':status,'initialized':initialized,'draining':draining,
+        'active_requests':INFERENCE_ADMISSION.active,'queued_requests':len(INFERENCE_ADMISSION.waiters)})
 
 
 @app.get("/metrics")

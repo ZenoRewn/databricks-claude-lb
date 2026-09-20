@@ -194,6 +194,7 @@ docker-compose up -d
 | `/v1/chat/completions` | POST | 需要 | OpenAI Chat Completions API（按模型分流：同上） |
 | `/health`、`/health/live` | GET | 不需要 | Liveness probe（仅检查进程） |
 | `/health/ready` | GET | 不需要 | Readiness probe（检查依赖；故障返回 503 + `issues` 数组） |
+| `/health/accepting` | GET | 不需要 | 本地接流量就绪：初始化完成、路由已配置且未 draining；上游健康另查 `/health/ready` |
 | `/metrics` | GET | 不需要 | Prometheus 文本格式 metrics（K8s / Azure Monitor 抓取） |
 | `/admin/copilot/reload` | POST | 需要 | 运维端点：从源重读所有 Copilot endpoint 的 long-lived token + 强制刷新 session（K8s Secret rotation 后立刻生效） |
 | `/admin/copilot/reset-pool` | POST | 需要 | 运维端点：重建共享 httpx.AsyncClient，逐出所有 keepalive/半开连接（怀疑连接池泄漏或 upstream_stall 持续增长时使用） |

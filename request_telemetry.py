@@ -282,6 +282,7 @@ class RequestTelemetryMiddleware:
             fields={'kind':'lb_request_end','lb_request_id':record.request_id,'api_type':api_type,
                     'request_id':safe_id(scope.get('state',{}).get('request_id')),
                     'operation_id':operation_id,
+                    'draining_at_finish':bool(scope.get('state',{}).get('lb_draining_at_finish')),
                     'outcome':outcome,'http_status':status,'generation_outcome':record.generation,
                     'downstream_body_completed':body_complete,'admissions':record.admissions,
                     'upstream_sends':record.sends,'duration_seconds':round(elapsed,6)}

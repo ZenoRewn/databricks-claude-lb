@@ -185,5 +185,6 @@ class AdmissionMiddleware:
         try:
             await self.app(scope,receive,send)
         finally:
+            scope.setdefault('state',{})['lb_draining_at_finish'] = self.controller.draining
             CURRENT_LEASE.reset(token)
             lease.release()

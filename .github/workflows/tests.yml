@@ -58,7 +58,7 @@ jobs:
             set -e
             cd /app
             # 首先所有已拆模块/资源必须都在镜像里
-            for f in main.py effort_compat.py request_telemetry.py request_budget.py admission.py upstream_body.py usage_store.py otel_setup.py dashboard.html; do
+            for f in main.py effort_compat.py request_telemetry.py request_budget.py admission.py gateway_lifecycle.py upstream_body.py usage_store.py otel_setup.py dashboard.html; do
               [ -f "$f" ] || { echo "MISSING: $f"; exit 1; }
             done
             # 其次 main.py 顶层能 import，OSErr 不降级隐藏
@@ -118,4 +118,3 @@ jobs:
         env:
           LB_TEST_MYSQL_ISOLATED: "1"
         run: python -m unittest discover -s tests/integration -p test_mysql_usage.py -v
-

@@ -8,6 +8,11 @@ import main
 
 
 class CandidateTests(unittest.TestCase):
+    def test_model_allowlist_does_not_change_legacy_positional_fields(self):
+        endpoint=main.WorkspaceEndpoint('a','https://a.invalid','synthetic',1,7)
+        self.assertEqual(endpoint.active_requests,7)
+        self.assertEqual(endpoint.models,[])
+
     def test_tried_endpoint_does_not_win_weighted_selection_again(self):
         a=main.WorkspaceEndpoint('a','https://a.invalid','synthetic',weight=1000)
         b=main.WorkspaceEndpoint('b','https://b.invalid','synthetic')
