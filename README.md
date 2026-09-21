@@ -8,6 +8,8 @@ Author: Zeno Ren
 
 合并前追加的独立 QA、三项缺陷修复及回归记录见 [独立复核](docs/reviews/2026-09-21-main-merge/REVIEW.md)。
 
+Copilot 实时费用采用 [GHCP 官方价格映射](docs/COPILOT_PRICING.md)，包含新模型、缓存写入和长上下文档位；估算与实际账单的边界见该说明。
+
 一个智能负载均衡代理，统一对接 **Databricks Claude**、**Azure OpenAI** 和 **GitHub Copilot** 三套上游，按模型自动路由。
 
 **运行契约：** [SSE framing、8 MiB/64 MiB 可配置资源策略、Copilot `api_types` 兼容性](docs/STREAM_PROTOCOL.md)。这些字节预算不是模型 token 上限或上游截断结论。

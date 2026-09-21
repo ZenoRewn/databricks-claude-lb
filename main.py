@@ -1,4 +1,5 @@
 from effort_compat import preserve_native_effort, effort_response_headers, databricks_parameter_drops
+from copilot_pricing import record_estimate as record_copilot_estimate, cost_view as copilot_cost_view, summarize_costs as copilot_cost_summary, METADATA as COPILOT_PRICING_METADATA
 from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_call,
                                note_admission, note_admission_end, note_generation,
                                note_json_result, note_candidate_selection, note_retry_decision,
@@ -1238,12 +1239,12 @@ DEFAULT_MODEL = "databricks-claude-sonnet-4-6"
 # 模型定价（USD per 1M tokens）
 # - Anthropic：Anthropic 官方 API 公开价
 # - OpenAI / Google：OpenAI / Google API 公开价
-# - GitHub Copilot 是订阅制无 per-token 计费；这里用对应底层模型的 API 价做"假想成本"对照
+# - 此表保留通用 API/历史累计参考口径；Copilot 实时估算使用独立的 copilot_pricing 官方表。
 # - 子串匹配（按 key 长度降序优先），所以 "gpt-4o-mini" 必须排在 "gpt-4o" 之前才能被 specific 匹配；
 #   实际靠 get_model_pricing() 的排序保障，dict 顺序仅作可读性
 MODEL_PRICING = {
     # 数据源：Anthropic https://claude.com/pricing、OpenAI https://developers.openai.com/api/docs/pricing
-    # 最近核对：2026-09-08。GHCP 实际是订阅制，此处仅作 API 层"假想成本"用于横向对照。
+    # 最近核对：2026-09-08。不作为 GitHub Copilot 当前分档计费表。
     #
     # 定价 key 约定：
     #   - input / output：USD per 1M tokens
@@ -4649,6 +4650,8 @@ class CopilotProxy:
         self.global_stats.total_response_time += elapsed
         self.global_stats.successful_requests += int(generation_outcome == "completed")
         self.global_stats.total_requests += 1
+        record_copilot_estimate(endpoint.model_stats[model],model,input_tokens,output_tokens,
+                                cache_creation_tokens,cache_read_tokens,usage_fields)
         if usage_store and (usage_fields is None or usage_fields):
             usage_store.record(model, input_tokens, output_tokens,
                                cache_creation_tokens, cache_read_tokens,
@@ -6075,7 +6078,7 @@ class CopilotProxy:
                 "total_cache_read_tokens": ep.total_cache_read_tokens,
                 "total_tokens": ep.total_input_tokens + ep.total_output_tokens,
                 "avg_response_time_ms": round(ep.total_response_time / ep.successful_requests * 1000, 1) if ep.successful_requests > 0 else 0,
-                "model_stats": ep.model_stats,
+                "model_stats": {model:copilot_cost_view(values) for model,values in ep.model_stats.items()},
                 "models": ep.models,  # 用 'models' 区别于 Azure 的 'deployments'
                 "session_token_expires_at": ep.session_token_expires_at,
                 # HTML 软熔断诊断字段
@@ -6084,8 +6087,11 @@ class CopilotProxy:
                 "html_soft_cooldown_remaining_seconds": max(0.0, ep.html_soft_cooldown_until - now_ts),
             })
         total_active = sum(ep.active_requests for ep in self.load_balancer.endpoints)
+        costs=copilot_cost_summary(model for ep in endpoints_stats for model in ep["model_stats"].values())
         return {
+            "pricing": dict(COPILOT_PRICING_METADATA),
             "global": {
+                **costs,
                 "uptime_seconds": round(uptime, 1),
                 "total_requests": gs.total_requests,
                 "total_errors": gs.total_errors,
@@ -8178,14 +8184,7 @@ async def stats():
                     mstats["estimated_cost_usd"] = cost
         result["azure_openai"] = azure_stats
     if copilot_proxy:
-        copilot_stats = copilot_proxy.get_stats()
-        for ep in copilot_stats.get("endpoints", []):
-            for model_name, mstats in (ep.get("model_stats") or {}).items():
-                cost = calculate_cost(model_name, mstats["input_tokens"], mstats["output_tokens"],
-                                      mstats.get("cache_creation_tokens", 0), mstats.get("cache_read_tokens", 0))
-                if cost is not None:
-                    mstats["estimated_cost_usd"] = cost
-        result["github_copilot"] = copilot_stats
+        result["github_copilot"] = copilot_proxy.get_stats()
     return result
 
 

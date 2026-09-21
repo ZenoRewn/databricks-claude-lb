@@ -17,7 +17,7 @@ SHA=re.compile(r'[a-f0-9]{40}')
 DIGEST=re.compile(r'[^\s@]+@sha256:[a-f0-9]{64}')
 APP_FILES=('main.py','effort_compat.py','request_telemetry.py','request_budget.py','admission.py',
            'gateway_lifecycle.py','upstream_body.py','usage_store.py','otel_setup.py','dashboard.html',
-           'response_semantics.py','cleanup_observability.py','release_probe.py')
+           'response_semantics.py','cleanup_observability.py','copilot_pricing.py','release_probe.py')
 
 
 def encoded(value):return json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
