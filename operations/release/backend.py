@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 from .engine import OwnershipLost,PendingOperation,UnsafeState
 from .model import APP_FILES,CONTROL,EPOCH,FINALIZER,GATE,RECOVER,SPEC,digest,target_pod_spec
-from .snapshot import protected_spec,matches
+from .snapshot import protected_spec,matches,verify_pod_image
 
 def escape(value):return value.replace('~','~0').replace('/','~1')
 
@@ -25,6 +25,13 @@ class Backend:
     def check_owner(self):
         for lease in self.leases:lease.check()
     def deployment_object(self):return self.api.get('deployment',self.namespace,self.deployment)
+    def _verified_old_image(self,pod=None):
+        image=self.snapshot['deployment']['spec']['template']['spec']['containers'][0]['image']
+        try:
+            verify_pod_image(self.snapshot['old_pods'][0],image,self.plan['container'])
+            if pod is not None:verify_pod_image(pod,image,self.plan['container'])
+        except ValueError as exc:raise UnsafeState(str(exc)) from None
+        return image
     def _annotations(self,obj):return obj['metadata'].get('annotations',{})
     def _claim(self,kind,obj):
         self.check_owner();annotations=dict(self._annotations(obj));owner=annotations.get(CONTROL)
@@ -289,6 +296,7 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
         if action=='preflight':
             if bool(self.plan.get('lab'))!=self.lab:raise UnsafeState('lab_profile_mismatch')
             if digest(self.snapshot)!=self.plan['snapshot_sha256']:raise UnsafeState('private_backup_hash_mismatch')
+            self._verified_old_image()
             self._verify_references()
             self._verify_public_targets()
             d=self.deployment_object()
@@ -308,6 +316,7 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
             if len({p['spec'].get('nodeName') for p in ready})<2:raise PendingOperation('two_coordinators_on_distinct_nodes_required')
             old=self._old_pod()
             if old is None:raise UnsafeState('old_pod_missing')
+            self._verified_old_image(old)
             diagnostics=self._diagnostics(old);version=diagnostics['accepting'].get('release_control_version',0)
             if version<2 and not self.plan['legacy_bootstrap']:raise UnsafeState('bootstrap_not_allowed')
             if version<2:
@@ -365,6 +374,7 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
         elif action=='resume_old':
             old=self._old_pod()
             if old is None or old['metadata'].get('deletionTimestamp'):raise UnsafeState('old_backend_cannot_resume')
+            self._verified_old_image(old)
             diagnostic=self._diagnostics(old)
             if diagnostic['accepting'].get('permanent_draining'):raise UnsafeState('permanent_drain_cannot_resume')
             if diagnostic['accepting'].get('release_control_version',0)>=2:self._control(old,'resume')
@@ -393,8 +403,8 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
         return {'verified':True}
     def _rollback(self,record):
         # Rollback is itself journalled, and never deletes the usage ledger.
+        old_image=self._verified_old_image()
         self.perform('gate',record)
-        old_image=self.snapshot['deployment']['spec']['template']['spec']['containers'][0]['image']
         current=self.deployment_object()
         for old in self.snapshot['old_pods']:
             if old['metadata']['uid'] not in record['action_receipts'].get('writer_termination',{}):
@@ -419,6 +429,7 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
         pods=[p for p in self._pods() if not p['metadata'].get('deletionTimestamp')]
         if len(pods)!=1 or not pods[0]['status'].get('containerStatuses') or not all(c.get('ready') for c in pods[0]['status'].get('containerStatuses',[])):
             raise PendingOperation('rollback_backend_pending')
+        self._verified_old_image(pods[0])
         diagnostics=self._diagnostics(pods[0])
         if diagnostics['accepting_status']!=200 or diagnostics['metrics'].get('lb_usage_backend_ready')!=1:
             raise PendingOperation('rollback_backend_unhealthy')

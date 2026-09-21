@@ -11,6 +11,7 @@ Author: Zeno Ren
 - HPA 管理的目标、已识别的 GitOps 管理、注入 sidecar、版本绑定的 Service selector、selectorless 直连路由均需独立策略，v1 会拒绝进入维护。
 - 全部入口由 Kubernetes 资源发现并对照计划。不存在直接 Pod 调用仍需运维确认；Kubernetes API 不能证明所有客户端的网络行为。
 - 首次升级的旧实现只接受已核对的 892e397 运行文件指纹。旧版采用临时关闭全部 Service 的兼容路径；新版使用带所有权和执行代次的可恢复暂停。
+- 旧版恢复引用必须是不可变的单平台 manifest digest，并与运行 Pod 的 imageID 相符；准备、集群预检和恢复开流前都核验。可变 tag、缺失 imageID、无法直接核对的多平台 index/config digest 均拒绝。工具不自动修改旧引用或猜测 index 到平台的关系。
 
 ## 架构与恢复原则
 

@@ -1,11 +1,28 @@
 """Read-only discovery; keep complete selectors and private rollback material."""
 import copy
 
-from .model import CONTROL,GATE,digest,public_snapshot
+from .model import CONTROL,GATE,DIGEST,digest,public_snapshot
 
 
 def matches(selector,labels):
     return bool(selector) and all(labels.get(k)==v for k,v in selector.items())
+
+
+def verify_pod_image(pod,image,container):
+    """v1 requires a directly verifiable platform manifest, never a mutable tag."""
+    if not isinstance(image,str) or not DIGEST.fullmatch(image):
+        raise ValueError('immutable_rollback_image_required')
+    containers=pod.get('spec',{}).get('containers',[])
+    if len(containers)!=1 or containers[0].get('name')!=container or containers[0].get('image')!=image:
+        raise ValueError('rollback_pod_image_reference_changed')
+    statuses=pod.get('status',{}).get('containerStatuses',[])
+    if len(statuses)!=1 or statuses[0].get('name')!=container:
+        raise ValueError('rollback_image_identity_unavailable')
+    observed=statuses[0].get('imageID')
+    if not isinstance(observed,str) or observed.rsplit('@',1)[-1]!=image.rsplit('@',1)[-1]:
+        # A multi-platform index/config digest needs an explicit registry mapping;
+        # v1 cannot infer that relationship from Pod readiness or an image tag.
+        raise ValueError('rollback_image_digest_not_verified')
 
 
 def capture(api,namespace,deployment,container):
@@ -31,6 +48,7 @@ def capture(api,namespace,deployment,container):
         raise ValueError('Injected sidecars require a separate writer/termination contract')
     if not all(c.get('ready') for c in old['status'].get('containerStatuses',[])):
         raise ValueError('Old pod is not ready')
+    verify_pod_image(old,containers[0]['image'],container)
     services={}
     for service in api.list('service',namespace):
         spec=service['spec'];name=service['metadata']['name']
