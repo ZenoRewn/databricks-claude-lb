@@ -30,7 +30,7 @@ def counter(value):
     return type(value) in (int,float) and math.isfinite(value) and value >= 0
 
 
-def calculate_window(samples, start, end, metric_units, *, anchor_policy='in_window', max_gap_seconds=4500):
+def calculate_window(samples, start, end, metric_units, *, anchor_policy='in_window', max_gap_seconds=4500, _interval_exclusions=None):
     """One target's ordered snapshots; never interpolate or silently bridge gaps.
 
     Concurrent replicas must be calculated separately and aggregated explicitly;
@@ -71,6 +71,8 @@ def calculate_window(samples, start, end, metric_units, *, anchor_policy='in_win
                 reason='lifecycle_changed'
             elif (b_time-a_time).total_seconds()>max_gap_seconds:
                 reason='sample_gap'
+            if reason is None and _interval_exclusions:
+                reason=_interval_exclusions.get((a_time,b_time))
             av=a.get('metrics',{}).get(name);bv=b.get('metrics',{}).get(name)
             if reason is None:
                 if not counter(av) or not counter(bv):reason='metric_missing_or_invalid'
@@ -132,6 +134,7 @@ def calculate_window_v2(samples,start,end,*,anchor_policy='in_window',max_gap_se
                 labels={k:v for k,v in spec['labels'].items() if k!='le'}
                 group=(spec['family'],json.dumps(labels,sort_keys=True))
                 aggregates.setdefault(group,[]).append(key)
+        aggregate_exclusions={}
         for keys in aggregates.values():
             for sample in normalized:
                 values=sample['metrics'];valid=all(counter(values.get(k)) for k in keys)
@@ -145,9 +148,17 @@ def calculate_window_v2(samples,start,end,*,anchor_policy='in_window',max_gap_se
                         valid=values[buckets[-1][1]]==values[counts[0]] and all(values[a[1]]<=values[b[1]] for a,b in zip(buckets,buckets[1:]))
                 if not valid:
                     for k in keys:values[k]=None
+            exclusions={}
+            ordered=sorted(normalized,key=lambda sample:timestamp(sample['timestamp']))
+            for a,b in zip(ordered,ordered[1:]):
+                if all(counter(s['metrics'].get(k)) for s in (a,b) for k in keys) and any(
+                        b['metrics'][k]<a['metrics'][k] for k in keys):
+                    exclusions[(timestamp(a['timestamp']),timestamp(b['timestamp']))]='aggregate_counter_reset'
+            for key in keys:aggregate_exclusions[key]=exclusions
         for key,spec in descriptors.items():
             if spec['type']!='gauge':
-                window=calculate_window(normalized,start,end,{key:spec['unit']},anchor_policy=anchor_policy,max_gap_seconds=max_gap_seconds)
+                window=calculate_window(normalized,start,end,{key:spec['unit']},anchor_policy=anchor_policy,max_gap_seconds=max_gap_seconds,
+                                        _interval_exclusions=aggregate_exclusions.get(key))
                 series[key]={**spec,**window['metrics'][key]}
             else:
                 ordered=sorted((timestamp(s['timestamp']),s) for s in normalized if left<=timestamp(s['timestamp'])<=right)

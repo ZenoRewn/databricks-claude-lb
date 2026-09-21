@@ -66,3 +66,24 @@ lb_request_duration_seconds_count{api_type="messages",outcome="completed"} 2
         samples[1]['metrics']=samples[1]['metrics'][1:]
         series=list(self.calculate(samples)['targets']['pod-a']['series'].values())
         self.assertTrue(all(s['observed_delta'] is None for s in series))
+
+    def test_aggregate_reset_excludes_the_whole_interval_and_keeps_later_samples(self):
+        for kind in ('summary','histogram'):
+            with self.subTest(kind=kind):
+                samples=self.samples('unused',[0,0,0])
+                for sample,count,total in zip(samples,[100,5,9],[100,200,206]):
+                    sample['metrics']=[{'name':'duration_'+component,'family':'duration','type':kind,
+                                        'unit':'observations' if component=='count' else 'seconds',
+                                        'component':component,'labels':{},'value':value}
+                                       for component,value in [('count',count),('sum',total)]]
+                    if kind=='histogram':
+                        sample['metrics'].append({'name':'duration_bucket','family':'duration','type':kind,
+                            'unit':'observations','component':'bucket','labels':{'le':'+Inf'},'value':count})
+                series=list(self.calculate(samples)['targets']['pod-a']['series'].values())
+                reset_only=list(self.calculate(samples[:2])['targets']['pod-a']['series'].values())
+                self.assertTrue(all(s['observed_delta'] is None and s['status']=='unknown' for s in reset_only))
+                self.assertTrue(all(s['status']=='partial' for s in series))
+                self.assertTrue(all(s['valid_intervals']==1 and s['covered_seconds']==60 for s in series))
+                self.assertEqual({s['component']:s['observed_delta'] for s in series},
+                                 {'count':4,'sum':6,**({'bucket':4} if kind=='histogram' else {})})
+                for s in series:self.assertEqual(s['excluded_intervals'][0]['reason'],'aggregate_counter_reset')
