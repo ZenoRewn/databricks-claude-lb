@@ -15,6 +15,7 @@ import time
 import uuid
 from fastapi import HTTPException
 from request_budget import startup_budget, UpstreamStartupTimeout, remaining_seconds
+from response_semantics import REASONS, assess_json
 
 logger = logging.getLogger('main')
 ROUTES = {'/v1/messages':'messages', '/v1/responses':'responses', '/v1/chat/completions':'chat'}
@@ -51,6 +52,7 @@ class RequestTelemetry:
         self.send_results = Counter()
         self.retry_decisions = Counter()
         self.parameter_decisions = Counter()
+        self.reasons = Counter()
         self.latency_sum = Counter()
         self.latency_buckets = Counter()
 
@@ -66,6 +68,9 @@ class RequestTelemetry:
         metric('lb_requests_finished_total','One local outcome per finished ingress call; not workflow success','counter',
                [f'lb_requests_finished_total{{api_type="{api}",outcome="{outcome}"}} {self.outcomes[(api,outcome)]}'
                 for api in APIS for outcome in OUTCOMES])
+        metric('lb_request_reasons_total','Bounded reason independent of HTTP versus SSE envelope','counter',
+               [f'lb_request_reasons_total{{api_type="{api}",reason="{reason}"}} {self.reasons[(api,reason)]}'
+                for api in APIS for reason in REASONS])
         metric('lb_upstream_send_started_total','Inference HTTP client invocations, including auth and opaque repairs','counter',
                [f'lb_upstream_send_started_total{{provider="{provider}",api_type="{api}"}} {self.sends[(provider,api)]}'
                 for provider in PROVIDERS for api in APIS])
@@ -108,6 +113,7 @@ class RequestRecord:
     parameter_policy: str = 'compat'
     dropped_parameters: set = field(default_factory=set)
     rejected_parameters: set = field(default_factory=set)
+    failure_reason: str = 'none'
 
 
 def set_parameter_policy(value):
@@ -178,6 +184,12 @@ def note_generation(outcome):
         record.generation = 'failed' if outcome == 'error' else outcome
 
 
+def note_reason(reason):
+    record = CURRENT.get()
+    if record:
+        record.failure_reason = reason if reason in REASONS else 'unknown'
+
+
 def current_request_id():
     record = CURRENT.get()
     return record.request_id if record else None
@@ -188,32 +200,10 @@ def note_json_result(payload, api_type):
     record = CURRENT.get()
     if not record:
         return
-    record.generation = 'unknown'
-    if not isinstance(payload, dict):
-        return
-    if payload.get('error') or payload.get('status') == 'failed':
-        note_generation('failed')
-    elif payload.get('status') == 'incomplete' or payload.get('incomplete_details'):
-        note_generation('incomplete')
-    elif api_type == 'responses':
-        if payload.get('status') == 'completed' and isinstance(payload.get('id'),str) and isinstance(payload.get('output'),list):
-            note_generation('completed')
-    elif api_type == 'messages' and payload.get('type') == 'message':
-        reason = payload.get('stop_reason')
-        if reason == 'max_tokens':
-            note_generation('incomplete')
-        elif reason in ('end_turn','tool_use','stop_sequence'):
-            note_generation('completed')
-    elif api_type == 'chat':
-        choices=payload.get('choices')
-        if isinstance(choices,list) and choices and all(isinstance(c,dict) for c in choices):
-            reasons={c.get('finish_reason') for c in choices if isinstance(c.get('finish_reason'),str)}
-            if len([c for c in choices if isinstance(c.get('finish_reason'),str)]) != len(choices):
-                return
-            if reasons & {'length','content_filter'}:
-                note_generation('incomplete')
-            elif reasons <= {'stop','tool_calls','function_call'}:
-                note_generation('completed')
+    result = assess_json(payload, api_type)
+    record.generation = result.outcome
+    record.failure_reason = result.reason
+    return
 
 
 async def inference_call(awaitable, provider, api_type):
@@ -319,6 +309,7 @@ class RequestTelemetryMiddleware:
                 outcome='unknown'
             elapsed=time.monotonic()-record.started
             self.metrics.outcomes[(api_type,outcome)] += 1
+            self.metrics.reasons[(api_type,record.failure_reason)] += 1
             self.metrics.latency_sum[(api_type,outcome)] += elapsed
             for upper in BUCKETS:
                 if elapsed <= upper:
@@ -334,6 +325,7 @@ class RequestTelemetryMiddleware:
                     'parameter_policy':record.parameter_policy,'dropped_parameters':sorted(record.dropped_parameters),
                     'rejected_parameters':sorted(record.rejected_parameters),
                     'outcome':outcome,'http_status':status,'generation_outcome':record.generation,
+                    'failure_reason':record.failure_reason,
                     'downstream_body_completed':body_complete,'admissions':record.admissions,
                     'upstream_sends':record.sends,'duration_seconds':round(elapsed,6)}
             log_event(fields)

@@ -1,0 +1,29 @@
+............                             [100%]
+=================================== FAILURES ===================================
+_ ResultConsistencyTests.test_native_stream_context_error_uses_shared_classification (provider='databricks', api='messages') _
+tests/test_result_consistency.py:132: in test_native_stream_context_error_uses_shared_classification
+    self.assertEqual(r['ep'].total_errors,0)
+E   AssertionError: 1 != 0
+_ ResultConsistencyTests.test_native_stream_context_error_uses_shared_classification (provider='azure', api='responses') _
+tests/test_result_consistency.py:132: in test_native_stream_context_error_uses_shared_classification
+    self.assertEqual(r['ep'].total_errors,0)
+E   AssertionError: 1 != 0
+_ ResultConsistencyTests.test_native_stream_context_error_uses_shared_classification (provider='azure', api='chat') _
+tests/test_result_consistency.py:132: in test_native_stream_context_error_uses_shared_classification
+    self.assertEqual(r['ep'].total_errors,0)
+E   AssertionError: 1 != 0
+_ ResultConsistencyTests.test_native_stream_context_error_uses_shared_classification (provider='copilot', api='responses') _
+tests/test_result_consistency.py:132: in test_native_stream_context_error_uses_shared_classification
+    self.assertEqual(r['ep'].total_errors,0)
+E   AssertionError: 1 != 0
+_ ResultConsistencyTests.test_native_stream_context_error_uses_shared_classification (provider='copilot', api='chat') _
+tests/test_result_consistency.py:132: in test_native_stream_context_error_uses_shared_classification
+    self.assertEqual(r['ep'].total_errors,0)
+E   AssertionError: 1 != 0
+=========================== short test summary info ============================
+SUBFAILED(provider='databricks', api='messages') tests/test_result_consistency.py::ResultConsistencyTests::test_native_stream_context_error_uses_shared_classification
+SUBFAILED(provider='azure', api='responses') tests/test_result_consistency.py::ResultConsistencyTests::test_native_stream_context_error_uses_shared_classification
+SUBFAILED(provider='azure', api='chat') tests/test_result_consistency.py::ResultConsistencyTests::test_native_stream_context_error_uses_shared_classification
+SUBFAILED(provider='copilot', api='responses') tests/test_result_consistency.py::ResultConsistencyTests::test_native_stream_context_error_uses_shared_classification
+SUBFAILED(provider='copilot', api='chat') tests/test_result_consistency.py::ResultConsistencyTests::test_native_stream_context_error_uses_shared_classification
+5 failed, 12 passed, 27 subtests passed in 0.76s

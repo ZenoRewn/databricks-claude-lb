@@ -154,7 +154,7 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         success = httpx.Response(
             200,
             request=request,
-            json={"choices": [], "usage": {}},
+            json={"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"synthetic"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}},
         )
         client = unittest.mock.Mock()
         client.post = AsyncMock(
@@ -240,7 +240,7 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         request = httpx.Request("POST", "https://example.test/chat/completions")
         malformed = httpx.Response(200, request=request, content=b"not-json")
         success = httpx.Response(
-            200, request=request, json={"choices": [], "usage": {}}
+            200, request=request, json={"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"synthetic"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}
         )
         client = unittest.mock.Mock()
         client.post = AsyncMock(side_effect=[malformed, success])
@@ -262,8 +262,8 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_non_stream_usage_record_failure_does_not_double_decrement(self):
         request = httpx.Request("POST", "https://example.test/responses")
         responses = [
-            httpx.Response(200, request=request, json={"usage": {}}),
-            httpx.Response(200, request=request, json={"usage": {}}),
+            httpx.Response(200, request=request, json={"id":"synthetic","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}),
+            httpx.Response(200, request=request, json={"id":"synthetic","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}),
         ]
         client = unittest.mock.Mock()
         client.post = AsyncMock(side_effect=responses)
@@ -1313,7 +1313,7 @@ class AzureRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         client = unittest.mock.Mock()
         client.post = AsyncMock(side_effect=[
             httpx.Response(200, request=request, content=b"not-json"),
-            httpx.Response(200, request=request, json={"usage": {}}),
+            httpx.Response(200, request=request, json={"id":"synthetic","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}),
         ])
         proxy, load_balancer, endpoint = self._make_proxy(client)
         endpoint.active_requests = 1
@@ -1334,8 +1334,8 @@ class AzureRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         request = httpx.Request("POST", "https://example.test/responses")
         client = unittest.mock.Mock()
         client.post = AsyncMock(side_effect=[
-            httpx.Response(200, request=request, json={"usage": {}}),
-            httpx.Response(200, request=request, json={"usage": {}}),
+            httpx.Response(200, request=request, json={"id":"synthetic","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}),
+            httpx.Response(200, request=request, json={"id":"synthetic","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}),
         ])
         proxy, load_balancer, endpoint = self._make_proxy(client)
         endpoint.active_requests = 1

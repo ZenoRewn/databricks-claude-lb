@@ -1,0 +1,154 @@
+{
+  "author": "Zeno Ren",
+  "scope": "Kind only; explicit recovery after a failing fault test",
+  "record": {
+    "action_receipts": {
+      "cleanup": {
+        "verified": true
+      },
+      "gate": {
+        "verified": true
+      },
+      "pause": {
+        "verified": true
+      },
+      "preflight": {
+        "runtime_control_version": 2,
+        "services": [
+          "claude-lb",
+          "claude-lb-internal"
+        ],
+        "verified": true
+      },
+      "resume_old": {
+        "verified": true
+      }
+    },
+    "cancel_requested": false,
+    "cleanup_errors": [
+      "routing_changed_outside_release"
+    ],
+    "completion_target": "rolled_back",
+    "drain_started_at": null,
+    "events": [
+      {
+        "at": 1789918253.5941343,
+        "intent": "preflight",
+        "phase": "preflight"
+      },
+      {
+        "at": 1789918260.3151088,
+        "phase": "gating",
+        "reason": null
+      },
+      {
+        "at": 1789918261.360865,
+        "intent": "gate",
+        "phase": "gating"
+      },
+      {
+        "at": 1789918261.4937499,
+        "phase": "pausing",
+        "reason": null
+      },
+      {
+        "at": 1789918262.5285203,
+        "intent": "pause",
+        "phase": "pausing"
+      },
+      {
+        "at": 1789918264.14367,
+        "phase": "needs_attention",
+        "reason": "routing_changed_outside_release"
+      },
+      {
+        "at": 1789918970.3252199,
+        "intent": "resume_old",
+        "phase": "recovering"
+      },
+      {
+        "at": 1789918970.6508431,
+        "phase": "finalizing",
+        "reason": null
+      },
+      {
+        "at": 1789918971.6865025,
+        "intent": "cleanup",
+        "phase": "finalizing"
+      },
+      {
+        "at": 1789918971.7477992,
+        "phase": "rolled_back",
+        "reason": null
+      }
+    ],
+    "final_result": "rolled_back",
+    "intent": null,
+    "maintenance_finished_at": 1789918970.3252149,
+    "maintenance_started_at": 1789918261.3537955,
+    "phase": "rolled_back",
+    "plan": {
+      "business_probes": [
+        {
+          "api": "messages",
+          "max_tokens": 32,
+          "model": "claude-opus-5",
+          "stream": false
+        },
+        {
+          "api": "responses",
+          "max_tokens": 32,
+          "model": "gpt-test",
+          "stream": true
+        },
+        {
+          "api": "chat",
+          "max_tokens": 32,
+          "model": "gpt-test",
+          "stream": true
+        }
+      ],
+      "container": "claude-lb",
+      "deployment": "claude-lb",
+      "direct_pod_access": false,
+      "drain_seconds": 60,
+      "forward_seconds": 150,
+      "image": "localhost:5008/new@sha256:276d5b127b10afee9cecf60cc50c258773100f54c1917278069cf7a23b924a8c",
+      "lab": true,
+      "legacy_bootstrap": true,
+      "maintenance_seconds": 300,
+      "namespace": "lb-lab",
+      "public_urls": [
+        "http://claude-lb.lb-lab.svc",
+        "http://claude-lb-internal.lb-lab.svc"
+      ],
+      "release_id": "journal-01",
+      "schema_version": "lb-release-plan-v1",
+      "services": [
+        "claude-lb",
+        "claude-lb-internal"
+      ],
+      "snapshot_sha256": "efb571994894fa4550687c44312ac0b841b525677d484cb0bf25bb533366446b",
+      "source_hashes": {
+        "admission.py": "0b9fc601938cea860f68d7a2d1fa1db5e2c6db4bedbd203015c1b4ee80ae2dbe",
+        "cleanup_observability.py": "d23076d64c995ba5d57600d539a86646952f38912e354304eebd57c7f1654612",
+        "dashboard.html": "9de9a5ee438ce8a85795b6217f85ef0639fc7059f3fd821e3d8cb617bed11d4a",
+        "effort_compat.py": "fbf6bcdd8cc2093245e2d94036d532016d9661fc7768c0b435b77963225dc47c",
+        "gateway_lifecycle.py": "ca69a99c1ae5205a5da1194cd0527c140d9d9b37629e0b0df67cef93643e109f",
+        "main.py": "0ba9168e3f53768cc860a9692b0540339804319c41ef4250eb682d7dec37ae9d",
+        "otel_setup.py": "e68dfe8cef208c42d39f14ad8d5cc3d9b4eb909c68e3336d22937669ebba1cce",
+        "release_probe.py": "5830fccc7c9131e10c1cbeeaa7e449fabf3e337e97270b6ade9e4b826ac3a3c3",
+        "request_budget.py": "0e26b6b14135461a8ae6ab86aa0e4234e5b507d6261b2bcbefcfad6ce9c2b4a4",
+        "request_telemetry.py": "567e254eb522f0b8dbbc31cf7d70e296e26662f9ca1f7df8175242fe489c1ee8",
+        "response_semantics.py": "c2da11dd821e6edb30eea160a8810eeb464aea58b083935d254e8781844196b2",
+        "upstream_body.py": "639f2416464e39b850af94ab037713d2a8bc03b66ea73cc64e0d9c7d60c7d4fd",
+        "usage_store.py": "b0c3a0a353bda41f11fb4910604970bd428ff3fcd6fddf4c729c6aad73cc5042"
+      },
+      "source_revision": "0000000000000000000000000000000000000000",
+      "storage_compatibility": "additive-compatible"
+    },
+    "recovery_deadline": 1789919096.152124,
+    "recovery_requested_at": 1789918946.152124,
+    "schema_version": "lb-release-v1"
+  }
+}

@@ -224,7 +224,7 @@ class EndToEndTests(_PinnedAffinity, unittest.IsolatedAsyncioTestCase):
         async def post(url, json, headers):
             used.append(url)
             return httpx.Response(200, request=httpx.Request("POST", url),
-                                  json={"output": [], "usage": {}})
+                                  json={"id":"synthetic","status":"completed","output":[],"usage":{}})
 
         proxy.client.post = unittest.mock.AsyncMock(side_effect=post)
         body = {"model": "gpt-test", "prompt_cache_key": REAL_KEY_1,
@@ -242,7 +242,7 @@ class EndToEndTests(_PinnedAffinity, unittest.IsolatedAsyncioTestCase):
         proxy, lb, eps = _multi_proxy()
         proxy.client.post = unittest.mock.AsyncMock(
             side_effect=lambda url, json, headers: httpx.Response(
-                200, request=httpx.Request("POST", url), json={"output": [], "usage": {}}))
+                200, request=httpx.Request("POST", url), json={"id":"synthetic","status":"completed","output":[],"usage":{}}))
         await proxy.proxy_responses(
             {"model": "gpt-test", "input": [{"type": "message", "role": "user"}]},
             stream=False)

@@ -107,7 +107,10 @@ class UsageDataStore:
     def record(self, model: str, input_tokens: int, output_tokens: int,
                cache_creation_tokens: int = 0, cache_read_tokens: int = 0,
                is_error: bool = False, *, provider: str = 'unknown',
-               tenant: str = 'default', request_id: Optional[str] = None):
+               tenant: str = 'default', request_id: Optional[str] = None,
+               generation_outcome: str = 'unknown', usage_fields=None):
+        if generation_outcome not in ('unknown','completed','failed','incomplete','cancelled','client_disconnected'):
+            raise ValueError('Invalid usage generation outcome')
         if not isinstance(model,str) or not model or len(model)>128:
             raise ValueError('Usage model must fit the persisted model identifier')
         model.encode('utf-8')
@@ -124,6 +127,8 @@ class UsageDataStore:
             'recorded_at':event_time.isoformat(),
             'recorded_at_unix':event_time.timestamp(),
             'provider':provider,'tenant':tenant,'request_id':request_id,
+            'generation_outcome':generation_outcome,
+            'usage_fields':sorted(usage_fields) if usage_fields is not None else None,
             "model": model,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,

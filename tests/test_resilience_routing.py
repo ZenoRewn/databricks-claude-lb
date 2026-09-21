@@ -80,7 +80,7 @@ class RetryRoutingTests(unittest.IsolatedAsyncioTestCase):
             lb._open(ep)
             now += lb.circuit_breaker_timeout
             req = httpx.Request('POST','https://test.invalid/responses')
-            p.client.post = AsyncMock(return_value=httpx.Response(200,request=req,json={'usage':{}}))
+            p.client.post = AsyncMock(return_value=httpx.Response(200,request=req,json={'id':'synthetic','status':'completed','output':[],'usage':{'input_tokens':1,'output_tokens':1}}))
             result = await p.proxy_responses({'model':'gpt-test'})
         self.assertEqual(result.status_code, 200)
         self.assertFalse(ep.circuit_open)
@@ -175,7 +175,7 @@ class RetryRoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_usage_failure_is_not_inference_failure_or_replay(self):
         p, lb, ep = self.make()
         req = httpx.Request('POST','https://test.invalid/responses')
-        p.client.post = AsyncMock(return_value=httpx.Response(200,request=req,json={'usage':{}}))
+        p.client.post = AsyncMock(return_value=httpx.Response(200,request=req,json={'id':'synthetic','status':'completed','output':[],'usage':{'input_tokens':1,'output_tokens':1}}))
         p._record_usage = Mock(side_effect=RuntimeError('synthetic telemetry failure'))
         response = await p.proxy_responses({'model':'gpt-test'})
         self.assertEqual(response.status_code,200)

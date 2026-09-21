@@ -1,0 +1,260 @@
+{
+  "author": "Zeno Ren",
+  "scope": "Disposable Kind, synthetic provider, no production calls",
+  "case": "ack-gate-01",
+  "expected": "succeeded",
+  "provider_send_delta": 3,
+  "record": {
+    "action_receipts": {
+      "cleanup": {
+        "verified": true
+      },
+      "gate": {
+        "verified": true
+      },
+      "pause": {
+        "verified": true
+      },
+      "preflight": {
+        "runtime_control_version": 2,
+        "services": [
+          "claude-lb",
+          "claude-lb-internal"
+        ],
+        "verified": true
+      },
+      "restore_routes": {
+        "verified": true
+      },
+      "start_new": {
+        "verified": true
+      },
+      "stop_old": {
+        "verified": true
+      },
+      "verify_backend": {
+        "imageID": "localhost:5008/alternate@sha256:0ab89253db600e6b257ed94881f4b410655f206c5053f505f7b73692f1fb0b18",
+        "pod": "claude-lb-6f78ccbc4-gs27f",
+        "uid": "37cd8572-8241-437e-bd52-dd315e05b45c",
+        "verified": true
+      },
+      "verify_business": {
+        "checks": [
+          {
+            "api": "messages",
+            "completed": true,
+            "model": "claude-opus-5",
+            "request_id": "aae5b32d-d631-4c3e-b7e9-6b478f505446",
+            "stream": false
+          },
+          {
+            "api": "responses",
+            "completed": true,
+            "model": "gpt-test",
+            "request_id": "592b0224-0353-4065-983b-67160ec81874",
+            "stream": true
+          },
+          {
+            "api": "chat",
+            "completed": true,
+            "model": "gpt-test",
+            "request_id": "e542f05a-5a4a-4cd1-93e1-e5a580860b58",
+            "stream": true
+          }
+        ],
+        "execution_pid": 27,
+        "persistence_verified": true,
+        "plan_hash": "e3c0f080d2cfd9c879f164470896fcb7a49f58b0a0934779d7ab69804d1b1343",
+        "started_at": 1789918198.1766794,
+        "usage_events": 3,
+        "verified": true
+      },
+      "writer_termination": {
+        "74c0cfbd-b035-4a43-8d41-fe844ef4099b": {
+          "containers": [
+            {
+              "exitCode": 143,
+              "finishedAt": "2026-09-20T15:29:49Z",
+              "name": "claude-lb"
+            }
+          ],
+          "node": "lb-release-lab-20260920-worker2"
+        }
+      }
+    },
+    "cancel_requested": false,
+    "cleanup_errors": [],
+    "completion_target": "succeeded",
+    "drain_started_at": 1789918181.68426,
+    "events": [
+      {
+        "at": 1789918171.8018622,
+        "intent": "preflight",
+        "phase": "preflight"
+      },
+      {
+        "at": 1789918178.5077817,
+        "phase": "gating",
+        "reason": null
+      },
+      {
+        "at": 1789918179.5535834,
+        "intent": "gate",
+        "phase": "gating"
+      },
+      {
+        "at": 1789918180.6365166,
+        "phase": "pausing",
+        "reason": null
+      },
+      {
+        "at": 1789918181.684264,
+        "intent": "pause",
+        "phase": "pausing"
+      },
+      {
+        "at": 1789918181.90132,
+        "phase": "draining",
+        "reason": null
+      },
+      {
+        "at": 1789918187.6559825,
+        "phase": "stopping",
+        "reason": null
+      },
+      {
+        "at": 1789918188.7792034,
+        "intent": "stop_old",
+        "phase": "stopping"
+      },
+      {
+        "at": 1789918189.961643,
+        "phase": "starting",
+        "reason": null
+      },
+      {
+        "at": 1789918190.9960976,
+        "intent": "start_new",
+        "phase": "starting"
+      },
+      {
+        "at": 1789918191.0257833,
+        "phase": "verifying_backend",
+        "reason": null
+      },
+      {
+        "at": 1789918192.0515578,
+        "intent": "verify_backend",
+        "phase": "verifying_backend"
+      },
+      {
+        "at": 1789918194.7831926,
+        "phase": "restoring_routes",
+        "reason": null
+      },
+      {
+        "at": 1789918195.8128572,
+        "intent": "restore_routes",
+        "phase": "restoring_routes"
+      },
+      {
+        "at": 1789918196.8908088,
+        "phase": "verifying_business",
+        "reason": null
+      },
+      {
+        "at": 1789918197.927141,
+        "intent": "verify_business",
+        "phase": "verifying_business"
+      },
+      {
+        "at": 1789918222.8379004,
+        "phase": "finalizing",
+        "reason": null
+      },
+      {
+        "at": 1789918223.872291,
+        "intent": "cleanup",
+        "phase": "finalizing"
+      },
+      {
+        "at": 1789918223.9418433,
+        "phase": "succeeded",
+        "reason": null
+      }
+    ],
+    "final_result": "succeeded",
+    "intent": null,
+    "maintenance_finished_at": 1789918196.8681626,
+    "maintenance_started_at": 1789918179.5463498,
+    "phase": "succeeded",
+    "plan": {
+      "business_probes": [
+        {
+          "api": "messages",
+          "max_tokens": 32,
+          "model": "claude-opus-5",
+          "stream": false
+        },
+        {
+          "api": "responses",
+          "max_tokens": 32,
+          "model": "gpt-test",
+          "stream": true
+        },
+        {
+          "api": "chat",
+          "max_tokens": 32,
+          "model": "gpt-test",
+          "stream": true
+        }
+      ],
+      "container": "claude-lb",
+      "deployment": "claude-lb",
+      "direct_pod_access": false,
+      "drain_seconds": 60,
+      "forward_seconds": 150,
+      "image": "localhost:5008/alternate@sha256:0ab89253db600e6b257ed94881f4b410655f206c5053f505f7b73692f1fb0b18",
+      "lab": true,
+      "legacy_bootstrap": true,
+      "maintenance_seconds": 300,
+      "namespace": "lb-lab",
+      "public_urls": [
+        "http://claude-lb.lb-lab.svc",
+        "http://claude-lb-internal.lb-lab.svc"
+      ],
+      "release_id": "ack-gate-01",
+      "schema_version": "lb-release-plan-v1",
+      "services": [
+        "claude-lb",
+        "claude-lb-internal"
+      ],
+      "snapshot_sha256": "c3839b331302cc1d84c071b480666d73d894678b926333188398d98a2e09a4a5",
+      "source_hashes": {
+        "admission.py": "0b9fc601938cea860f68d7a2d1fa1db5e2c6db4bedbd203015c1b4ee80ae2dbe",
+        "cleanup_observability.py": "d23076d64c995ba5d57600d539a86646952f38912e354304eebd57c7f1654612",
+        "dashboard.html": "9de9a5ee438ce8a85795b6217f85ef0639fc7059f3fd821e3d8cb617bed11d4a",
+        "effort_compat.py": "fbf6bcdd8cc2093245e2d94036d532016d9661fc7768c0b435b77963225dc47c",
+        "gateway_lifecycle.py": "ca69a99c1ae5205a5da1194cd0527c140d9d9b37629e0b0df67cef93643e109f",
+        "main.py": "0ba9168e3f53768cc860a9692b0540339804319c41ef4250eb682d7dec37ae9d",
+        "otel_setup.py": "e68dfe8cef208c42d39f14ad8d5cc3d9b4eb909c68e3336d22937669ebba1cce",
+        "release_probe.py": "5830fccc7c9131e10c1cbeeaa7e449fabf3e337e97270b6ade9e4b826ac3a3c3",
+        "request_budget.py": "0e26b6b14135461a8ae6ab86aa0e4234e5b507d6261b2bcbefcfad6ce9c2b4a4",
+        "request_telemetry.py": "567e254eb522f0b8dbbc31cf7d70e296e26662f9ca1f7df8175242fe489c1ee8",
+        "response_semantics.py": "c2da11dd821e6edb30eea160a8810eeb464aea58b083935d254e8781844196b2",
+        "upstream_body.py": "639f2416464e39b850af94ab037713d2a8bc03b66ea73cc64e0d9c7d60c7d4fd",
+        "usage_store.py": "b0c3a0a353bda41f11fb4910604970bd428ff3fcd6fddf4c729c6aad73cc5042"
+      },
+      "source_revision": "0000000000000000000000000000000000000000",
+      "storage_compatibility": "additive-compatible"
+    },
+    "schema_version": "lb-release-v1",
+    "uncertain_operation": {
+      "action": "gate",
+      "at": 1789918179.5535827
+    },
+    "writer_stop_requested": [
+      "74c0cfbd-b035-4a43-8d41-fe844ef4099b"
+    ]
+  }
+}

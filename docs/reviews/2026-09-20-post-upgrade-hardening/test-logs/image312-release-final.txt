@@ -1,0 +1,14 @@
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+ssssss.................................................................. [ 11%]
+................................ [ 16%]
+........................................................... [ 26%]
+.................................................................................................................. [ 44%]
+...s...................................... [ 51%]
+.............................. [ 55%]
+................................. [ 61%]
+................................................................................................................................ [ 81%]
+........................... [ 86%]
+........................... [ 90%]
+.................................................. [ 98%]
+..........                                                               [100%]
+617 passed, 7 skipped, 538 subtests passed in 40.67s

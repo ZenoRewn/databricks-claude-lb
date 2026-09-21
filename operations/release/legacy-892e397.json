@@ -1,0 +1,15 @@
+{
+  "source_revision": "892e39723d7066c00e6ee89c07fd10eac6c60ab4",
+  "files": {
+    "main.py": "d2557262d21c25f9828ea4c1a22adddb7f33327f392fcc974c0efac544b66e95",
+    "effort_compat.py": "fbf6bcdd8cc2093245e2d94036d532016d9661fc7768c0b435b77963225dc47c",
+    "request_telemetry.py": "2a2ad7d162e8b7bd6389a0070cc13a62a17a65e50c0ba440daf5737284c6122a",
+    "request_budget.py": "0e26b6b14135461a8ae6ab86aa0e4234e5b507d6261b2bcbefcfad6ce9c2b4a4",
+    "admission.py": "ae1bbf4be1e0e29d41e2ac8a49e4908337c8531ea0af50f4d9d24ffb3a5c6dc5",
+    "gateway_lifecycle.py": "69f636e5565d99d1d42304cfedcdacb59ca428928cca33cf8792bc2f0b029489",
+    "upstream_body.py": "639f2416464e39b850af94ab037713d2a8bc03b66ea73cc64e0d9c7d60c7d4fd",
+    "usage_store.py": "52a4e7a5ecd3b935a3157fed323d2df5bfdbc9187a86523024b363dd703bb787",
+    "otel_setup.py": "e68dfe8cef208c42d39f14ad8d5cc3d9b4eb909c68e3336d22937669ebba1cce",
+    "dashboard.html": "9de9a5ee438ce8a85795b6217f85ef0639fc7059f3fd821e3d8cb617bed11d4a"
+  }
+}

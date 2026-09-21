@@ -187,7 +187,7 @@ class ProxyForwardPathTests(unittest.IsolatedAsyncioTestCase):
             sent.append(json)
             return httpx.Response(
                 200, request=httpx.Request("POST", url),
-                json={"output": [], "usage": {}})
+                json={"id":"synthetic","status":"completed","output":[],"usage":{}})
 
         client = unittest.mock.Mock()
         client.post = AsyncMock(side_effect=capture_post)
@@ -217,7 +217,7 @@ class ProxyForwardPathTests(unittest.IsolatedAsyncioTestCase):
         async def capture_post(url, json, headers):
             sent.append(json)
             return httpx.Response(200, request=httpx.Request("POST", url),
-                                  json={"choices": [], "usage": {}})
+                                  json={"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"synthetic"}}],"usage":{}})
 
         client = unittest.mock.Mock()
         client.post = AsyncMock(side_effect=capture_post)
@@ -237,7 +237,7 @@ class ProxyForwardPathTests(unittest.IsolatedAsyncioTestCase):
         async def capture_post(url, json, headers):
             sent.append(json)
             return httpx.Response(200, request=httpx.Request("POST", url),
-                                  json={"output": [], "usage": {}})
+                                  json={"id":"synthetic","status":"completed","output":[],"usage":{}})
 
         client = unittest.mock.Mock()
         client.post = AsyncMock(side_effect=capture_post)
@@ -270,7 +270,7 @@ class ProxyForwardPathTests(unittest.IsolatedAsyncioTestCase):
             if len(sent) == 1:
                 return httpx.Response(400, request=req, text=ORPHAN,
                                       headers={"content-type": "application/json"})
-            return httpx.Response(200, request=req, json={"output": [], "usage": {}})
+            return httpx.Response(200, request=req, json={"id":"synthetic","status":"completed","output":[],"usage":{}})
 
         client = unittest.mock.Mock()
         client.post = AsyncMock(side_effect=post)

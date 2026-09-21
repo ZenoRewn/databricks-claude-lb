@@ -1,7 +1,8 @@
-"""Run the unchanged independent review assertions against the imported app.
+"""Run the retained independent review assertions against the imported app.
 
-Fixtures are byte-identical review artifacts, including historical standalone
-negative-control hash guards. Importing them runs no guards or tests; unittest
+One success payload was adapted for strict response validation; see the fixture
+README and preserved original. Historical standalone negative-control hash
+guards remain unchanged. Importing them runs no guards or tests; unittest
 collects their original TestCase classes here. Baked-image identity is enforced
 separately by the release runner, never by overlaying application source.
 """

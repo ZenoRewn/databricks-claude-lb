@@ -1,13 +1,18 @@
 # Independent review regression fixtures
 
-These five Python files are byte-identical copies of the 2026-09-07 independent
-review or its inherited real-socket harness. Original assertions remain intact.
+These five Python files derive from the 2026-09-07 independent review or its
+inherited real-socket harness. Original assertions remain intact. On 2026-09-21,
+the auth-repair success fixture in `test_adversarial.py` was changed from the
+invalid `{usage:{}}` object to an explicit completed Responses object, so the
+test continues to exercise auth repair under strict response validation. Its
+original bytes are preserved in `test_adversarial.original.py.txt` (from
+`521f45a`); do not describe the adapted suite as byte-identical historical evidence.
 `test_real_lock.py` and `test_adversarial.py` retain their historical standalone
 hash checks for blocked commit e3902379b87b1a083043d162c382a5e28c473c95. Do not
 change those checks to imply that the original negative-control image passed.
 
 Run the successor regressions through `tests/test_revision2_review.py`, which
-imports the original TestCase classes without executing their standalone guards.
+imports the successor TestCase classes without executing their standalone guards.
 It restores import-time logging changes so existing logging-safety assertions
 remain effective. The release runner independently verifies `/app/main.py` and
 the exact immutable image; only test files are mounted, never application code.

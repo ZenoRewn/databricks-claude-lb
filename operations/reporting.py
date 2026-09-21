@@ -30,7 +30,7 @@ def counter(value):
     return type(value) in (int,float) and math.isfinite(value) and value >= 0
 
 
-def calculate_window(samples, start, end, metric_units, *, anchor_policy='in_window', max_gap_seconds=4500):
+def calculate_window(samples, start, end, metric_units, *, anchor_policy='in_window', max_gap_seconds=4500, _interval_exclusions=None):
     """One target's ordered snapshots; never interpolate or silently bridge gaps.
 
     Concurrent replicas must be calculated separately and aggregated explicitly;
@@ -71,6 +71,8 @@ def calculate_window(samples, start, end, metric_units, *, anchor_policy='in_win
                 reason='lifecycle_changed'
             elif (b_time-a_time).total_seconds()>max_gap_seconds:
                 reason='sample_gap'
+            if reason is None and _interval_exclusions:
+                reason=_interval_exclusions.get((a_time,b_time))
             av=a.get('metrics',{}).get(name);bv=b.get('metrics',{}).get(name)
             if reason is None:
                 if not counter(av) or not counter(bv):reason='metric_missing_or_invalid'
@@ -89,6 +91,90 @@ def calculate_window(samples, start, end, metric_units, *, anchor_policy='in_win
 
 def encoded(data):
     return (json.dumps(data,ensure_ascii=False,sort_keys=True,indent=2,allow_nan=False)+'\n').encode()
+
+
+def calculate_window_v2(samples,start,end,*,anchor_policy='in_window',max_gap_seconds=4500):
+    """Keep typed labeled series and replicas separate; no fleet percentile claims."""
+    left,right=timestamp(start),timestamp(end)
+    if left>=right:
+        raise ValueError('Invalid window')
+    targets={}
+    for sample in samples:
+        uid=sample.get('pod_uid')
+        if not isinstance(uid,str) or not uid:
+            raise ValueError('v2 snapshots require Pod UID')
+        targets.setdefault(uid,[]).append(sample)
+    result={'author':'Zeno Ren','policy_version':'typed-window-v2','nominal_start':left.isoformat(),
+            'nominal_end':right.isoformat(),'anchor_policy':anchor_policy,'targets':{}}
+    for uid,items in sorted(targets.items()):
+        descriptors={};normalized=[]
+        for sample in items:
+            values={}
+            for metric in sample.get('metrics',[]):
+                kind=metric['type'];labels=metric.get('labels',{})
+                if kind not in ('counter','gauge','histogram','summary') or not isinstance(labels,dict):
+                    raise ValueError('Invalid metric type/labels')
+                if not all(isinstance(k,str) and isinstance(v,str) for k,v in labels.items()):
+                    raise ValueError('Metric labels must be strings')
+                key=metric['name']+json.dumps(labels,sort_keys=True,separators=(',',':'))
+                descriptor={k:metric.get(k) for k in ('name','family','type','unit','component')}
+                descriptor['labels']=labels
+                if key in values or key in descriptors and descriptors[key]!=descriptor:
+                    raise ValueError('Duplicate series or conflicting metric descriptors')
+                if kind in ('histogram','summary') and metric.get('component') not in ('bucket','count','sum'):
+                    raise ValueError('Aggregate samples need their component; no implicit quantile aggregation')
+                descriptors[key]=descriptor;values[key]=metric.get('value')
+            normalized.append({**sample,'metrics':values})
+        series={}
+        aggregates={}
+        for key,spec in descriptors.items():
+            if spec['type'] in ('histogram','summary'):
+                if not isinstance(spec['family'],str) or not spec['family']:
+                    raise ValueError('Aggregate samples require their family identity')
+                labels={k:v for k,v in spec['labels'].items() if k!='le'}
+                group=(spec['family'],json.dumps(labels,sort_keys=True))
+                aggregates.setdefault(group,[]).append(key)
+        aggregate_exclusions={}
+        for keys in aggregates.values():
+            for sample in normalized:
+                values=sample['metrics'];valid=all(counter(values.get(k)) for k in keys)
+                counts=[k for k in keys if descriptors[k]['component']=='count']
+                sums=[k for k in keys if descriptors[k]['component']=='sum']
+                valid=valid and len(counts)==len(sums)==1
+                if descriptors[keys[0]]['type']=='histogram':
+                    buckets=sorted((float(descriptors[k]['labels']['le']),k) for k in keys if descriptors[k]['component']=='bucket')
+                    valid=valid and bool(buckets) and buckets[-1][0]==float('inf')
+                    if valid:
+                        valid=values[buckets[-1][1]]==values[counts[0]] and all(values[a[1]]<=values[b[1]] for a,b in zip(buckets,buckets[1:]))
+                if not valid:
+                    for k in keys:values[k]=None
+            exclusions={}
+            ordered=sorted(normalized,key=lambda sample:timestamp(sample['timestamp']))
+            for a,b in zip(ordered,ordered[1:]):
+                if all(counter(s['metrics'].get(k)) for s in (a,b) for k in keys) and any(
+                        b['metrics'][k]<a['metrics'][k] for k in keys):
+                    exclusions[(timestamp(a['timestamp']),timestamp(b['timestamp']))]='aggregate_counter_reset'
+            for key in keys:aggregate_exclusions[key]=exclusions
+        for key,spec in descriptors.items():
+            if spec['type']!='gauge':
+                window=calculate_window(normalized,start,end,{key:spec['unit']},anchor_policy=anchor_policy,max_gap_seconds=max_gap_seconds,
+                                        _interval_exclusions=aggregate_exclusions.get(key))
+                series[key]={**spec,**window['metrics'][key]}
+            else:
+                ordered=sorted((timestamp(s['timestamp']),s) for s in normalized if left<=timestamp(s['timestamp'])<=right)
+                if len({t for t,_ in ordered})!=len(ordered):
+                    raise ValueError('Duplicate snapshot timestamp')
+                valid=[(t,s['metrics'][key]) for t,s in ordered if s.get('collection_status')=='ok'
+                       and type(s['metrics'].get(key)) in (int,float) and math.isfinite(s['metrics'][key])]
+                complete=bool(valid) and len(valid)==len(ordered) and valid[0][0]==left and valid[-1][0]==right
+                complete=complete and all((b[0]-a[0]).total_seconds()<=max_gap_seconds for a,b in zip(ordered,ordered[1:]))
+                complete=complete and all(s.get('container_start_time') for _,s in ordered) and len({s.get('container_start_time') for _,s in ordered})==1
+                series[key]={**spec,'status':'complete' if complete else 'partial' if valid else 'unknown',
+                             'latest':valid[-1][1] if valid else None,'latest_timestamp':valid[-1][0].isoformat() if valid else None,
+                             'minimum':min(v for _,v in valid) if valid else None,'maximum':max(v for _,v in valid) if valid else None,
+                             'sample_count':len(valid)}
+        result['targets'][uid]={'series':series,'sample_count':len(items)}
+    return result
 
 
 def digest(data):
@@ -111,6 +197,17 @@ def atomic_write(path,data):
 def render_report(summary):
     def cell(value):
         return html.escape(str(value)).replace('|','\\|').replace('\n',' ')
+    if summary['policy_version']=='typed-window-v2':
+        lines=['# LB 类型化运行窗口报告','','Author: Zeno Ren','',
+               f"窗口：{summary['nominal_start']} → {summary['nominal_end']}",'',
+               '| Pod | 指标及标签 | 类型 | 观察值/增量 | 覆盖状态 |','|---|---|---|---:|---|']
+        for uid,target in summary['targets'].items():
+            for name,m in target['series'].items():
+                value=m.get('latest') if m['type']=='gauge' else m.get('observed_delta')
+                lines.append('| '+' | '.join(cell(v) for v in (uid,name,m['type'],value if value is not None else 'unknown',m['status']))+' |')
+        lines.extend(['','Gauge 为观测值，不做 counter 差分；各 Pod 分开呈现，不推算全局分位数。',
+                      'partial/unknown 不代表完整窗口零错误；端点完成不是客户端业务成功。',''])
+        return '\n'.join(lines).encode()
     lines=['# LB 运行窗口报告','','Author: Zeno Ren','',
            f"统计策略：`{summary['policy_version']}`；锚点策略：`{summary['anchor_policy']}`。",'',
            f"名义窗口：{summary['nominal_start']} → {summary['nominal_end']}",
@@ -198,7 +295,9 @@ def main():
     args=parser.parse_args()
     source=args.input.read_bytes()
     data=json.loads(source)
-    summary=calculate_window(data['snapshots'],args.start,args.end,data['metric_units'],anchor_policy=args.anchor_policy)
+    summary=(calculate_window_v2(data['snapshots'],args.start,args.end,anchor_policy=args.anchor_policy)
+             if data.get('schema_version')=='lb-snapshot-v2' else
+             calculate_window(data['snapshots'],args.start,args.end,data['metric_units'],anchor_policy=args.anchor_policy))
     summary['input_sha256']=digest(source)
     receipt=archive_report(args.output_dir,args.run_id,summary)
     print(json.dumps(receipt,ensure_ascii=False,indent=2))

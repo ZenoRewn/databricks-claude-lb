@@ -1,0 +1,254 @@
+{
+  "author": "Zeno Ren",
+  "scope": "Disposable Kind only; synthetic upstream and TLS-verified local MySQL",
+  "record": {
+    "action_receipts": {
+      "cleanup": {
+        "verified": true
+      },
+      "gate": {
+        "verified": true
+      },
+      "pause": {
+        "verified": true
+      },
+      "preflight": {
+        "runtime_control_version": 0,
+        "services": [
+          "claude-lb",
+          "claude-lb-internal"
+        ],
+        "verified": true
+      },
+      "restore_routes": {
+        "verified": true
+      },
+      "start_new": {
+        "verified": true
+      },
+      "stop_old": {
+        "verified": true
+      },
+      "verify_backend": {
+        "imageID": "localhost:5008/new@sha256:aad75a38fff1ae3ed5c6e3156415f71892c38728e2412dc737e8d92f51f6bd23",
+        "pod": "claude-lb-74d4bdd959-klmk6",
+        "uid": "90f88507-9531-4972-8ea8-5f73e0dd1e45",
+        "verified": true
+      },
+      "verify_business": {
+        "checks": [
+          {
+            "api": "messages",
+            "completed": true,
+            "model": "claude-opus-5",
+            "request_id": "42e08b40-b513-4e16-b4c4-c9ab89192c72",
+            "stream": false
+          },
+          {
+            "api": "responses",
+            "completed": true,
+            "model": "gpt-test",
+            "request_id": "8da07bf1-fde7-49ec-af14-94006a8216ea",
+            "stream": true
+          },
+          {
+            "api": "chat",
+            "completed": true,
+            "model": "gpt-test",
+            "request_id": "7de38781-10d9-4aba-aa8e-7bc02196e3a0",
+            "stream": true
+          }
+        ],
+        "execution_pid": 28,
+        "persistence_verified": true,
+        "plan_hash": "3aacfe1018afc6ff4f7d10906c6d4511530b78cc247c293a69ad93f6fd2b6aad",
+        "started_at": 1789915710.0837848,
+        "usage_events": 3,
+        "verified": true
+      },
+      "writer_termination": {
+        "0f41f578-69e3-47c0-a8b7-216d9aa6456c": {
+          "containers": [
+            {
+              "exitCode": 143,
+              "finishedAt": "2026-09-20T14:48:21Z",
+              "name": "claude-lb"
+            }
+          ],
+          "node": "lb-release-lab-20260920-worker2"
+        }
+      }
+    },
+    "cancel_requested": false,
+    "cleanup_errors": [],
+    "completion_target": "succeeded",
+    "drain_started_at": 1789915694.232995,
+    "events": [
+      {
+        "at": 1789915685.15248,
+        "intent": "preflight",
+        "phase": "preflight"
+      },
+      {
+        "at": 1789915692.1356332,
+        "phase": "gating",
+        "reason": null
+      },
+      {
+        "at": 1789915693.1780226,
+        "intent": "gate",
+        "phase": "gating"
+      },
+      {
+        "at": 1789915693.2080023,
+        "phase": "pausing",
+        "reason": null
+      },
+      {
+        "at": 1789915694.2329986,
+        "intent": "pause",
+        "phase": "pausing"
+      },
+      {
+        "at": 1789915694.2948766,
+        "phase": "draining",
+        "reason": null
+      },
+      {
+        "at": 1789915699.6939006,
+        "phase": "stopping",
+        "reason": null
+      },
+      {
+        "at": 1789915700.765537,
+        "intent": "stop_old",
+        "phase": "stopping"
+      },
+      {
+        "at": 1789915701.9388897,
+        "phase": "starting",
+        "reason": null
+      },
+      {
+        "at": 1789915702.964356,
+        "intent": "start_new",
+        "phase": "starting"
+      },
+      {
+        "at": 1789915702.9889388,
+        "phase": "verifying_backend",
+        "reason": null
+      },
+      {
+        "at": 1789915704.0151994,
+        "intent": "verify_backend",
+        "phase": "verifying_backend"
+      },
+      {
+        "at": 1789915706.700154,
+        "phase": "restoring_routes",
+        "reason": null
+      },
+      {
+        "at": 1789915707.7258208,
+        "intent": "restore_routes",
+        "phase": "restoring_routes"
+      },
+      {
+        "at": 1789915708.802614,
+        "phase": "verifying_business",
+        "reason": null
+      },
+      {
+        "at": 1789915709.8373187,
+        "intent": "verify_business",
+        "phase": "verifying_business"
+      },
+      {
+        "at": 1789915734.8085904,
+        "phase": "finalizing",
+        "reason": null
+      },
+      {
+        "at": 1789915735.8292508,
+        "intent": "cleanup",
+        "phase": "finalizing"
+      },
+      {
+        "at": 1789915735.8702116,
+        "phase": "succeeded",
+        "reason": null
+      }
+    ],
+    "final_result": "succeeded",
+    "intent": null,
+    "maintenance_finished_at": 1789915708.77953,
+    "maintenance_started_at": 1789915693.1725132,
+    "phase": "succeeded",
+    "plan": {
+      "business_probes": [
+        {
+          "api": "messages",
+          "max_tokens": 32,
+          "model": "claude-opus-5",
+          "stream": false
+        },
+        {
+          "api": "responses",
+          "max_tokens": 32,
+          "model": "gpt-test",
+          "stream": true
+        },
+        {
+          "api": "chat",
+          "max_tokens": 32,
+          "model": "gpt-test",
+          "stream": true
+        }
+      ],
+      "container": "claude-lb",
+      "deployment": "claude-lb",
+      "direct_pod_access": false,
+      "drain_seconds": 60,
+      "forward_seconds": 150,
+      "image": "localhost:5008/new@sha256:aad75a38fff1ae3ed5c6e3156415f71892c38728e2412dc737e8d92f51f6bd23",
+      "lab": true,
+      "legacy_bootstrap": true,
+      "maintenance_seconds": 300,
+      "namespace": "lb-lab",
+      "public_urls": [
+        "http://claude-lb.lb-lab.svc",
+        "http://claude-lb-internal.lb-lab.svc"
+      ],
+      "release_id": "bootstrap-01",
+      "schema_version": "lb-release-plan-v1",
+      "services": [
+        "claude-lb",
+        "claude-lb-internal"
+      ],
+      "snapshot_sha256": "446c296ad37612556071444f31143741822211d0eeb45dad58089f1b74394584",
+      "source_hashes": {
+        "admission.py": "0b9fc601938cea860f68d7a2d1fa1db5e2c6db4bedbd203015c1b4ee80ae2dbe",
+        "cleanup_observability.py": "d23076d64c995ba5d57600d539a86646952f38912e354304eebd57c7f1654612",
+        "dashboard.html": "9de9a5ee438ce8a85795b6217f85ef0639fc7059f3fd821e3d8cb617bed11d4a",
+        "effort_compat.py": "fbf6bcdd8cc2093245e2d94036d532016d9661fc7768c0b435b77963225dc47c",
+        "gateway_lifecycle.py": "b547a6df083210e5278c4be68275377029cee21f97203a81e1cf38ee7b40d1cf",
+        "main.py": "f296482e114e37637fee8da8da8bb650725c2b6fda51b0311d214204b1a5cc3f",
+        "otel_setup.py": "e68dfe8cef208c42d39f14ad8d5cc3d9b4eb909c68e3336d22937669ebba1cce",
+        "release_probe.py": "5830fccc7c9131e10c1cbeeaa7e449fabf3e337e97270b6ade9e4b826ac3a3c3",
+        "request_budget.py": "0e26b6b14135461a8ae6ab86aa0e4234e5b507d6261b2bcbefcfad6ce9c2b4a4",
+        "request_telemetry.py": "567e254eb522f0b8dbbc31cf7d70e296e26662f9ca1f7df8175242fe489c1ee8",
+        "response_semantics.py": "a854e9010d89e85c69ca1f12ea79a4d3921265cff2183ce9e4b99af99e683691",
+        "upstream_body.py": "639f2416464e39b850af94ab037713d2a8bc03b66ea73cc64e0d9c7d60c7d4fd",
+        "usage_store.py": "b0c3a0a353bda41f11fb4910604970bd428ff3fcd6fddf4c729c6aad73cc5042"
+      },
+      "source_revision": "521f45a8cd9c58a27b97089803a7997c7d3daae8",
+      "storage_compatibility": "additive-compatible"
+    },
+    "schema_version": "lb-release-v1",
+    "writer_stop_requested": [
+      "0f41f578-69e3-47c0-a8b7-216d9aa6456c"
+    ]
+  },
+  "provenance_note": "Early lab receipt: source_revision names the pre-hardening baseline; the modified worktree runtime is identified by its recorded file hashes. Not a deployed Git commit or production image claim."
+}

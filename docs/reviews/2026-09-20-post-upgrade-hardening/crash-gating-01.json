@@ -1,0 +1,305 @@
+{
+  "author": "Zeno Ren",
+  "scope": "Disposable Kind, synthetic provider, no production calls",
+  "case": "crash-gating-01",
+  "expected": "succeeded",
+  "provider_send_delta": 3,
+  "record": {
+    "action_receipts": {
+      "cleanup": {
+        "verified": true
+      },
+      "gate": {
+        "verified": true
+      },
+      "pause": {
+        "verified": true
+      },
+      "preflight": {
+        "runtime_control_version": 2,
+        "server_dry_run_verified": true,
+        "services": [
+          "claude-lb",
+          "claude-lb-internal"
+        ],
+        "verified": true
+      },
+      "restore_routes": {
+        "verified": true
+      },
+      "start_new": {
+        "verified": true
+      },
+      "stop_old": {
+        "verified": true
+      },
+      "verify_backend": {
+        "imageID": "localhost:5008/alternate@sha256:7ad850835bbe1b9072e3d2a6060eb831dba68bd6b8ec3642a2042d27e3895f0c",
+        "pod": "claude-lb-85cdc59b85-9j6kc",
+        "uid": "7ef85670-6450-4f66-b662-9cb7625d6bbf",
+        "verified": true
+      },
+      "verify_business": {
+        "checks": [
+          {
+            "api": "messages",
+            "completed": true,
+            "model": "claude-opus-5",
+            "request_id": "ddadd780-f76d-40c8-b29c-bd6b574743a4",
+            "stream": false
+          },
+          {
+            "api": "responses",
+            "completed": true,
+            "model": "gpt-test",
+            "request_id": "57da17be-33ab-43dc-a425-7c6d7f367e75",
+            "stream": true
+          },
+          {
+            "api": "chat",
+            "completed": true,
+            "model": "gpt-test",
+            "request_id": "5407ea48-f215-45a0-9d09-69387d068ff2",
+            "stream": true
+          }
+        ],
+        "execution_pid": 27,
+        "persistence_verified": true,
+        "plan_hash": "19529a3c70aac5a907d5a034f4ff9ee5ff3b7721c9db7785c5bd8f8a70edde6c",
+        "started_at": 1789920263.9018776,
+        "usage_events": 3,
+        "verified": true
+      },
+      "writer_termination": {
+        "8325b283-0d7b-4916-86ae-4f61728da63a": {
+          "containers": [
+            {
+              "exitCode": 143,
+              "finishedAt": "2026-09-20T16:04:14Z",
+              "name": "claude-lb"
+            }
+          ],
+          "node": "lb-release-lab-20260920-worker2"
+        }
+      }
+    },
+    "cancel_requested": false,
+    "cleanup_errors": [],
+    "completion_target": "succeeded",
+    "drain_started_at": 1789920246.0994854,
+    "events": [
+      {
+        "at": 1789920208.3269684,
+        "intent": "preflight",
+        "phase": "preflight"
+      },
+      {
+        "at": 1789920215.106997,
+        "phase": "gating",
+        "reason": null
+      },
+      {
+        "at": 1789920244.9289346,
+        "intent": "gate",
+        "phase": "gating"
+      },
+      {
+        "at": 1789920245.0591674,
+        "phase": "pausing",
+        "reason": null
+      },
+      {
+        "at": 1789920246.0994892,
+        "intent": "pause",
+        "phase": "pausing"
+      },
+      {
+        "at": 1789920246.3530464,
+        "phase": "draining",
+        "reason": null
+      },
+      {
+        "at": 1789920252.1258657,
+        "phase": "stopping",
+        "reason": null
+      },
+      {
+        "at": 1789920253.2550116,
+        "intent": "stop_old",
+        "phase": "stopping"
+      },
+      {
+        "at": 1789920255.542051,
+        "phase": "starting",
+        "reason": null
+      },
+      {
+        "at": 1789920256.5942807,
+        "intent": "start_new",
+        "phase": "starting"
+      },
+      {
+        "at": 1789920256.6555145,
+        "phase": "verifying_backend",
+        "reason": null
+      },
+      {
+        "at": 1789920257.6822977,
+        "intent": "verify_backend",
+        "phase": "verifying_backend"
+      },
+      {
+        "at": 1789920260.486982,
+        "phase": "restoring_routes",
+        "reason": null
+      },
+      {
+        "at": 1789920261.5328796,
+        "intent": "restore_routes",
+        "phase": "restoring_routes"
+      },
+      {
+        "at": 1789920262.65076,
+        "phase": "verifying_business",
+        "reason": null
+      },
+      {
+        "at": 1789920263.6939948,
+        "intent": "verify_business",
+        "phase": "verifying_business"
+      },
+      {
+        "at": 1789920288.679224,
+        "phase": "finalizing",
+        "reason": null
+      },
+      {
+        "at": 1789920289.7137685,
+        "intent": "cleanup",
+        "phase": "finalizing"
+      },
+      {
+        "at": 1789920289.755167,
+        "phase": "succeeded",
+        "reason": null
+      }
+    ],
+    "final_result": "succeeded",
+    "intent": null,
+    "maintenance_finished_at": 1789920262.610686,
+    "maintenance_started_at": 1789920244.9231484,
+    "phase": "succeeded",
+    "plan": {
+      "business_probes": [
+        {
+          "api": "messages",
+          "max_tokens": 32,
+          "model": "claude-opus-5",
+          "stream": false
+        },
+        {
+          "api": "responses",
+          "max_tokens": 32,
+          "model": "gpt-test",
+          "stream": true
+        },
+        {
+          "api": "chat",
+          "max_tokens": 32,
+          "model": "gpt-test",
+          "stream": true
+        }
+      ],
+      "container": "claude-lb",
+      "deployment": "claude-lb",
+      "direct_pod_access": false,
+      "drain_seconds": 60,
+      "forward_seconds": 150,
+      "image": "localhost:5008/alternate@sha256:7ad850835bbe1b9072e3d2a6060eb831dba68bd6b8ec3642a2042d27e3895f0c",
+      "lab": true,
+      "legacy_bootstrap": true,
+      "maintenance_seconds": 300,
+      "namespace": "lb-lab",
+      "public_urls": [
+        "http://claude-lb.lb-lab.svc",
+        "http://claude-lb-internal.lb-lab.svc"
+      ],
+      "release_id": "crash-gating-01",
+      "schema_version": "lb-release-plan-v1",
+      "services": [
+        "claude-lb",
+        "claude-lb-internal"
+      ],
+      "snapshot_sha256": "ea11845833272701d021d03e2cd2d6ea9abb6d7c5e04d60c0a8eeb7d136e9d6b",
+      "source_hashes": {
+        "admission.py": "0b9fc601938cea860f68d7a2d1fa1db5e2c6db4bedbd203015c1b4ee80ae2dbe",
+        "cleanup_observability.py": "d23076d64c995ba5d57600d539a86646952f38912e354304eebd57c7f1654612",
+        "dashboard.html": "9de9a5ee438ce8a85795b6217f85ef0639fc7059f3fd821e3d8cb617bed11d4a",
+        "effort_compat.py": "fbf6bcdd8cc2093245e2d94036d532016d9661fc7768c0b435b77963225dc47c",
+        "gateway_lifecycle.py": "ca69a99c1ae5205a5da1194cd0527c140d9d9b37629e0b0df67cef93643e109f",
+        "main.py": "0ba9168e3f53768cc860a9692b0540339804319c41ef4250eb682d7dec37ae9d",
+        "otel_setup.py": "e68dfe8cef208c42d39f14ad8d5cc3d9b4eb909c68e3336d22937669ebba1cce",
+        "release_probe.py": "8618a6a83230e20cb6cf0102084493185665ac0147c9ebcfa091a58d65f4cfb7",
+        "request_budget.py": "0e26b6b14135461a8ae6ab86aa0e4234e5b507d6261b2bcbefcfad6ce9c2b4a4",
+        "request_telemetry.py": "567e254eb522f0b8dbbc31cf7d70e296e26662f9ca1f7df8175242fe489c1ee8",
+        "response_semantics.py": "c2da11dd821e6edb30eea160a8810eeb464aea58b083935d254e8781844196b2",
+        "upstream_body.py": "639f2416464e39b850af94ab037713d2a8bc03b66ea73cc64e0d9c7d60c7d4fd",
+        "usage_store.py": "b0c3a0a353bda41f11fb4910604970bd428ff3fcd6fddf4c729c6aad73cc5042"
+      },
+      "source_revision": "0000000000000000000000000000000000000000",
+      "storage_compatibility": "additive-compatible",
+      "target_settings": {
+        "lifecycle": {
+          "preStop": {
+            "exec": {
+              "command": [
+                "python",
+                "/app/gateway_lifecycle.py",
+                "--wait-seconds",
+                "45"
+              ]
+            }
+          }
+        },
+        "livenessProbe": {
+          "failureThreshold": 3,
+          "httpGet": {
+            "path": "/health/live",
+            "port": 8000,
+            "scheme": "HTTP"
+          },
+          "periodSeconds": 30,
+          "successThreshold": 1,
+          "timeoutSeconds": 2
+        },
+        "readinessProbe": {
+          "failureThreshold": 1,
+          "httpGet": {
+            "path": "/health/accepting",
+            "port": 8000,
+            "scheme": "HTTP"
+          },
+          "periodSeconds": 5,
+          "successThreshold": 1,
+          "timeoutSeconds": 2
+        },
+        "startupProbe": {
+          "failureThreshold": 30,
+          "httpGet": {
+            "path": "/health/live",
+            "port": 8000,
+            "scheme": "HTTP"
+          },
+          "periodSeconds": 2,
+          "successThreshold": 1,
+          "timeoutSeconds": 2
+        },
+        "terminationGracePeriodSeconds": 90
+      }
+    },
+    "schema_version": "lb-release-v1",
+    "writer_stop_requested": [
+      "8325b283-0d7b-4916-86ae-4f61728da63a"
+    ]
+  }
+}

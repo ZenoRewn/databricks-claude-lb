@@ -1,0 +1,90 @@
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+ssssss..............................FFFF...... [  7%]
+..................................... [ 13%]
+....................................... [ 19%]
+................................................................. [ 30%]
+............................................ [ 37%]
+.................................................s................ [ 47%]
+................................................................... [ 58%]
+.................................. [ 63%]
+.................................................... [ 72%]
+.................................. [ 77%]
+........... [ 79%]
+............................ [ 84%]
+.......................................................... [ 93%]
+.........................................                           [100%]
+=================================== FAILURES ===================================
+__________ TableCompletenessTests.test_every_documented_route_exists ___________
+tests/test_api_surface_contract.py:89: in test_every_documented_route_exists
+    missing = sorted(k for k in _documented() if k not in actual)
+                                ^^^^^^^^^^^^^
+tests/test_api_surface_contract.py:46: in _documented
+    text = (pathlib.Path(main.__file__).parent / "CLAUDE.md").read_text(encoding="utf-8")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/pathlib.py:1027: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/pathlib.py:1013: in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   FileNotFoundError: [Errno 2] No such file or directory: '/app/CLAUDE.md'
+__________ TableCompletenessTests.test_every_real_route_is_documented __________
+tests/test_api_surface_contract.py:93: in test_every_real_route_is_documented
+    documented = _documented()
+                 ^^^^^^^^^^^^^
+tests/test_api_surface_contract.py:46: in _documented
+    text = (pathlib.Path(main.__file__).parent / "CLAUDE.md").read_text(encoding="utf-8")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/pathlib.py:1027: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/pathlib.py:1013: in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   FileNotFoundError: [Errno 2] No such file or directory: '/app/CLAUDE.md'
+_________ TableCompletenessTests.test_the_table_is_not_trivially_empty _________
+tests/test_api_surface_contract.py:102: in test_the_table_is_not_trivially_empty
+    self.assertGreaterEqual(len(_documented()), 15)
+                                ^^^^^^^^^^^^^
+tests/test_api_surface_contract.py:46: in _documented
+    text = (pathlib.Path(main.__file__).parent / "CLAUDE.md").read_text(encoding="utf-8")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/pathlib.py:1027: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/pathlib.py:1013: in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   FileNotFoundError: [Errno 2] No such file or directory: '/app/CLAUDE.md'
+_ AuthBehaviourMatchesTheTableTests.test_auth_column_is_truthful_for_every_row _
+tests/test_api_surface_contract.py:128: in test_auth_column_is_truthful_for_every_row
+    for (path, method), need in sorted(_documented().items()):
+                                       ^^^^^^^^^^^^^
+tests/test_api_surface_contract.py:46: in _documented
+    text = (pathlib.Path(main.__file__).parent / "CLAUDE.md").read_text(encoding="utf-8")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/pathlib.py:1027: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/pathlib.py:1013: in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   FileNotFoundError: [Errno 2] No such file or directory: '/app/CLAUDE.md'
+_ DocsMustNotResurrectTheWithdrawnFramingTests.test_the_observation_field_is_documented_as_the_replacement (doc='CLAUDE.md') _
+tests/test_pool_timeout_classification.py:121: in test_the_observation_field_is_documented_as_the_replacement
+    text = (ROOT / name).read_text(encoding="utf-8")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/pathlib.py:1027: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/pathlib.py:1013: in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   FileNotFoundError: [Errno 2] No such file or directory: '/app/CLAUDE.md'
+=========================== short test summary info ============================
+FAILED tests/test_api_surface_contract.py::TableCompletenessTests::test_every_documented_route_exists
+FAILED tests/test_api_surface_contract.py::TableCompletenessTests::test_every_real_route_is_documented
+FAILED tests/test_api_surface_contract.py::TableCompletenessTests::test_the_table_is_not_trivially_empty
+FAILED tests/test_api_surface_contract.py::AuthBehaviourMatchesTheTableTests::test_auth_column_is_truthful_for_every_row
+SUBFAILED(doc='CLAUDE.md') tests/test_pool_timeout_classification.py::DocsMustNotResurrectTheWithdrawnFramingTests::test_the_observation_field_is_documented_as_the_replacement
+5 failed, 611 passed, 7 skipped, 503 subtests passed in 39.95s

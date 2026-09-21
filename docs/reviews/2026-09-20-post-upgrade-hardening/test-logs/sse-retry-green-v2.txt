@@ -1,0 +1,13 @@
+..................... [ 23%]
+.............................. [ 57%]
+........................ [ 84%]
+..............                                                  [100%]
+=================================== FAILURES ===================================
+_ ResultConsistencyTests.test_unknown_empty_stream_has_both_retry_suppression_signals (provider='databricks', api='messages') _
+tests/test_result_consistency.py:111: in test_unknown_empty_stream_has_both_retry_suppression_signals
+    self.assertFalse(error['retryable'])
+                     ^^^^^^^^^^^^^^^^^^
+E   KeyError: 'retryable'
+=========================== short test summary info ============================
+SUBFAILED(provider='databricks', api='messages') tests/test_result_consistency.py::ResultConsistencyTests::test_unknown_empty_stream_has_both_retry_suppression_signals
+1 failed, 89 passed, 149 subtests passed in 10.33s

@@ -4,6 +4,8 @@ Author: Zeno Ren
 
 日期：2026-09-20
 
+> 历史候选交接，以下“尚未部署”描述的是本文编写时点。用户提供的后续独立检查报告记录了 892e397 已在生产运行。本轮新的本地优化及监控契约见 [升级后加固说明](POST_UPGRADE_HARDENING.md)；未修改或接入 OpenClaw，不应把这里的旧版本或本地新候选当作当前实时生产状态。
+
 **本地代码已优化；本文不是 AKS 发布回执。尚未更新生产镜像、Deployment、OpenClaw 自动化或监控脚本。** 实际部署后，先核对运行版本，再按以下契约调整现有监控。实现与默认参数详见 [SERVICE_RELIABILITY.md](SERVICE_RELIABILITY.md)。
 
 ## 先确认真实运行版本

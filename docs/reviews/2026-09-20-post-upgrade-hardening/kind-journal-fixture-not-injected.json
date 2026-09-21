@@ -1,0 +1,302 @@
+{
+  "author": "Zeno Ren",
+  "fixture_error": "phase=null prevented requested journal fault; ordinary release succeeded; NOT fault acceptance",
+  "record": {
+    "action_receipts": {
+      "cleanup": {
+        "verified": true
+      },
+      "gate": {
+        "verified": true
+      },
+      "pause": {
+        "verified": true
+      },
+      "preflight": {
+        "runtime_control_version": 2,
+        "server_dry_run_verified": true,
+        "services": [
+          "claude-lb",
+          "claude-lb-internal"
+        ],
+        "verified": true
+      },
+      "restore_routes": {
+        "verified": true
+      },
+      "start_new": {
+        "verified": true
+      },
+      "stop_old": {
+        "verified": true
+      },
+      "verify_backend": {
+        "imageID": "localhost:5008/alternate@sha256:ea0e274f87098c23d513582aedc96ad67dae304c80e5c07b6d0fbe49490bfaa9",
+        "pod": "claude-lb-64f8b6f69f-9m9fz",
+        "uid": "07de5c7e-00fc-4c70-ae02-d5c5d48c3236",
+        "verified": true
+      },
+      "verify_business": {
+        "checks": [
+          {
+            "api": "messages",
+            "completed": true,
+            "model": "claude-opus-5",
+            "request_id": "5dabf54a-0c11-4052-aeb2-25fc2e716ee4",
+            "stream": false
+          },
+          {
+            "api": "responses",
+            "completed": true,
+            "model": "gpt-test",
+            "request_id": "d8ac3f4b-25b7-4997-a6a6-c92e0e2aedf6",
+            "stream": true
+          },
+          {
+            "api": "chat",
+            "completed": true,
+            "model": "gpt-test",
+            "request_id": "c722954a-4af9-4056-8672-e52bd7d76f96",
+            "stream": true
+          }
+        ],
+        "execution_pid": 26,
+        "persistence_verified": true,
+        "plan_hash": "fece6a00dcda2b48dedb02ec2de0de286281326ef8969b1aff49f6a4f71bc43f",
+        "started_at": 1789923107.1891806,
+        "usage_events": 3,
+        "verified": true
+      },
+      "writer_termination": {
+        "cdb74bfb-975c-4b62-98ef-05f0c7a8d64e": {
+          "containers": [
+            {
+              "exitCode": 143,
+              "finishedAt": "2026-09-20T16:51:37Z",
+              "name": "claude-lb"
+            }
+          ],
+          "node": "lb-release-lab-20260920-worker2"
+        }
+      }
+    },
+    "cancel_requested": false,
+    "cleanup_errors": [],
+    "completion_target": "succeeded",
+    "drain_started_at": 1789923089.663859,
+    "events": [
+      {
+        "at": 1789923080.3191206,
+        "intent": "preflight",
+        "phase": "preflight"
+      },
+      {
+        "at": 1789923087.4418488,
+        "phase": "gating",
+        "reason": null
+      },
+      {
+        "at": 1789923088.5179758,
+        "intent": "gate",
+        "phase": "gating"
+      },
+      {
+        "at": 1789923088.5820494,
+        "phase": "pausing",
+        "reason": null
+      },
+      {
+        "at": 1789923089.6638649,
+        "intent": "pause",
+        "phase": "pausing"
+      },
+      {
+        "at": 1789923089.9827478,
+        "phase": "draining",
+        "reason": null
+      },
+      {
+        "at": 1789923095.9623191,
+        "phase": "stopping",
+        "reason": null
+      },
+      {
+        "at": 1789923097.157248,
+        "intent": "stop_old",
+        "phase": "stopping"
+      },
+      {
+        "at": 1789923098.491712,
+        "phase": "starting",
+        "reason": null
+      },
+      {
+        "at": 1789923099.5630374,
+        "intent": "start_new",
+        "phase": "starting"
+      },
+      {
+        "at": 1789923099.627698,
+        "phase": "verifying_backend",
+        "reason": null
+      },
+      {
+        "at": 1789923100.6810362,
+        "intent": "verify_backend",
+        "phase": "verifying_backend"
+      },
+      {
+        "at": 1789923103.617645,
+        "phase": "restoring_routes",
+        "reason": null
+      },
+      {
+        "at": 1789923104.7161386,
+        "intent": "restore_routes",
+        "phase": "restoring_routes"
+      },
+      {
+        "at": 1789923105.875084,
+        "phase": "verifying_business",
+        "reason": null
+      },
+      {
+        "at": 1789923106.9705553,
+        "intent": "verify_business",
+        "phase": "verifying_business"
+      },
+      {
+        "at": 1789923130.8879704,
+        "phase": "finalizing",
+        "reason": null
+      },
+      {
+        "at": 1789923131.961238,
+        "intent": "cleanup",
+        "phase": "finalizing"
+      },
+      {
+        "at": 1789923132.0489209,
+        "phase": "succeeded",
+        "reason": null
+      }
+    ],
+    "final_result": "succeeded",
+    "intent": null,
+    "maintenance_finished_at": 1789923105.8524423,
+    "maintenance_started_at": 1789923088.5128503,
+    "phase": "succeeded",
+    "plan": {
+      "business_probes": [
+        {
+          "api": "messages",
+          "max_tokens": 32,
+          "model": "claude-opus-5",
+          "stream": false
+        },
+        {
+          "api": "responses",
+          "max_tokens": 32,
+          "model": "gpt-test",
+          "stream": true
+        },
+        {
+          "api": "chat",
+          "max_tokens": 32,
+          "model": "gpt-test",
+          "stream": true
+        }
+      ],
+      "container": "claude-lb",
+      "deployment": "claude-lb",
+      "direct_pod_access": false,
+      "drain_seconds": 60,
+      "forward_seconds": 150,
+      "image": "localhost:5008/alternate@sha256:ea0e274f87098c23d513582aedc96ad67dae304c80e5c07b6d0fbe49490bfaa9",
+      "lab": true,
+      "legacy_bootstrap": true,
+      "maintenance_seconds": 300,
+      "namespace": "lb-lab",
+      "public_urls": [
+        "http://claude-lb.lb-lab.svc",
+        "http://claude-lb-internal.lb-lab.svc"
+      ],
+      "release_id": "frozen-journal-03",
+      "schema_version": "lb-release-plan-v1",
+      "services": [
+        "claude-lb",
+        "claude-lb-internal"
+      ],
+      "snapshot_sha256": "55ec6e8cf0111d84eb04b7ff416528a2fc08fe9b762ce42ffedaf0f5976e98be",
+      "source_hashes": {
+        "admission.py": "0b9fc601938cea860f68d7a2d1fa1db5e2c6db4bedbd203015c1b4ee80ae2dbe",
+        "cleanup_observability.py": "d23076d64c995ba5d57600d539a86646952f38912e354304eebd57c7f1654612",
+        "dashboard.html": "9de9a5ee438ce8a85795b6217f85ef0639fc7059f3fd821e3d8cb617bed11d4a",
+        "effort_compat.py": "fbf6bcdd8cc2093245e2d94036d532016d9661fc7768c0b435b77963225dc47c",
+        "gateway_lifecycle.py": "ca69a99c1ae5205a5da1194cd0527c140d9d9b37629e0b0df67cef93643e109f",
+        "main.py": "0ba9168e3f53768cc860a9692b0540339804319c41ef4250eb682d7dec37ae9d",
+        "otel_setup.py": "e68dfe8cef208c42d39f14ad8d5cc3d9b4eb909c68e3336d22937669ebba1cce",
+        "release_probe.py": "b3718f3fe5241707b2c009d9f8cd63221e7b6bc8c01649e5bc6fc60adaa71ee4",
+        "request_budget.py": "0e26b6b14135461a8ae6ab86aa0e4234e5b507d6261b2bcbefcfad6ce9c2b4a4",
+        "request_telemetry.py": "567e254eb522f0b8dbbc31cf7d70e296e26662f9ca1f7df8175242fe489c1ee8",
+        "response_semantics.py": "c2da11dd821e6edb30eea160a8810eeb464aea58b083935d254e8781844196b2",
+        "upstream_body.py": "639f2416464e39b850af94ab037713d2a8bc03b66ea73cc64e0d9c7d60c7d4fd",
+        "usage_store.py": "b0c3a0a353bda41f11fb4910604970bd428ff3fcd6fddf4c729c6aad73cc5042"
+      },
+      "source_revision": "0000000000000000000000000000000000000000",
+      "storage_compatibility": "additive-compatible",
+      "target_settings": {
+        "lifecycle": {
+          "preStop": {
+            "exec": {
+              "command": [
+                "python",
+                "/app/gateway_lifecycle.py",
+                "--wait-seconds",
+                "45"
+              ]
+            }
+          }
+        },
+        "livenessProbe": {
+          "failureThreshold": 3,
+          "httpGet": {
+            "path": "/health/live",
+            "port": 8000,
+            "scheme": "HTTP"
+          },
+          "periodSeconds": 30,
+          "successThreshold": 1,
+          "timeoutSeconds": 2
+        },
+        "readinessProbe": {
+          "failureThreshold": 1,
+          "httpGet": {
+            "path": "/health/accepting",
+            "port": 8000,
+            "scheme": "HTTP"
+          },
+          "periodSeconds": 5,
+          "successThreshold": 1,
+          "timeoutSeconds": 2
+        },
+        "startupProbe": {
+          "failureThreshold": 30,
+          "httpGet": {
+            "path": "/health/live",
+            "port": 8000,
+            "scheme": "HTTP"
+          },
+          "periodSeconds": 2,
+          "successThreshold": 1,
+          "timeoutSeconds": 2
+        },
+        "terminationGracePeriodSeconds": 90
+      }
+    },
+    "schema_version": "lb-release-v1",
+    "writer_stop_requested": [
+      "cdb74bfb-975c-4b62-98ef-05f0c7a8d64e"
+    ]
+  }
+}

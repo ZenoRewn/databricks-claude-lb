@@ -59,7 +59,7 @@ class CopilotTokenExchangeTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(error_type=error_type.__name__):
                 self.shared.get = AsyncMock(side_effect=error_type(""))
                 self.shared.post = AsyncMock(return_value=httpx.Response(
-                    200, json={"choices": [], "usage": {}}
+                    200, json={"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"synthetic"}}],"usage":{}}
                 ))
                 self.endpoint.session_token = None
                 self.endpoint.circuit_open = False
@@ -373,7 +373,7 @@ class CopilotTokenExchangeTests(unittest.IsolatedAsyncioTestCase):
                             b'data: {"type":"response.completed","response":{"id":"synthetic"}}\n\n'
                         ))
                     else:
-                        response = httpx.Response(200, json={"usage": {}})
+                        response = httpx.Response(200, json={"id":"synthetic","status":"completed","output":[],"usage":{}})
                     responses.append(response)
                     return response
 
