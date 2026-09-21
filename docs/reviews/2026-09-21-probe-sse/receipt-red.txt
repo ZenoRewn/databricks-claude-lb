@@ -1,0 +1,64 @@
+.........FF.F                               [100%]
+=================================== FAILURES ===================================
+_ ProbeReceiptTests.test_engine_persists_failed_checks_before_entering_recovery _
+tests/release/test_probe_receipts.py:48: in test_engine_persists_failed_checks_before_entering_recovery
+    self.assertEqual(result['phase'],'recovering')
+E   AssertionError: 'verifying_business' != 'recovering'
+E   - verifying_business
+E   + recovering
+_ ProbeReceiptTests.test_failed_exec_reads_receipt_without_a_second_business_probe _
+tests/release/test_probe_receipts.py:23: in test_failed_exec_reads_receipt_without_a_second_business_probe
+    result=b._probe(pod,'business',extra=('--plan','{}'))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+operations/release/backend.py:87: in _probe
+    out=self.api.exec(self.namespace,pod['metadata']['name'],self.plan['container'],
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1176: in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1180: in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1245: in _execute_mock_call
+    raise result
+E   RuntimeError: bounded_probe_failed
+_ ProbeReceiptTests.test_lost_lease_or_replaced_pod_blocks_receipt_exec (replaced=False) _
+tests/release/test_probe_receipts.py:38: in test_lost_lease_or_replaced_pod_blocks_receipt_exec
+    with self.assertRaises(UnsafeState if replaced else OwnershipLost):b._probe(pod,'business',extra=('--plan','{}'))
+                                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+operations/release/backend.py:87: in _probe
+    out=self.api.exec(self.namespace,pod['metadata']['name'],self.plan['container'],
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1176: in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1180: in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1241: in _execute_mock_call
+    raise effect
+E   RuntimeError: bounded_probe_failed
+_ ProbeReceiptTests.test_lost_lease_or_replaced_pod_blocks_receipt_exec (replaced=True) _
+tests/release/test_probe_receipts.py:38: in test_lost_lease_or_replaced_pod_blocks_receipt_exec
+    with self.assertRaises(UnsafeState if replaced else OwnershipLost):b._probe(pod,'business',extra=('--plan','{}'))
+                                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+operations/release/backend.py:87: in _probe
+    out=self.api.exec(self.namespace,pod['metadata']['name'],self.plan['container'],
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1176: in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1180: in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1241: in _execute_mock_call
+    raise effect
+E   RuntimeError: bounded_probe_failed
+_ ProbeReceiptTests.test_readback_failure_keeps_original_failure_and_never_replays _
+tests/release/test_probe_receipts.py:30: in test_readback_failure_keeps_original_failure_and_never_replays
+    self.assertEqual(b.api.exec.call_count,2)
+E   AssertionError: 1 != 2
+=========================== short test summary info ============================
+FAILED tests/release/test_probe_receipts.py::ProbeReceiptTests::test_engine_persists_failed_checks_before_entering_recovery
+FAILED tests/release/test_probe_receipts.py::ProbeReceiptTests::test_failed_exec_reads_receipt_without_a_second_business_probe
+SUBFAILED(replaced=False) tests/release/test_probe_receipts.py::ProbeReceiptTests::test_lost_lease_or_replaced_pod_blocks_receipt_exec
+SUBFAILED(replaced=True) tests/release/test_probe_receipts.py::ProbeReceiptTests::test_lost_lease_or_replaced_pod_blocks_receipt_exec
+FAILED tests/release/test_probe_receipts.py::ProbeReceiptTests::test_readback_failure_keeps_original_failure_and_never_replays
+5 failed, 10 passed, 27 subtests passed in 0.75s
