@@ -2135,6 +2135,11 @@ def _http_error_headers(response):
     return headers
 
 
+def _request_local_rejection(detail):
+    return detail.get('error',{}).get('reason') in (
+        'context_window_exceeded','invalid_input','output_limit')
+
+
 # Prometheus histogram bucket edges in seconds. Covers sub-100ms (fast chat
 # completion) → 100ms-1s (typical) → 1-30s (thinking) → 30s+ (long thinking /
 # large output). Chosen so p50/p95/p99 quantiles remain meaningful for the
@@ -2953,6 +2958,7 @@ class ClaudeProxy:
                             response.status_code, error_body.decode('utf-8',errors='replace') if isinstance(error_body,bytes) else str(error_body), "Databricks", current_endpoint.name,
                             content_type=upstream_ct, upstream_headers=response.headers,
                         )
+                        is_client_error = is_client_error or _request_local_rejection(_detail_probe)
                         if _detail_probe.get("error", {}).get("code") == "upstream_html_error":
                             ids = _detail_probe["error"].get("upstream_ids") or {}
                             _note_upstream_html(proxy_self, current_endpoint, "Databricks", "messages",
@@ -3356,6 +3362,7 @@ class AzureOpenAIProxy:
                             response.status_code, error_text, "Azure OpenAI", current_endpoint.name,
                             content_type=upstream_ct, upstream_headers=response.headers,
                         )
+                        is_client_error = is_client_error or _request_local_rejection(upstream_detail)
                         log_snippet = error_text[:300].replace("\n", " ") if error_text else ""
                         is_html = upstream_detail.get("error", {}).get("code") == "upstream_html_error"
                         # P1.3: HTML 检测触发软熔断（Azure stream 侧）
@@ -5671,6 +5678,7 @@ class CopilotProxy:
                             upstream_headers=response.headers,
                             lb_request_id=request_id,
                         )
+                        is_client_error = is_client_error or _request_local_rejection(upstream_detail)
                         # 日志只截断 + 标注是否 HTML
                         log_snippet = error_text[:300].replace("\n", " ") if error_text else ""
                         is_html = upstream_detail.get("error", {}).get("code") == "upstream_html_error"
