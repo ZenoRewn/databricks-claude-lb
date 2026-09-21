@@ -1,0 +1,379 @@
+{
+  "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+  "checked_on": "2026-09-21",
+  "unit": "USD per 1 million tokens",
+  "ai_credit_usd": 0.01,
+  "promotional_models_valid_through": "2026-12-31",
+  "rows": [
+    {
+      "Model": "GPT-5 mini",
+      "Release status": "GA",
+      "Category": "Lightweight",
+      "Tier": "Default",
+      "Threshold (input tokens)": "Not applicable",
+      "Input": "$0.25",
+      "Cached input": "$0.025",
+      "Cache write": "Not applicable",
+      "Output": "$2.00"
+    },
+    {
+      "Model": "GPT-5.3-Codex",
+      "Release status": "GA",
+      "Category": "Powerful",
+      "Tier": "Default",
+      "Threshold (input tokens)": "Not applicable",
+      "Input": "$1.75",
+      "Cached input": "$0.175",
+      "Cache write": "Not applicable",
+      "Output": "$14.00"
+    },
+    {
+      "Model": "GPT-5.4",
+      "Release status": "GA",
+      "Category": "Versatile",
+      "Tier": "Default",
+      "Threshold (input tokens)": "≤ 272K",
+      "Input": "$2.50",
+      "Cached input": "$0.25",
+      "Cache write": "Not applicable",
+      "Output": "$15.00"
+    },
+    {
+      "Model": "GPT-5.4",
+      "Release status": "GA",
+      "Category": "Versatile",
+      "Tier": "Long context",
+      "Threshold (input tokens)": "> 272K",
+      "Input": "$5.00",
+      "Cached input": "$0.50",
+      "Cache write": "Not applicable",
+      "Output": "$22.50"
+    },
+    {
+      "Model": "GPT-5.4 mini",
+      "Release status": "GA",
+      "Category": "Lightweight",
+      "Tier": "Default",
+      "Threshold (input tokens)": "Not applicable",
+      "Input": "$0.75",
+      "Cached input": "$0.075",
+      "Cache write": "Not applicable",
+      "Output": "$4.50"
+    },
+    {
+      "Model": "GPT-5.4 nano",
+      "Release status": "GA",
+      "Category": "Lightweight",
+      "Tier": "Default",
+      "Threshold (input tokens)": "Not applicable",
+      "Input": "$0.20",
+      "Cached input": "$0.02",
+      "Cache write": "Not applicable",
+      "Output": "$1.25"
+    },
+    {
+      "Model": "GPT-5.5",
+      "Release status": "GA",
+      "Category": "Powerful",
+      "Tier": "Default",
+      "Threshold (input tokens)": "≤ 272K",
+      "Input": "$5.00",
+      "Cached input": "$0.50",
+      "Cache write": "Not applicable",
+      "Output": "$30.00"
+    },
+    {
+      "Model": "GPT-5.5",
+      "Release status": "GA",
+      "Category": "Powerful",
+      "Tier": "Long context",
+      "Threshold (input tokens)": "> 272K",
+      "Input": "$10.00",
+      "Cached input": "$1.00",
+      "Cache write": "Not applicable",
+      "Output": "$45.00"
+    },
+    {
+      "Model": "GPT-5.6 Luna",
+      "Release status": "GA",
+      "Category": "Lightweight",
+      "Tier": "Default",
+      "Threshold (input tokens)": "≤ 200K",
+      "Input": "$0.20",
+      "Cached input": "$0.02",
+      "Cache write": "$0.25",
+      "Output": "$1.20"
+    },
+    {
+      "Model": "GPT-5.6 Luna",
+      "Release status": "GA",
+      "Category": "Lightweight",
+      "Tier": "Long context",
+      "Threshold (input tokens)": "> 200K",
+      "Input": "$0.40",
+      "Cached input": "$0.04",
+      "Cache write": "$0.50",
+      "Output": "$1.80"
+    },
+    {
+      "Model": "GPT-5.6 Sol",
+      "Release status": "GA",
+      "Category": "Powerful",
+      "Tier": "Default",
+      "Threshold (input tokens)": "≤ 272K",
+      "Input": "$4.00",
+      "Cached input": "$0.40",
+      "Cache write": "$5.00",
+      "Output": "$20.00"
+    },
+    {
+      "Model": "GPT-5.6 Sol",
+      "Release status": "GA",
+      "Category": "Powerful",
+      "Tier": "Long context",
+      "Threshold (input tokens)": "> 272K",
+      "Input": "$8.00",
+      "Cached input": "$0.80",
+      "Cache write": "$10.00",
+      "Output": "$30.00"
+    },
+    {
+      "Model": "GPT-5.6 Terra",
+      "Release status": "GA",
+      "Category": "Versatile",
+      "Tier": "Default",
+      "Threshold (input tokens)": "≤ 272K",
+      "Input": "$2.00",
+      "Cached input": "$0.20",
+      "Cache write": "$2.50",
+      "Output": "$12.00"
+    },
+    {
+      "Model": "GPT-5.6 Terra",
+      "Release status": "GA",
+      "Category": "Versatile",
+      "Tier": "Long context",
+      "Threshold (input tokens)": "> 272K",
+      "Input": "$4.00",
+      "Cached input": "$0.40",
+      "Cache write": "$5.00",
+      "Output": "$18.00"
+    },
+    {
+      "Model": "GPT-6 Astra",
+      "Release status": "GA",
+      "Category": "Powerful",
+      "Tier": "Default",
+      "Threshold (input tokens)": "≤ 272K",
+      "Input": "$10.00",
+      "Cached input": "$1.00",
+      "Cache write": "$12.50",
+      "Output": "$50.00"
+    },
+    {
+      "Model": "GPT-6 Astra",
+      "Release status": "GA",
+      "Category": "Powerful",
+      "Tier": "Long context",
+      "Threshold (input tokens)": "> 272K",
+      "Input": "$20.00",
+      "Cached input": "$2.00",
+      "Cache write": "$25.00",
+      "Output": "$75.00"
+    },
+    {
+      "Model": "Claude Haiku 4.5",
+      "Release status": "GA",
+      "Category": "Versatile",
+      "Input": "$1.00",
+      "Cached input": "$0.10",
+      "Cache write": "$1.25",
+      "Output": "$5.00"
+    },
+    {
+      "Model": "Claude Sonnet 4",
+      "Release status": "GA",
+      "Category": "Versatile",
+      "Input": "$3.00",
+      "Cached input": "$0.30",
+      "Cache write": "$3.75",
+      "Output": "$15.00"
+    },
+    {
+      "Model": "Claude Sonnet 4.6",
+      "Release status": "GA",
+      "Category": "Versatile",
+      "Input": "$3.00",
+      "Cached input": "$0.30",
+      "Cache write": "$3.75",
+      "Output": "$15.00"
+    },
+    {
+      "Model": "Claude Opus 4.7",
+      "Release status": "GA",
+      "Category": "Powerful",
+      "Input": "$5.00",
+      "Cached input": "$0.50",
+      "Cache write": "$6.25",
+      "Output": "$25.00"
+    },
+    {
+      "Model": "Claude Opus 4.8",
+      "Release status": "GA",
+      "Category": "Powerful",
+      "Input": "$5.00",
+      "Cached input": "$0.50",
+      "Cache write": "$6.25",
+      "Output": "$25.00"
+    },
+    {
+      "Model": "Claude Opus 5",
+      "Release status": "GA",
+      "Category": "Powerful",
+      "Input": "$5.00",
+      "Cached input": "$0.50",
+      "Cache write": "$6.25",
+      "Output": "$25.00"
+    },
+    {
+      "Model": "Claude Sonnet 5",
+      "Release status": "GA",
+      "Category": "Versatile",
+      "Input": "$2.00",
+      "Cached input": "$0.20",
+      "Cache write": "$2.50",
+      "Output": "$10.00"
+    },
+    {
+      "Model": "Claude Opus 4.8 (fast mode) (preview)",
+      "Release status": "GA",
+      "Category": "Powerful",
+      "Input": "$10.00",
+      "Cached input": "$1.00",
+      "Cache write": "$12.50",
+      "Output": "$50.00"
+    },
+    {
+      "Model": "Claude Fable 5",
+      "Release status": "GA",
+      "Category": "Powerful",
+      "Input": "$10.00",
+      "Cached input": "$1.00",
+      "Cache write": "$12.50",
+      "Output": "$50.00"
+    },
+    {
+      "Model": "Claude Fable 5.1",
+      "Release status": "GA",
+      "Category": "Powerful",
+      "Input": "$10.00",
+      "Cached input": "$0.25",
+      "Cache write": "$12.50",
+      "Output": "$50.00"
+    },
+    {
+      "Model": "Gemini 3.5 Flash",
+      "Release status": "GA",
+      "Category": "Lightweight",
+      "Tier": "Default",
+      "Threshold (input tokens)": "Not applicable",
+      "Input": "$1.50",
+      "Cached input": "$0.15",
+      "Output": "$9.00"
+    },
+    {
+      "Model": "Gemini 3.6 Flash1",
+      "Release status": "GA",
+      "Category": "Versatile",
+      "Tier": "Default",
+      "Threshold (input tokens)": "Not applicable",
+      "Input": "$0.75",
+      "Cached input": "$0.075",
+      "Output": "$3.75"
+    },
+    {
+      "Model": "Gemini 3.7 Flash1",
+      "Release status": "GA",
+      "Category": "Versatile",
+      "Tier": "Default",
+      "Threshold (input tokens)": "Not applicable",
+      "Input": "$0.75",
+      "Cached input": "$0.075",
+      "Output": "$3.75"
+    },
+    {
+      "Model": "Gemini 3.8 Flash1",
+      "Release status": "GA",
+      "Category": "Versatile",
+      "Tier": "Default",
+      "Threshold (input tokens)": "Not applicable",
+      "Input": "$0.75",
+      "Cached input": "$0.075",
+      "Output": "$3.75"
+    },
+    {
+      "Model": "MAI-Code-1.1-Flash",
+      "Release status": "GA",
+      "Category": "Lightweight",
+      "Input": "$0.20",
+      "Cached input": "$0.02",
+      "Output": "$1.20"
+    },
+    {
+      "Model": "Grok 4.5",
+      "Release status": "GA",
+      "Category": "Versatile",
+      "Tier": "Default",
+      "Threshold (input tokens)": "≤ 200K",
+      "Input": "$2.00",
+      "Cached input": "$0.50",
+      "Output": "$6.00"
+    },
+    {
+      "Model": "Grok 4.5",
+      "Release status": "GA",
+      "Category": "Versatile",
+      "Tier": "Long context",
+      "Threshold (input tokens)": "> 200K",
+      "Input": "$4.00",
+      "Cached input": "$1.00",
+      "Output": "$12.00"
+    },
+    {
+      "Model": "Grok 4.6",
+      "Release status": "GA",
+      "Category": "Versatile",
+      "Tier": "Default",
+      "Threshold (input tokens)": "≤ 200K",
+      "Input": "$2.00",
+      "Cached input": "$0.50",
+      "Output": "$6.00"
+    },
+    {
+      "Model": "Grok 4.6",
+      "Release status": "GA",
+      "Category": "Versatile",
+      "Tier": "Long context",
+      "Threshold (input tokens)": "> 200K",
+      "Input": "$4.00",
+      "Cached input": "$1.00",
+      "Output": "$12.00"
+    },
+    {
+      "Model": "Kimi K2.7 Code",
+      "Release status": "GA",
+      "Category": "Versatile",
+      "Input": "$0.95",
+      "Cached input": "$0.19",
+      "Output": "$4.00"
+    },
+    {
+      "Model": "Kimi K3",
+      "Release status": "GA",
+      "Category": "Powerful",
+      "Input": "$3.00",
+      "Cached input": "$0.30",
+      "Output": "$15.00"
+    }
+  ]
+}

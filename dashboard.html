@@ -636,6 +636,13 @@ td strong { color: var(--text-0); font-weight: 600; }
 function fmt(n) { n = +n || 0; if (n >= 1e9) return (n/1e9).toFixed(2)+'B'; if (n >= 1e6) return (n/1e6).toFixed(2)+'M'; if (n >= 1e3) return (n/1e3).toFixed(1)+'K'; return n.toFixed(0); }
 function fmtTime(s) { s = +s || 0; if (s >= 86400) return (s/86400).toFixed(1)+'d'; if (s >= 3600) return (s/3600).toFixed(1)+'h'; if (s >= 60) return (s/60).toFixed(1)+'m'; return s.toFixed(0)+'s'; }
 function fmtCost(v) { if (v == null) return '-'; v = +v; if (v >= 1) return '$'+v.toFixed(2); if (v >= 0.01) return '$'+v.toFixed(4); if (v > 0) return '$'+v.toFixed(6); return '$0'; }
+function fmtCredits(v) { return v == null ? '未知' : (+v).toFixed(4); }
+function fmtModelCost(s, credits = false) {
+  const format = credits ? fmtCredits : fmtCost;
+  if (s.pricing_status === 'partial') return format((s.known_cost_subtotal_usd || 0) * (credits ? 100 : 1)) + ' + 未计价';
+  if (s.estimated_cost_usd == null) return '未知';
+  return format(credits ? s.estimated_ai_credits : s.estimated_cost_usd);
+}
 function fmtMs(v) { return (+v || 0).toFixed(0) + 'ms'; }
 function fmtPct(v) { return (+v || 0).toFixed(1) + '%'; }
 
@@ -865,7 +872,11 @@ function renderKpiGrid(gridId, defs, data, prefix) {
   }
   defs.forEach(d => {
     const el = document.getElementById(prefix + '-' + d.key);
-    tickTo(el, data[d.key] || 0, d.fmt);
+    if (d.key.startsWith('estimated_') && data[d.key] == null) {
+      cancelAnimationFrame(el._raf || 0);
+      el.textContent = '未知';
+      el.dataset.cur = '0';
+    } else { tickTo(el, data[d.key] || 0, d.fmt); }
   });
 }
 
@@ -921,23 +932,30 @@ function aggregateModels(endpoints) {
   const models = {};
   (endpoints || []).forEach(e => {
     Object.entries(e.model_stats || {}).forEach(([m, s]) => {
-      if (!models[m]) models[m] = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, requests: 0, estimated_cost_usd: 0 };
+      if (!models[m]) models[m] = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, requests: 0, estimated_cost_usd: 0, known_cost_subtotal_usd: 0, priced_requests: 0, unpriced_requests: 0 };
       models[m].input_tokens += s.input_tokens || 0;
       models[m].output_tokens += s.output_tokens || 0;
       models[m].cache_creation_tokens += s.cache_creation_tokens || 0;
       models[m].cache_read_tokens += s.cache_read_tokens || 0;
       models[m].requests += s.requests || 0;
-      models[m].estimated_cost_usd += s.estimated_cost_usd || 0;
+      models[m].known_cost_subtotal_usd += s.known_cost_subtotal_usd ?? s.estimated_cost_usd ?? 0;
+      models[m].priced_requests += s.priced_requests ?? (s.estimated_cost_usd != null ? (s.requests || 0) : 0);
+      models[m].unpriced_requests += s.unpriced_requests ?? (s.estimated_cost_usd == null ? (s.requests || 0) : 0);
+      models[m].estimated_cost_usd = models[m].estimated_cost_usd == null || s.estimated_cost_usd == null ? null : models[m].estimated_cost_usd + s.estimated_cost_usd;
     });
+  });
+  Object.values(models).forEach(s => {
+    s.pricing_status = s.unpriced_requests ? (s.priced_requests ? 'partial' : 'unknown') : 'complete';
+    s.estimated_ai_credits = s.estimated_cost_usd == null ? null : s.estimated_cost_usd * 100;
   });
   return models;
 }
 
-function renderModelTable(bodyId, models, withCost) {
+function renderModelTable(bodyId, models, withCost, withCredits = false) {
   const tbody = document.getElementById(bodyId);
   const entries = Object.entries(models);
   if (entries.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="' + (withCost ? 8 : 7) + '" style="text-align:center;color:var(--text-3);padding:24px">No data yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="' + (7 + (withCost ? 1 : 0) + (withCredits ? 1 : 0)) + '" style="text-align:center;color:var(--text-3);padding:24px">No data yet</td></tr>';
     return;
   }
   tbody.innerHTML = entries.map(([m, s]) =>
@@ -949,7 +967,8 @@ function renderModelTable(bodyId, models, withCost) {
     '<td data-label="Cache Create" class="mono">' + fmt(s.cache_creation_tokens) + '</td>' +
     '<td data-label="Cache Read" class="mono">' + fmt(s.cache_read_tokens) + '</td>' +
     '<td data-label="Total" class="mono">' + fmt(s.input_tokens + s.output_tokens) + '</td>' +
-    (withCost ? '<td data-label="Est. Cost" class="mono">' + fmtCost(s.estimated_cost_usd) + '</td>' : '') +
+    (withCost ? '<td data-label="Est. Cost" class="mono">' + fmtModelCost(s) + '</td>' : '') +
+    (withCredits ? '<td data-label="Est. AI Credits" class="mono">' + fmtModelCost(s, true) + '</td>' : '') +
     '</tr>'
   ).join('');
 }
@@ -1198,15 +1217,19 @@ async function refresh() {
           '<thead><tr><th>Name</th><th>Status</th><th>Active</th><th>Total</th><th>Error Rate</th><th>Avg Latency</th><th>Total Tokens</th><th>Models</th><th>Token Expires</th></tr></thead>' +
           '<tbody id="copilotEndpointBody"></tbody>' +
           '</table></div></div>' +
-          '<h2 class="section-title">Model Stats <small style="opacity:.6">(GHCP 订阅制无 per-token 计费；Est. Cost 按底层模型公开 API 价格做对照)</small></h2>' +
+          '<h2 class="section-title">Model Stats <small style="opacity:.6">(<a href="https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing" target="_blank" rel="noopener noreferrer">GHCP 官方 token 价</a> · 1 AI credit = $0.01)</small></h2>' +
+          '<p id="copilotPricingCoverage" class="info-box"></p>' +
           '<div class="table-wrap"><div class="table-scroll"><table>' +
-          '<thead><tr><th>Model</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache Create</th><th>Cache Read</th><th>Total</th><th>Est. Cost</th></tr></thead>' +
+          '<thead><tr><th>Model</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache Create</th><th>Cache Read</th><th>Total</th><th>Est. Cost</th><th>Est. AI Credits</th></tr></thead>' +
           '<tbody id="copilotModelBody"></tbody>' +
           '</table></div></div>';
         cpContent.dataset.built = '1';
       }
-      const COPILOT_KPIS = KPI_DEFS.filter(k => k.key !== 'estimated_total_cost_usd');
+      const COPILOT_KPIS = [...KPI_DEFS, {key: 'estimated_ai_credits', label: 'Est. AI Credits', fmt: fmtCredits, cls: 'purple'}];
       renderKpiGrid('copilotGlobalGrid', COPILOT_KPIS, d.github_copilot.global, 'kpi-copilot');
+      document.getElementById('copilotPricingCoverage').textContent =
+        '本次运行期间已定价 ' + (d.github_copilot.global.priced_requests || 0) + ' 条用量记录，未定价 ' +
+        (d.github_copilot.global.unpriced_requests || 0) + ' 条。长上下文按单次请求判断；费用为估算，套餐额度、折扣及旧年付请求制请以 GitHub 账单为准。';
 
       const pool = d.github_copilot.pool || {};
       const poolCard = document.getElementById('copilotPoolCard');
@@ -1291,7 +1314,7 @@ async function refresh() {
       Array.from(cpBody.children).forEach(tr => { if (!cpSeen.has(tr.id)) tr.remove(); });
 
       const cpModels = aggregateModels(d.github_copilot.endpoints);
-      renderModelTable('copilotModelBody', cpModels, true);
+      renderModelTable('copilotModelBody', cpModels, true, true);
       const cpModelChart = ensureDoughnut('copilotModelChart');
       if (cpModelChart) {
         const entries = Object.entries(cpModels);
