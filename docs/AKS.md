@@ -6,7 +6,7 @@
 
 ## 2026-09-20 事故后的发布约束
 
-当日一次发布在排空脚本正常退出后遗留维护 selector，Service 无匹配后端，导致公网不可用。关闭流量、排空和恢复流量被拆成需要后续交互接力的独立脚本，是这次流程缺陷。详见 [原始记录补证与整改顺序](reviews/2026-09-20-service-optimization/deployment-r1/INCIDENT_REVIEW.md)。
+当日一次发布在排空脚本正常退出后遗留维护 selector，Service 无匹配后端，导致公网不可用。关闭流量、排空和恢复流量被拆成需要后续交互接力的独立脚本，是这次流程缺陷。原始复盘保留在本地未提交的 `docs/reviews/2026-09-20-service-optimization/deployment-r1/` 目录；本轮恢复工具的实现与演练结果见 [验收报告](reviews/2026-09-20-post-upgrade-hardening/VALIDATION.md)。
 
 - 在维护前完成镜像、补丁、验证脚本、完整入口清单、可信观测基线和恢复材料；维护阶段不得等待下一轮 agent 回复或临时编写后续脚本。
 - 同一受控发布任务负责整个切换及失败收尾。排空成功只是中间状态；路由恢复、EndpointSlice、公网业务和持久化验收完成后，才能记录发布成功。
