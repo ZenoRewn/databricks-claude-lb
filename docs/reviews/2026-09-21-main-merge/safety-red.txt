@@ -1,0 +1,55 @@
+F..FF........                                                       [100%]
+=================================== FAILURES ===================================
+_ ImageIdentityTests.test_controller_rejects_old_mutable_plan_before_any_effect _
+tests/release/test_image_identity.py:58: in test_controller_rejects_old_mutable_plan_before_any_effect
+    with self.assertRaises(UnsafeState):b.perform('preflight', {})
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+operations/release/backend.py:293: in perform
+    self._verify_public_targets()
+operations/release/backend.py:182: in _verify_public_targets
+    for ingress in self.snapshot['ingresses']:
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'ingresses'
+_ ImageIdentityTests.test_planning_rejects_mutable_or_unverified_old_images (image='registry.invalid/lb:latest', image_id='registry.invalid/lb@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') _
+tests/release/test_image_identity.py:37: in test_planning_rejects_mutable_or_unverified_old_images
+    with self.assertRaises(ValueError):capture(api, 'lab', 'lb', 'lb')
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: ValueError not raised
+_ ImageIdentityTests.test_planning_rejects_mutable_or_unverified_old_images (image='registry.invalid/lb@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', image_id='registry.invalid/lb@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') _
+tests/release/test_image_identity.py:37: in test_planning_rejects_mutable_or_unverified_old_images
+    with self.assertRaises(ValueError):capture(api, 'lab', 'lb', 'lb')
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: ValueError not raised
+_ ImageIdentityTests.test_planning_rejects_mutable_or_unverified_old_images (image='registry.invalid/lb@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', image_id='') _
+tests/release/test_image_identity.py:37: in test_planning_rejects_mutable_or_unverified_old_images
+    with self.assertRaises(ValueError):capture(api, 'lab', 'lb', 'lb')
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: ValueError not raised
+________ ImageIdentityTests.test_resumed_old_pod_image_must_still_match ________
+tests/release/test_image_identity.py:66: in test_resumed_old_pod_image_must_still_match
+    with self.assertRaises(UnsafeState):b.perform('resume_old', {})
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: UnsafeState not raised
+_ ImageIdentityTests.test_rollback_rejects_healthy_pod_with_wrong_image_before_opening_routes _
+tests/release/test_image_identity.py:75: in test_rollback_rejects_healthy_pod_with_wrong_image_before_opening_routes
+    with self.assertRaises(UnsafeState):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: UnsafeState not raised
+_ TypedReportingTests.test_aggregate_reset_excludes_the_whole_interval_and_keeps_later_samples (kind='summary') _
+tests/test_reporting_v2.py:83: in test_aggregate_reset_excludes_the_whole_interval_and_keeps_later_samples
+    self.assertTrue(all(s['status']=='partial' for s in series))
+E   AssertionError: False is not true
+_ TypedReportingTests.test_aggregate_reset_excludes_the_whole_interval_and_keeps_later_samples (kind='histogram') _
+tests/test_reporting_v2.py:83: in test_aggregate_reset_excludes_the_whole_interval_and_keeps_later_samples
+    self.assertTrue(all(s['status']=='partial' for s in series))
+E   AssertionError: False is not true
+=========================== short test summary info ============================
+FAILED tests/release/test_image_identity.py::ImageIdentityTests::test_controller_rejects_old_mutable_plan_before_any_effect
+SUBFAILED(image='registry.invalid/lb:latest', image_id='registry.invalid/lb@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') tests/release/test_image_identity.py::ImageIdentityTests::test_planning_rejects_mutable_or_unverified_old_images
+SUBFAILED(image='registry.invalid/lb@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', image_id='registry.invalid/lb@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') tests/release/test_image_identity.py::ImageIdentityTests::test_planning_rejects_mutable_or_unverified_old_images
+SUBFAILED(image='registry.invalid/lb@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', image_id='') tests/release/test_image_identity.py::ImageIdentityTests::test_planning_rejects_mutable_or_unverified_old_images
+FAILED tests/release/test_image_identity.py::ImageIdentityTests::test_resumed_old_pod_image_must_still_match
+FAILED tests/release/test_image_identity.py::ImageIdentityTests::test_rollback_rejects_healthy_pod_with_wrong_image_before_opening_routes
+SUBFAILED(kind='summary') tests/test_reporting_v2.py::TypedReportingTests::test_aggregate_reset_excludes_the_whole_interval_and_keeps_later_samples
+SUBFAILED(kind='histogram') tests/test_reporting_v2.py::TypedReportingTests::test_aggregate_reset_excludes_the_whole_interval_and_keeps_later_samples
+8 failed, 10 passed in 0.11s

@@ -1,0 +1,29 @@
+.............                  [100%]
+=================================== FAILURES ===================================
+_ ResultConsistencyTests.test_json_context_error_200_is_neutral_in_streaming_and_buffered_modes (provider='databricks', api='messages', stream=True) _
+tests/test_result_consistency.py:143: in test_json_context_error_200_is_neutral_in_streaming_and_buffered_modes
+    self.assertEqual(r['ep'].total_errors,0)
+E   AssertionError: 1 != 0
+_ ResultConsistencyTests.test_json_context_error_200_is_neutral_in_streaming_and_buffered_modes (provider='azure', api='responses', stream=True) _
+tests/test_result_consistency.py:143: in test_json_context_error_200_is_neutral_in_streaming_and_buffered_modes
+    self.assertEqual(r['ep'].total_errors,0)
+E   AssertionError: 1 != 0
+_ ResultConsistencyTests.test_json_context_error_200_is_neutral_in_streaming_and_buffered_modes (provider='azure', api='chat', stream=True) _
+tests/test_result_consistency.py:143: in test_json_context_error_200_is_neutral_in_streaming_and_buffered_modes
+    self.assertEqual(r['ep'].total_errors,0)
+E   AssertionError: 1 != 0
+_ ResultConsistencyTests.test_json_context_error_200_is_neutral_in_streaming_and_buffered_modes (provider='copilot', api='responses', stream=True) _
+tests/test_result_consistency.py:143: in test_json_context_error_200_is_neutral_in_streaming_and_buffered_modes
+    self.assertEqual(r['ep'].total_errors,0)
+E   AssertionError: 1 != 0
+_ ResultConsistencyTests.test_json_context_error_200_is_neutral_in_streaming_and_buffered_modes (provider='copilot', api='chat', stream=True) _
+tests/test_result_consistency.py:143: in test_json_context_error_200_is_neutral_in_streaming_and_buffered_modes
+    self.assertEqual(r['ep'].total_errors,0)
+E   AssertionError: 1 != 0
+=========================== short test summary info ============================
+SUBFAILED(provider='databricks', api='messages', stream=True) tests/test_result_consistency.py::ResultConsistencyTests::test_json_context_error_200_is_neutral_in_streaming_and_buffered_modes
+SUBFAILED(provider='azure', api='responses', stream=True) tests/test_result_consistency.py::ResultConsistencyTests::test_json_context_error_200_is_neutral_in_streaming_and_buffered_modes
+SUBFAILED(provider='azure', api='chat', stream=True) tests/test_result_consistency.py::ResultConsistencyTests::test_json_context_error_200_is_neutral_in_streaming_and_buffered_modes
+SUBFAILED(provider='copilot', api='responses', stream=True) tests/test_result_consistency.py::ResultConsistencyTests::test_json_context_error_200_is_neutral_in_streaming_and_buffered_modes
+SUBFAILED(provider='copilot', api='chat', stream=True) tests/test_result_consistency.py::ResultConsistencyTests::test_json_context_error_200_is_neutral_in_streaming_and_buffered_modes
+5 failed, 13 passed, 37 subtests passed in 1.18s

@@ -1,0 +1,25 @@
+{
+  "author": "Zeno Ren",
+  "source_revision": "dc2981b18522ef633805898d9b49a744f43a62e4",
+  "image": "lb-release-controller:pr5-review",
+  "platform": "linux/amd64",
+  "local_image_id": "sha256:7886661cdd9eb29a480f1605964674f91aba66fe4b7e67ec7cd1d20eb59adb2c",
+  "source_hashes_verified": true,
+  "source_hashes": {
+    "operations/__init__.py": "b7b10788e0e4294ff50bdbb3c10db60b3f795d113c2b3fc0ca3882d9603081d3",
+    "operations/release/__init__.py": "146a588be030f7a4fa10e1cf24044d80b9bafaeb1f4a23985cad12123caa34d4",
+    "operations/release/__main__.py": "4a4751b67897de56ceb035ca4fd88620b89983d588ed3a16285b7c90e5c359ac",
+    "operations/release/backend.py": "4e70e8ee1feaa9c206e2f5af290e58186e9c16195e52ce3b4df807224da75339",
+    "operations/release/controller.py": "011948dd9de77c39ac51494f9682d25f84d5448ccc060b5ecae40e279f7b42ea",
+    "operations/release/engine.py": "8662f69d60023ff9d09647e1897bcccb2dfbc80dc2546185d721012b40e9185c",
+    "operations/release/kube.py": "8e1a4fd5b31f2be603fca55605f983a66087853af29246c252e758724f24a7c6",
+    "operations/release/lab_faults.py": "5c702e78017222aac007ff19f14cc58ff160e5e617561024401a3d2e6f07aa22",
+    "operations/release/legacy-892e397.json": "df4c79527bda6ab53370ec473983fe87ccf14b7b0f4aff7e7f267f7c88bc2f02",
+    "operations/release/manifests.py": "b09fbab4297fe297c51341b1e1720430d1b7c9178d2f92ebdf7b340d12e1ed8b",
+    "operations/release/model.py": "687a8ebfb27d08c4a598f3328c7b9b789df4b5b81d2d2ec123d6deb172deaf6b",
+    "operations/release/requirements.in": "c4eaa3a402c269f44d29471d2eddeb19adf6146fc22d3f46a4b583db7bf6385f",
+    "operations/release/requirements.lock": "275ad771044448a95a2af5002e126925d42aead4b61ae6f2003be40d62fec94f",
+    "operations/release/snapshot.py": "bee53d70c1721be268b22d7146022b75fec6566d59d36e8c5189f4c00654af45",
+    "requirements.lock": "275ad771044448a95a2af5002e126925d42aead4b61ae6f2003be40d62fec94f"
+  }
+}
