@@ -33,10 +33,14 @@ class Handler(BaseHTTPRequestHandler):
                       'usage':{'prompt_tokens':2,'completion_tokens':3,'total_tokens':5}}
         if body.get('stream') and status==200:
             if api=='messages':events=[('message_start',{'type':'message_start','message':{**payload,'content':[],'stop_reason':None}}),
-                ('content_block_delta',{'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':'LB_OK'}}),
+                ('content_block_delta',{'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':'LB'}}),
+                ('content_block_delta',{'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':'_OK'}}),
                 ('message_delta',{'type':'message_delta','delta':{'stop_reason':'end_turn'},'usage':{'output_tokens':3}}),('message_stop',{'type':'message_stop'})]
-            elif api=='responses':events=[(None,{'type':'response.output_text.delta','delta':'LB_OK'}),(None,{'type':'response.completed','response':payload})]
-            else:events=[(None,{'choices':[{'index':0,'delta':{'content':'LB_OK'},'finish_reason':'stop'}],'usage':payload['usage']})]
+            # Deliberately omit a full terminal text snapshot: the acceptance
+            # check must reconstruct deltas instead of searching raw SSE bytes.
+            elif api=='responses':events=[(None,{'type':'response.output_text.delta','delta':part}) for part in ('LB','_OK')]+[(None,{'type':'response.completed','response':{**payload,'output':[]}})]
+            else:events=[(None,{'choices':[{'index':0,'delta':{'content':'LB'},'finish_reason':None}]}),
+                         (None,{'choices':[{'index':0,'delta':{'content':'_OK'},'finish_reason':'stop'}],'usage':payload['usage']})]
             raw=''.join((f'event: {event}\n' if event else '')+'data: '+json.dumps(value)+'\n\n' for event,value in events).encode()
             if api=='chat':raw+=b'data: [DONE]\n\n'
             content_type='text/event-stream'
