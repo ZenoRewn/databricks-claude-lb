@@ -29,3 +29,7 @@ Copilot 的 Chat/Responses 输入统计是包含缓存细分的总输入，因�
 - Databricks/Azure 与历史按天累计的通用参考价格保持原口径。历史汇总没有足够的逐次上下文边界和 provider 信息，本轮不将其重算为 GHCP 官方分档费用，也不回填猜测的历史账单。
 
 本轮只更新代码与本地验证。服务环境只有在后续部署新镜像后才会显示这些变化。
+
+## 验证
+
+完整本地回归 634 passed、598 subtests passed；6 个隔离 MySQL 用例未在本轮重复执行。候选应用镜像无源码挂载验证 59 passed、49 subtests passed，1 个可选 OTel 用例跳过。价格表逐行核对、独立只读 QA、前端未知/部分费用断言和桌面浏览器合成数据渲染检查均通过，详见 [验证回执](reviews/2026-09-21-copilot-pricing/validation.json)。未调用真实模型或核对实际 GitHub 账单。

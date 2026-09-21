@@ -1,0 +1,9 @@
+....F....                   [100%]
+=================================== FAILURES ===================================
+_ CopilotPricingTests.test_no_separate_cache_write_rate_keeps_normal_input_charge _
+tests/test_copilot_pricing.py:53: in test_no_separate_cache_write_rate_keeps_normal_input_charge
+    self.assertAlmostEqual(quote['estimated_cost_usd'],(600*2.5+400*.25)/1000000)
+E   AssertionError: 0.00135 != 0.0016 within 7 places (0.00025 difference)
+=========================== short test summary info ============================
+FAILED tests/test_copilot_pricing.py::CopilotPricingTests::test_no_separate_cache_write_rate_keeps_normal_input_charge
+1 failed, 8 passed, 45 subtests passed in 0.47s

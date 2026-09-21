@@ -1,0 +1,55 @@
+{
+  "author": "Zeno Ren",
+  "source_revision": "fdc4e870edb7878473528aa03601959811c08efe",
+  "pricing_source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+  "checked_on": "2026-09-21",
+  "official_models": 29,
+  "official_rows": 37,
+  "source_snapshot": "tests/fixtures/copilot-pricing-20260921.json",
+  "local_tests": "634 passed, 6 skipped, 598 subtests passed",
+  "local_skip_reason": "isolated MySQL cases; persistence/schema unchanged",
+  "baked_image_tests": "59 passed, 1 skipped, 49 subtests passed",
+  "image_skip_reason": "optional OpenTelemetry dependencies absent",
+  "image": "claude-lb:copilot-pricing-20260921",
+  "image_id": "sha256:49796ee1ad67e100a6cc4a2c8594a96038bcff5284a1d33b21fd73ffdabf1cdc",
+  "platform": "linux/amd64",
+  "source_hashes_verified": true,
+  "source_hashes": {
+    "main.py": "d7c9f191c78cd51d51e015ccf0c7dd73f5e685bd8344cf4ba6f64b766ab22c53",
+    "effort_compat.py": "fbf6bcdd8cc2093245e2d94036d532016d9661fc7768c0b435b77963225dc47c",
+    "request_telemetry.py": "567e254eb522f0b8dbbc31cf7d70e296e26662f9ca1f7df8175242fe489c1ee8",
+    "request_budget.py": "0e26b6b14135461a8ae6ab86aa0e4234e5b507d6261b2bcbefcfad6ce9c2b4a4",
+    "admission.py": "0b9fc601938cea860f68d7a2d1fa1db5e2c6db4bedbd203015c1b4ee80ae2dbe",
+    "gateway_lifecycle.py": "ca69a99c1ae5205a5da1194cd0527c140d9d9b37629e0b0df67cef93643e109f",
+    "upstream_body.py": "639f2416464e39b850af94ab037713d2a8bc03b66ea73cc64e0d9c7d60c7d4fd",
+    "usage_store.py": "b0c3a0a353bda41f11fb4910604970bd428ff3fcd6fddf4c729c6aad73cc5042",
+    "otel_setup.py": "e68dfe8cef208c42d39f14ad8d5cc3d9b4eb909c68e3336d22937669ebba1cce",
+    "dashboard.html": "84e4d15102210452b2329e304cc7da9ab351741ef62767e1dd5b844848d6ade5",
+    "response_semantics.py": "c2da11dd821e6edb30eea160a8810eeb464aea58b083935d254e8781844196b2",
+    "cleanup_observability.py": "d23076d64c995ba5d57600d539a86646952f38912e354304eebd57c7f1654612",
+    "copilot_pricing.py": "1a9ab69b0cda78c7b468bd35dcb1e577a820c801fe2340be08566dd4062be1f2",
+    "release_probe.py": "b3718f3fe5241707b2c009d9f8cd63221e7b6bc8c01649e5bc6fc60adaa71ee4"
+  },
+  "application_source_mounted_during_image_test": false,
+  "independent_qa": {
+    "status": "passed",
+    "initial_targeted_tests": "26 passed, 95 subtests passed",
+    "cache_write_followup": "9 passed, 45 subtests passed",
+    "official_page_independently_checked": true
+  },
+  "ui_validation": {
+    "node_invariants": "passed",
+    "desktop_browser": "synthetic /stats fixture inspected; USD, credits, tier aggregation and unknown display verified"
+  },
+  "historical_cost_recalculation": false,
+  "real_provider_calls": 0,
+  "aks_changed": false,
+  "openclaw_changed": false,
+  "github_published": false,
+  "limits": [
+    "process-lifetime reported Copilot usage estimates only",
+    "not a GitHub invoice",
+    "legacy daily reference pricing retained",
+    "promotional rates expire without inventing replacements"
+  ]
+}
