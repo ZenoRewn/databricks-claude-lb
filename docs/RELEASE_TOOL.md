@@ -141,6 +141,14 @@ python -m operations.release --context YOUR_CONTEXT --kubeconfig YOUR_KUBECONFIG
 
 `succeeded` 要求：目标身份和后端检查、所有路由读回、公网三协议中计划所列的实际终态、逐请求账本关联与 hash、维护清理全部通过。业务 exec ACK 丢失时读取同一 Pod 内的回执，不自动重复推理。
 
+业务标记通过协议文本重组后检查：Messages 的 text delta、Responses 的 output-text delta、Chat 的首个 choice 内容会先拼接，再匹配 `LB_OK`，不能直接搜索原始 SSE。元数据、工具参数、推理内容不作为回答；有标记但缺少成功终态仍失败。Responses 完整文本快照替代 delta，不重复累加。
+
+此次分段误判的本地复现、修复和生产归因边界见 [验收器修复记录](reviews/2026-09-21-probe-sse/REPORT.md)。
+
+每条已解析检查保留 `completed`、`marker_found`、文本长度/hash 和请求 ID，不保留原始回答。业务 exec 非零后，新协调器通过受限的只读 `receipt` 命令取回同一 Pod 的缓存，并在恢复前写入发布 ConfigMap。应用与协调器须使用包含该能力的配套版本；若 Pod 在取回前消失或状态存储不可用，仍可能缺证据，不能宣称已保存完整原始报文。
+
+`business` 完成失败（包括命中失败缓存）仍返回非零；`receipt` 的退出码 0 仅表示读取成功。尚在运行的缓存返回 `pending=true, verified=false`，协调器继续等待；任何退出码都不能替代对 `verified=true` 及完整发布终态的检查。
+
 `rolled_back` 表示旧版本、原路由、公开健康和持久化就绪状态恢复；不会为了回滚验收再次执行可能已完成的模型请求。它不是“新版发布成功”，也不等于对所有供应商能力重新认证。失败预检 Pod 可保留诊断，回执列出其名称；历史计划和私有备份不自动删除。
 
 协调器提供 `/metrics`，包括需要接管的数量、未结束维护的最老年龄和最近扫描时间，并写入 `ReleaseNeedsAttention` Kubernetes Warning Event。该能力不自动接入 OpenClaw 或任何外部消息系统。

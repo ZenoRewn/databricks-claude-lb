@@ -1,0 +1,64 @@
+F...                                                            [100%]
+=================================== FAILURES ===================================
+________ BusinessProbeTests.test_buffered_metadata_cannot_satisfy_probe ________
+tests/test_release_business_probe.py:95: in test_buffered_metadata_cannot_satisfy_probe
+    with self.assertRaisesRegex(ValueError,'public_protocol_acceptance_failed'):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: ValueError not raised
+_ BusinessProbeTests.test_metadata_is_not_the_generated_answer (api='messages') _
+tests/test_release_business_probe.py:85: in test_metadata_is_not_the_generated_answer
+    with self.assertRaisesRegex(ValueError,'public_protocol_acceptance_failed'):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: ValueError not raised
+_ BusinessProbeTests.test_metadata_is_not_the_generated_answer (api='responses') _
+tests/test_release_business_probe.py:85: in test_metadata_is_not_the_generated_answer
+    with self.assertRaisesRegex(ValueError,'public_protocol_acceptance_failed'):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: ValueError not raised
+__ BusinessProbeTests.test_metadata_is_not_the_generated_answer (api='chat') ___
+tests/test_release_business_probe.py:85: in test_metadata_is_not_the_generated_answer
+    with self.assertRaisesRegex(ValueError,'public_protocol_acceptance_failed'):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: ValueError not raised
+_ BusinessProbeTests.test_split_marker_is_accepted_for_every_api_without_replaying (api='messages') _
+tests/test_release_business_probe.py:77: in test_split_marker_is_accepted_for_every_api_without_replaying
+    result=await self.drive(api,wire,repeat=True)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_release_business_probe.py:67: in drive
+    result=await release_probe.business_check(plan)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+release_probe.py:144: in business_check
+    if not completed or 'LB_OK' not in text:raise ValueError('public_protocol_acceptance_failed')
+                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   ValueError: public_protocol_acceptance_failed
+_ BusinessProbeTests.test_split_marker_is_accepted_for_every_api_without_replaying (api='responses') _
+tests/test_release_business_probe.py:77: in test_split_marker_is_accepted_for_every_api_without_replaying
+    result=await self.drive(api,wire,repeat=True)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_release_business_probe.py:67: in drive
+    result=await release_probe.business_check(plan)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+release_probe.py:144: in business_check
+    if not completed or 'LB_OK' not in text:raise ValueError('public_protocol_acceptance_failed')
+                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   ValueError: public_protocol_acceptance_failed
+_ BusinessProbeTests.test_split_marker_is_accepted_for_every_api_without_replaying (api='chat') _
+tests/test_release_business_probe.py:77: in test_split_marker_is_accepted_for_every_api_without_replaying
+    result=await self.drive(api,wire,repeat=True)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_release_business_probe.py:67: in drive
+    result=await release_probe.business_check(plan)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+release_probe.py:144: in business_check
+    if not completed or 'LB_OK' not in text:raise ValueError('public_protocol_acceptance_failed')
+                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   ValueError: public_protocol_acceptance_failed
+=========================== short test summary info ============================
+FAILED tests/test_release_business_probe.py::BusinessProbeTests::test_buffered_metadata_cannot_satisfy_probe
+SUBFAILED(api='messages') tests/test_release_business_probe.py::BusinessProbeTests::test_metadata_is_not_the_generated_answer
+SUBFAILED(api='responses') tests/test_release_business_probe.py::BusinessProbeTests::test_metadata_is_not_the_generated_answer
+SUBFAILED(api='chat') tests/test_release_business_probe.py::BusinessProbeTests::test_metadata_is_not_the_generated_answer
+SUBFAILED(api='messages') tests/test_release_business_probe.py::BusinessProbeTests::test_split_marker_is_accepted_for_every_api_without_replaying
+SUBFAILED(api='responses') tests/test_release_business_probe.py::BusinessProbeTests::test_split_marker_is_accepted_for_every_api_without_replaying
+SUBFAILED(api='chat') tests/test_release_business_probe.py::BusinessProbeTests::test_split_marker_is_accepted_for_every_api_without_replaying
+7 failed, 3 passed, 3 subtests passed in 1.17s

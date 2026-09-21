@@ -6,6 +6,8 @@ Author: Zeno Ren
 
 两者拒绝非 `kind-lb-release-lab-*` context 和非 loopback API 地址。使用独立 kubeconfig；不得复用生产 context。所有模型请求均由 `upstream_fixture.py` 合成，MySQL 使用临时数据库与测试 CA，TLS 校验保持开启。
 
+合成上游的 SSE 默认把验收标记拆成 `LB` 与 `_OK`；Responses 的终态刻意不附带完整文本快照，防止原始报文搜索掩盖重组缺陷。`tests/test_release_business_probe.py` 另验证三个 API、终态、元数据假阳性、缓存回执与单次发送；`tests/release/test_probe_receipts.py` 验证协调器读回和失败持久化。更新夹具本身不等于已重跑 Kind 演练。
+
 ## 一次性环境
 
 1. 创建三节点 Kind：一控制平面、两 worker，名称以 `lb-release-lab-` 开头，并用 `--kubeconfig` 保存到任务专属私有目录。

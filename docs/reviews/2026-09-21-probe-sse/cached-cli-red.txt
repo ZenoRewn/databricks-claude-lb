@@ -1,0 +1,9 @@
+..........F..                                 [100%]
+=================================== FAILURES ===================================
+_ ReceiptCLITests.test_failed_business_receipt_remains_nonzero_but_can_be_read_without_inference _
+tests/test_release_business_probe.py:172: in test_failed_business_receipt_remains_nonzero_but_can_be_read_without_inference
+    self.assertEqual(release_probe.main(),1)
+E   AssertionError: 0 != 1
+=========================== short test summary info ============================
+FAILED tests/test_release_business_probe.py::ReceiptCLITests::test_failed_business_receipt_remains_nonzero_but_can_be_read_without_inference
+1 failed, 12 passed, 27 subtests passed in 0.34s

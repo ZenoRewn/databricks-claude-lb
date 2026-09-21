@@ -1,0 +1,65 @@
+{
+  "author": "Zeno Ren",
+  "source_revision": "5923b1654f141fda50aead59b2e7d4cec99b9c88",
+  "scope": "local code, synthetic HTTP/ledger, offline candidate containers",
+  "local_tests": "651 passed, 6 skipped, 627 subtests passed",
+  "skip_reason": "separately gated real MySQL cases; no schema or persistence implementation change",
+  "application_image_tests": "15 passed, 32 subtests passed",
+  "coordinator_image_tests": "27 passed, 25 subtests passed",
+  "independent_qa": {
+    "status": "passed",
+    "initial_tests": "25 passed, 41 subtests passed",
+    "cached_cli_followup": "17 passed, 29 subtests passed"
+  },
+  "images": [
+    {
+      "image": "claude-lb:probe-sse-20260921",
+      "local_image_id": "sha256:9dbda8b99510951179f72ce614383215fdd2f3d60ce7471a872c46d049e9e246",
+      "platform": "linux/amd64",
+      "source_hashes": {
+        "main.py": "d7c9f191c78cd51d51e015ccf0c7dd73f5e685bd8344cf4ba6f64b766ab22c53",
+        "effort_compat.py": "fbf6bcdd8cc2093245e2d94036d532016d9661fc7768c0b435b77963225dc47c",
+        "request_telemetry.py": "567e254eb522f0b8dbbc31cf7d70e296e26662f9ca1f7df8175242fe489c1ee8",
+        "request_budget.py": "0e26b6b14135461a8ae6ab86aa0e4234e5b507d6261b2bcbefcfad6ce9c2b4a4",
+        "admission.py": "0b9fc601938cea860f68d7a2d1fa1db5e2c6db4bedbd203015c1b4ee80ae2dbe",
+        "gateway_lifecycle.py": "ca69a99c1ae5205a5da1194cd0527c140d9d9b37629e0b0df67cef93643e109f",
+        "upstream_body.py": "639f2416464e39b850af94ab037713d2a8bc03b66ea73cc64e0d9c7d60c7d4fd",
+        "usage_store.py": "b0c3a0a353bda41f11fb4910604970bd428ff3fcd6fddf4c729c6aad73cc5042",
+        "otel_setup.py": "e68dfe8cef208c42d39f14ad8d5cc3d9b4eb909c68e3336d22937669ebba1cce",
+        "dashboard.html": "84e4d15102210452b2329e304cc7da9ab351741ef62767e1dd5b844848d6ade5",
+        "response_semantics.py": "c2da11dd821e6edb30eea160a8810eeb464aea58b083935d254e8781844196b2",
+        "cleanup_observability.py": "d23076d64c995ba5d57600d539a86646952f38912e354304eebd57c7f1654612",
+        "copilot_pricing.py": "1a9ab69b0cda78c7b468bd35dcb1e577a820c801fe2340be08566dd4062be1f2",
+        "release_probe.py": "2de5b45fc689e3740841f477b60c60e1051cd4ba45db8f76ba97bfdfebfb9717"
+      },
+      "source_hashes_verified": true
+    },
+    {
+      "image": "lb-release-controller:probe-sse-20260921",
+      "local_image_id": "sha256:c4f9ffe42134a0594129bd39cfc3622ece2486803e952605f51472e171f6c44a",
+      "platform": "linux/amd64",
+      "source_hashes": {
+        "operations/release/backend.py": "ce1468d1558a85397a355d316f58b868fd7ea29c0e704caeddb002eb81e2f38f",
+        "operations/release/controller.py": "011948dd9de77c39ac51494f9682d25f84d5448ccc060b5ecae40e279f7b42ea",
+        "operations/release/manifests.py": "b09fbab4297fe297c51341b1e1720430d1b7c9178d2f92ebdf7b340d12e1ed8b",
+        "operations/release/__init__.py": "146a588be030f7a4fa10e1cf24044d80b9bafaeb1f4a23985cad12123caa34d4",
+        "operations/release/kube.py": "8e1a4fd5b31f2be603fca55605f983a66087853af29246c252e758724f24a7c6",
+        "operations/release/model.py": "31396322a09e666b4817007855a38bd1f41b6ec209f207a95025fe8b186bc772",
+        "operations/release/lab_faults.py": "5c702e78017222aac007ff19f14cc58ff160e5e617561024401a3d2e6f07aa22",
+        "operations/release/engine.py": "53302d747a664822636eac834e4eb67e2ea49054661bed11e4160cf9901aafac",
+        "operations/release/__main__.py": "4a4751b67897de56ceb035ca4fd88620b89983d588ed3a16285b7c90e5c359ac",
+        "operations/release/snapshot.py": "bee53d70c1721be268b22d7146022b75fec6566d59d36e8c5189f4c00654af45"
+      },
+      "source_hashes_verified": true
+    }
+  ],
+  "application_source_mounted": false,
+  "coordinator_source_mounted": false,
+  "kind_fault_matrix_rerun": false,
+  "real_provider_calls": 0,
+  "aks_accessed": false,
+  "github_pushed": false,
+  "production_nodes_or_controller_changed": false,
+  "production_cause": "not established as unique; original probe receipt unavailable per user",
+  "production_ledger_evidence": "user-reported completed records for Opus 5, GPT-6 Astra, GPT-4.1; not queried this turn"
+}

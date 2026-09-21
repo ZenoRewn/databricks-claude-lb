@@ -81,11 +81,18 @@ class Backend:
         if p and p['metadata']['uid']!=saved['metadata']['uid']:raise UnsafeState('old_pod_identity_changed')
         return p
     def _probe(self,pod,action,*,extra=()):
-        self.check_owner()
-        current=self.api.get('pod',self.namespace,pod['metadata']['name'])
-        if current['metadata']['uid']!=pod['metadata']['uid']:raise UnsafeState('probe_pod_changed')
-        out=self.api.exec(self.namespace,pod['metadata']['name'],self.plan['container'],
-                          ['python','/app/release_probe.py',action,*extra],timeout=15 if action!='business' else 85)
+        def invoke(operation,timeout):
+            self.check_owner()
+            current=self.api.get('pod',self.namespace,pod['metadata']['name'])
+            if current['metadata']['uid']!=pod['metadata']['uid']:raise UnsafeState('probe_pod_changed')
+            return self.api.exec(self.namespace,pod['metadata']['name'],self.plan['container'],
+                                 ['python','/app/release_probe.py',operation,*extra],timeout=timeout)
+        try:out=invoke(action,15 if action!='business' else 85)
+        except RuntimeError as failure:
+            if action!='business':raise
+            try:out=invoke('receipt',10)
+            except (OwnershipLost,UnsafeState):raise
+            except Exception:raise failure from None
         try:return json.loads(out.strip().splitlines()[-1])
         except (ValueError,IndexError):raise RuntimeError('probe_result_invalid') from None
     def _legacy_diagnostics(self,pod):
@@ -369,7 +376,7 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
             pod=self._new_pod()
             result=self._probe(pod,'business',extra=('--plan',json.dumps({k:self.plan[k] for k in ('release_id','public_urls','business_probes')})))
             if result.get('pending'):raise PendingOperation('business_probe_still_running')
-            if not result.get('verified'):raise RuntimeError('business_or_persistence_verification_failed')
+            if result.get('verified') is not True:result={**result,'verified':False,'failed':True}
             return result
         elif action=='resume_old':
             old=self._old_pod()

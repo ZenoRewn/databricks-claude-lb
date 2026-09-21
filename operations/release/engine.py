@@ -74,6 +74,10 @@ class Engine:
             self._save(record)
         self.backend.check_owner()
         receipt=self.backend.perform(action,record)
+        if action=='verify_business' and isinstance(receipt,dict) and receipt.get('failed') is True:
+            record['action_receipts'][action]=receipt
+            self._save(record)
+            raise RuntimeError('business_or_persistence_verification_failed')
         if not isinstance(receipt,dict) or receipt.get('verified') is not True:
             raise PendingOperation(action)
         record['action_receipts'][action]=receipt
