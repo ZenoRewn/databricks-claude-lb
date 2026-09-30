@@ -1,0 +1,154 @@
+{
+  "author": "Zeno Ren",
+  "release_id": "lb-20260930-ccb25cd-c7789e",
+  "status": "succeeded",
+  "source_revision": "ccb25cd734687090eb76cd26c2f65c173d504ec1",
+  "registry_image": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:1b246e211450d440af42eba51eec5a2da78d397233b6fa96eceaee80ad5c6e2a",
+  "platform": "linux/amd64",
+  "runtime_files_verified": 21,
+  "maintenance": {
+    "started_at": "2026-09-30T23:40:54.469057+08:00",
+    "routes_restored_at": "2026-09-30T23:41:57.080433+08:00",
+    "seconds": 62.611,
+    "completed_at": "2026-09-30T23:42:19.134492+08:00",
+    "rollback_performed": false,
+    "cleanup_errors": [],
+    "markers_cleared": true,
+    "old_writer_termination_recorded": true
+  },
+  "deployment_changes": [
+    "application image",
+    "source revision annotation"
+  ],
+  "preserved": [
+    "replica count and rollout strategy",
+    "probes, preStop and Pod grace",
+    "resources and environment",
+    "configuration and credential fingerprints",
+    "Service selectors and Ingress specs",
+    "existing controllers"
+  ],
+  "business": [
+    {
+      "api": "messages",
+      "model": "databricks-claude-opus-5",
+      "stream": false,
+      "actual_provider": "databricks",
+      "completed": true,
+      "marker_found": true,
+      "unique_completed_ledger_events": 1
+    },
+    {
+      "api": "responses",
+      "model": "gpt-5.4",
+      "stream": true,
+      "actual_provider": "copilot",
+      "completed": true,
+      "marker_found": true,
+      "unique_completed_ledger_events": 1
+    },
+    {
+      "api": "chat",
+      "model": "gpt-5.6-luna",
+      "stream": true,
+      "actual_provider": "copilot",
+      "completed": true,
+      "marker_found": true,
+      "unique_completed_ledger_events": 1
+    }
+  ],
+  "public_version": {
+    "version": "ccb25cd",
+    "source_revision": "ccb25cd734687090eb76cd26c2f65c173d504ec1",
+    "verification": "matched",
+    "commit_url": "https://github.com/ZenoRewn/databricks-claude-lb/commit/ccb25cd734687090eb76cd26c2f65c173d504ec1",
+    "compare_url": "https://github.com/ZenoRewn/databricks-claude-lb/compare/ccb25cd734687090eb76cd26c2f65c173d504ec1...main"
+  },
+  "public_health": {
+    "/health/live": 200,
+    "/health/ready": 200,
+    "/health/accepting": 200
+  },
+  "missing_credentials_status": {
+    "/v1/messages": 401,
+    "/v1/responses": 401,
+    "/v1/chat/completions": 401,
+    "/v1/messages/count_tokens": 401,
+    "/config/effective": 401
+  },
+  "dashboard_auth": {
+    "status": 302,
+    "redirect_host": "auth.zeno.ink",
+    "redirect_path": "/oauth2/sign_in"
+  },
+  "runtime_dashboard": {
+    "sha256": "c83f4905f0d9101e0746279b8b979cd0057277d7868d5b4afdcd365859706df6",
+    "status": 200,
+    "cache_control": "no-store"
+  },
+  "routes": {
+    "services": 2,
+    "ready_endpoints_per_service": [
+      1,
+      1
+    ],
+    "new_pod_only": true
+  },
+  "storage": {
+    "snapshot_begin_utc": "2026-09-30T15:28:03.659942",
+    "snapshot_end_utc": "2026-09-30T15:28:05.385286",
+    "backup_rows": {
+      "usage_batch_ledger": 5941,
+      "usage_daily": 331
+    },
+    "stream_verified": true,
+    "restore_drill": "same snapshot restored into isolated MySQL 8.4.11; row counts and canonical table hashes matched; TLS verified, network none",
+    "historical_ledger_batches_preserved": 5941,
+    "database_restored_to_production": false,
+    "schema_migration": false
+  },
+  "short_observation": {
+    "at": "2026-09-30T23:44:07.887990+08:00",
+    "ready": true,
+    "restarts": 0,
+    "usage": {
+      "lb_usage_pending_events": 2.0,
+      "lb_usage_pending_groups": 0.0,
+      "lb_usage_inflight_batch": 0.0,
+      "lb_usage_flush_failures_total": 0.0,
+      "lb_usage_flush_successes_total": 4.0,
+      "lb_usage_rejected_events_total": 0.0,
+      "lb_usage_last_success_timestamp_seconds": 1790783025.2704804,
+      "lb_usage_backend_ready": 1.0,
+      "lb_usage_accepted_events_total": 10.0,
+      "lb_usage_persisted_events_total": 8.0,
+      "lb_usage_oldest_pending_age_seconds": 5.512521982192993,
+      "lb_usage_volatile_buffer": 1.0
+    },
+    "public_post_completion_samples": 61,
+    "public_post_completion_seconds": 133.381,
+    "all_post_completion_checks_200": true,
+    "pre_gate_observer_failures": [
+      "ReadTimeout at 2026-09-30T15:40:20Z",
+      "ConnectTimeout at 2026-09-30T15:40:26Z"
+    ],
+    "pre_gate_observer_recovered_at": "2026-09-30T15:40:31Z"
+  },
+  "boundaries": [
+    "Short release smoke only; no exhaustive provider/endpoint or long-session/load acceptance.",
+    "Azure was not independently exercised in this release.",
+    "Pending usage remains volatile; counters reset with the Pod; this is not a fix or proof of resolution for the earlier intermittent flush failures.",
+    "OpenClaw automation and monitoring rules were unchanged.",
+    "Unauthenticated Dashboard OAuth redirect was preserved; no browser-authenticated production visual acceptance was claimed."
+  ],
+  "github": {
+    "application_prs": [
+      11,
+      12
+    ],
+    "application_main_sha": "ccb25cd734687090eb76cd26c2f65c173d504ec1",
+    "main_ci_run": 36734340804,
+    "main_ci_checks_passed": 6
+  },
+  "independent_final_qa": "passed; receipt, source, ledger, routes, cleanup and public disclosure boundaries verified"
+}
