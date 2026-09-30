@@ -1,4 +1,7 @@
 # Author: Zeno Ren
+# Preserve original context whitespace in the read-only production source diff.
+docs/reviews/2026-09-20-service-optimization/production-main-diff.patch -whitespace
+
 # Preserve valid Markdown hard line breaks and verbatim diagnostic output.
 # Source-code whitespace checks retain Git's defaults.
 *.md whitespace=-blank-at-eol
