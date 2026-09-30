@@ -226,19 +226,39 @@ class DiagnosticStreamHandler:
 
     This is deliberately not a logging.Handler: registering a second handler
     would let logging.shutdown acquire its blocked I/O lock or flush it again
-    after the queue owner's bounded close returned. Only the worker writes and
-    flushes this sink; failures propagate to its observable drop counter.
+    after the queue owner's bounded close returned. The default descriptor path
+    also bypasses Python's stdio buffer lock, which interpreter finalization
+    otherwise waits for under pipe backpressure. Custom streams retain their
+    write/flush protocol; failures reach the worker's observable drop counter.
     """
     def __init__(self, stream=None):
         self.stream = sys.stderr if stream is None else stream
         self.formatter = logging.Formatter()
+        self.descriptor = None
+        if stream is None:
+            try:
+                descriptor = self.stream.fileno()
+                if type(descriptor) is int and descriptor >= 0:
+                    self.descriptor = descriptor
+            except (AttributeError, OSError, ValueError):
+                pass  # StringIO and other custom capture streams have no fd.
 
     def setFormatter(self, formatter):
         self.formatter = formatter
 
     def handle(self, record):
-        self.stream.write(self.formatter.format(record) + '\n')
-        self.stream.flush()
+        message = self.formatter.format(record) + '\n'
+        if self.descriptor is None:
+            self.stream.write(message)
+            self.stream.flush()
+            return
+        data = memoryview(message.encode(getattr(self.stream, 'encoding', None) or 'utf-8',
+                                         getattr(self.stream, 'errors', None) or 'backslashreplace'))
+        while data:
+            written = os.write(self.descriptor, data)
+            if written <= 0:
+                raise OSError('Diagnostic sink made no progress')
+            data = data[written:]
 
 
 def default_handler(sink):

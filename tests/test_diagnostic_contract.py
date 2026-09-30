@@ -3,13 +3,14 @@ import asyncio
 import json
 import logging
 import os
+import selectors
 import subprocess
 import sys
 import textwrap
 import threading
 import time
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import main
@@ -205,6 +206,63 @@ class DiagnosticLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DiagnosticSinkTests(unittest.TestCase):
+    def test_default_descriptor_handles_partial_writes_and_counts_failures(self):
+        from safe_diagnostics import BoundedLogHandler, DiagnosticStreamHandler
+        stream = Mock(encoding='utf-8', errors='backslashreplace')
+        stream.fileno.return_value = 99
+        written = bytearray()
+
+        def short_write(fd, data):
+            self.assertEqual(fd, 99)
+            part = bytes(data[:3])
+            written.extend(part)
+            return len(part)
+
+        record = logging.LogRecord('synthetic', logging.INFO, __file__, 1, 'synthetic-汉', (), None)
+        with patch('safe_diagnostics.sys.stderr', stream):
+            sink = DiagnosticStreamHandler()
+        with patch('safe_diagnostics.os.write', side_effect=short_write):
+            sink.handle(record)
+        self.assertEqual(written, 'synthetic-汉\n'.encode())
+        stream.write.assert_not_called()
+        stream.flush.assert_not_called()
+        with patch('safe_diagnostics.os.write', side_effect=OSError('synthetic')):
+            handler = BoundedLogHandler(sink, capacity=2)
+            try:
+                handler.emit(record)
+                self.assertTrue(handler.drain(timeout=1))
+                self.assertEqual(handler.dropped['sink_error'], 1)
+            finally:
+                handler.close()
+
+    def test_interpreter_exits_when_real_stderr_pipe_is_not_drained(self):
+        script = textwrap.dedent('''
+            import logging
+            import time
+            from safe_diagnostics import DiagnosticStreamHandler, default_handler
+            handler = default_handler(DiagnosticStreamHandler())
+            logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+            for _ in range(128):
+                logging.info('synthetic-' + 'x' * 16000)
+            time.sleep(.2)
+            handler.close()
+            print('bounded close returned', flush=True)
+        ''')
+        process = subprocess.Popen([sys.executable, '-c', script], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
+        try:
+            with selectors.DefaultSelector() as ready:
+                ready.register(process.stdout, selectors.EVENT_READ)
+                self.assertTrue(ready.select(timeout=3), 'Bounded handler close must return')
+            self.assertIn(b'bounded close returned', process.stdout.readline())
+            # communicate() would drain stderr and accidentally remove the
+            # backpressure that must remain present during interpreter shutdown.
+            self.assertEqual(process.wait(timeout=3), 0)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=3)
+
     def test_text_sink_preserves_legacy_copilot_summary_markers_and_safe_fields(self):
         from safe_diagnostics import DiagnosticFilter, DiagnosticTextFormatter
         for kind, label in (('copilot_stream_end', 'stream_end'), ('copilot_request_end', 'request_end')):
