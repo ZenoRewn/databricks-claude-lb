@@ -2,7 +2,7 @@
 
 Author: Zeno Ren
 
-2026-09-30 已完成应用源码 `1d75685` 的 AKS 发布，维护约 75 秒，业务、账本、路由和清理通过，见 [实际部署回执](reviews/2026-09-30-aks-release/REPORT.md)。配置、指标版本与兼容性变化见 [当前契约](OBSERVABILITY_AND_CONTEXT.md)。本轮新增渠道能力 JSON 如需使用，应先审阅来源与有效期，再作为单独只读文件挂载；不从 `config/effective` 或 Git revision 注解单独推断运行文件一致。图片裁剪默认值和 token-count 鉴权变化仍需真实客户端验收。本文历史 live 表格不构成当前现场快照，也不授权整份覆盖生产 manifest。
+2026-09-30 最新完成应用源码 `ccb25cd` 的 AKS 发布，维护约 63 秒，新增 Dashboard、明亮配色及 Release 标识；业务、账本、路由与清理通过，见 [Dashboard 部署回执](reviews/2026-09-30-dashboard-aks/REPORT.md)。当天较早的 `1d75685` 发布另见 [前次回执](reviews/2026-09-30-aks-release/REPORT.md)。配置、指标版本与兼容性变化见 [当前契约](OBSERVABILITY_AND_CONTEXT.md)。本轮新增渠道能力 JSON 如需使用，应先审阅来源与有效期，再作为单独只读文件挂载；不从 `config/effective` 或 Git revision 注解单独推断运行文件一致。图片裁剪默认值和 token-count 鉴权变化仍需真实客户端验收。本文历史 live 表格不构成当前现场快照，也不授权整份覆盖生产 manifest。
 
 把 `databricks-claude-lb` 部署到 Azure Kubernetes Service，目标是**单 Pod 长期稳定运行 + GitHub Copilot token 完全自动刷新 + 无需重启 Pod 即可滚动 Secret**。
 
