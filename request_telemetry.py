@@ -120,6 +120,8 @@ class RequestRecord:
     metrics: RequestTelemetry
     request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     started: float = field(default_factory=time.monotonic)
+    started_at_unix: float = field(default_factory=time.time)
+    body_size_bucket: str = 'unknown'
     generation: str = 'unknown'
     admissions: int = 0
     sends: int = 0
@@ -146,16 +148,26 @@ def log_context():
         return {}
     return {'lb_request_id': record.request_id, 'api_type': record.api_type,
             'requested_model': record.requested_model, 'stream': record.stream,
+            'started_at_unix': record.started_at_unix, 'body_size_bucket': record.body_size_bucket,
             'downstream_headers_sent': record.downstream_headers_sent,
             'downstream_content_started': record.downstream_content_started,
             **record.active_attempt}
 
 
-def note_request_context(model, *, stream=False):
+def note_request_context(model, *, stream=False, body_size=None):
     record = CURRENT.get()
     if record:
         record.requested_model = safe_identifier(model)
         record.stream = bool(stream)
+        if type(body_size) is int and body_size >= 0:
+            record.body_size_bucket = ('small' if body_size < 64*1024 else 'medium' if body_size < 512*1024
+                                       else 'large' if body_size < 4*1024*1024 else 'very_large')
+
+
+def note_reported_model(value):
+    record = CURRENT.get()
+    if record is not None and isinstance(value, str):
+        record.active_attempt['resolved_model'] = safe_identifier(value)
 
 
 def note_content_offered(has_content):
@@ -164,6 +176,17 @@ def note_content_offered(has_content):
         record = CURRENT.get()
         if record is not None:
             record.downstream_content_started = True
+
+
+def note_stream_end(observation):
+    if observation is None:
+        return
+    record = CURRENT.get()
+    log_event({'kind': 'lb_stream_end', 'terminal_seen': observation.terminal is not None,
+               'generation_outcome': record.generation if record is not None else 'unknown',
+               'failure_reason': record.failure_reason if record is not None else 'unknown',
+               'input_tokens': observation.usage.get('input_tokens'),
+               'output_tokens': observation.usage.get('output_tokens')})
 
 
 def note_failure(reason, *, origin='unknown', status=None, exception=None):
@@ -331,6 +354,8 @@ def note_json_result(payload, api_type):
     if not record:
         return
     result = assess_json(payload, api_type)
+    if isinstance(payload, dict):
+        note_reported_model(payload.get('model'))
     record.generation = result.outcome
     record.failure_reason = result.reason
     return
@@ -469,6 +494,8 @@ class RequestTelemetryMiddleware:
                 outcome='unknown'
             if outcome == 'completed':
                 record.failure_reason = record.error_origin = 'none'
+            elif scope.get('state',{}).get('lb_overloaded'):
+                record.failure_reason, record.error_origin = 'local_overload', 'local'
             elif outcome in ('client_disconnected', 'cancelled', 'internal_error', 'deadline_exceeded'):
                 record.failure_reason = 'request_deadline_exceeded' if outcome == 'deadline_exceeded' else outcome
                 record.error_origin = 'client' if outcome in ('client_disconnected', 'cancelled') else 'local'

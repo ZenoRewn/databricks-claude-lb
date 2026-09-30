@@ -44,7 +44,11 @@ CONTRACT = {'schema_version':'lb-metrics-v2','author':'Zeno Ren','families':FAMI
             'replica_identity':['pod_uid','container_start_time']}
 FAMILIES_V3 = {**FAMILIES,
     'lb_request_phase_duration_seconds': definition('histogram', 'seconds', ('api_type', 'phase')),
-    'lb_diagnostic_dropped_events_total': definition('counter', 'events', ('reason',))}
+    'lb_diagnostic_dropped_events_total': definition('counter', 'events', ('reason',)),
+    'lb_usage_accepted_events_total': definition('counter', 'events'),
+    'lb_usage_persisted_events_total': definition('counter', 'events'),
+    'lb_usage_oldest_pending_age_seconds': definition('gauge', 'seconds'),
+    'lb_usage_volatile_buffer': definition('gauge', 'boolean')}
 CONTRACT_V3 = {**CONTRACT, 'schema_version': 'lb-metrics-v3', 'families': FAMILIES_V3,
                'request_path': '/metrics?schema=lb-metrics-v3', 'legacy_default': 'lb-metrics-v2'}
 SAMPLE = re.compile(r'^(lb_[a-zA-Z0-9_:]+)(?:\{(.*)\})?\s+([^\s]+)(?:\s+\d+)?$')

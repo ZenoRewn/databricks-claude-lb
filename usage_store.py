@@ -13,6 +13,7 @@ import asyncio
 import copy
 from collections import deque
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -60,6 +61,8 @@ class UsageDataStore:
         self._inflight_batch = None
         self._flush_failures = 0
         self._flush_successes = 0
+        self._accepted_events = 0
+        self._persisted_events = 0
         self._rejected_events = 0
         self._last_success = 0.0
         self._backend_ready = False
@@ -136,6 +139,7 @@ class UsageDataStore:
             "cache_read_tokens": cache_read_tokens,
             "is_error": is_error,
         })
+        self._accepted_events += 1
 
     async def cleanup(self, keep_days: int) -> int:
         cutoff = date.today() - timedelta(days=keep_days)
@@ -241,6 +245,7 @@ class UsageDataStore:
                     self._pending_groups.popleft()
                     self._inflight_batch = None
                     self._flush_successes += 1
+                    self._persisted_events += len(events)
                     self._last_success = time.time()
                     self._backend_ready = True
                     self._last_error_type = None
@@ -259,6 +264,27 @@ class UsageDataStore:
                 'flush_failures_total':self._flush_failures,'flush_successes_total':self._flush_successes,
                 'rejected_events_total':self._rejected_events,'last_success_timestamp_seconds':self._last_success,
                 'backend_ready':int(self._backend_ready),'last_error_type':self._last_error_type}
+
+    def extended_persistence_stats(self):
+        now, oldest, unknown = time.time(), None, False
+        events = itertools.chain(self._buffer, itertools.chain.from_iterable(group for _, group in self._pending_groups))
+        for event in events:
+            stamp = event.get('recorded_at_unix')
+            if type(stamp) not in (int, float) or not math.isfinite(stamp) or stamp < 0 or stamp > now:
+                unknown = True; break
+            oldest = stamp if oldest is None else min(oldest, stamp)
+        return {'accepted_events_total': self._accepted_events, 'persisted_events_total': self._persisted_events,
+                'oldest_pending_age_seconds': None if unknown else now-oldest if oldest is not None else 0,
+                'volatile_buffer': 1}
+
+    def render_extended_metrics(self):
+        lines = []
+        for key, value in self.extended_persistence_stats().items():
+            name = 'lb_usage_' + key
+            kind = 'counter' if key.endswith('_total') else 'gauge'
+            lines.extend([f'# HELP {name} Accepted versus acknowledged usage; memory acceptance is not crash durability',
+                          f'# TYPE {name} {kind}', f'{name} {"NaN" if value is None else value}'])
+        return '\n'.join(lines) + '\n'
 
     def render_metrics(self):
         lines = []

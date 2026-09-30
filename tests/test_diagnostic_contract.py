@@ -28,6 +28,33 @@ class Stream(httpx.AsyncByteStream):
 
 
 class DiagnosticLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_local_admission_rejection_is_not_attributed_to_upstream(self):
+        async def app(scope, receive, send):
+            scope.setdefault('state', {})['lb_overloaded'] = True
+            await send({'type': 'http.response.start', 'status': 503, 'headers': []})
+            await send({'type': 'http.response.body', 'body': b'{}'})
+        with self.assertLogs('main', level='INFO') as logs:
+            await telemetry.RequestTelemetryMiddleware(app, telemetry.RequestTelemetry())(
+                {'type': 'http', 'method': 'POST', 'path': '/v1/responses', 'headers': []}, AsyncMock(), AsyncMock())
+        end = next(r for r in logs.records if getattr(r, 'kind', '') == 'lb_request_end')
+        self.assertEqual((end.failure_reason, end.error_origin), ('local_overload', 'local'))
+
+    async def test_end_record_has_start_time_size_bucket_and_only_reported_model(self):
+        async def app(scope, receive, send):
+            telemetry.note_request_context('synthetic-alias', body_size=2_000_000)
+            telemetry.note_json_result({'id': 'synthetic', 'status': 'completed', 'output': [],
+                                       'model': 'synthetic-upstream-version'}, 'responses')
+            await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+            await send({'type': 'http.response.body', 'body': b'{}'})
+        with self.assertLogs('main', level='INFO') as logs:
+            await telemetry.RequestTelemetryMiddleware(app, telemetry.RequestTelemetry())(
+                {'type': 'http', 'method': 'POST', 'path': '/v1/responses', 'headers': []}, AsyncMock(), AsyncMock())
+        end = next(r for r in logs.records if getattr(r, 'kind', '') == 'lb_request_end')
+        self.assertGreater(end.started_at_unix, 0)
+        self.assertEqual(end.body_size_bucket, 'large')
+        self.assertEqual(end.requested_model, 'synthetic-alias')
+        self.assertEqual(end.resolved_model, 'synthetic-upstream-version')
+
     async def drive(self, *, repair=False):
         ep = main.CopilotEndpoint('synthetic', '')
         proxy = main.CopilotProxy(main.LoadBalancer([ep]), '')
@@ -99,6 +126,10 @@ class DiagnosticLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(send_end.forwarded_model, 'synthetic-model')
         self.assertEqual(send_end.provider, 'copilot')
         self.assertEqual(send_end.resolved_model, 'unknown')
+        generic = [r for r in logs if getattr(r, 'kind', '') == 'lb_stream_end']
+        self.assertEqual(len(generic), 1)
+        self.assertEqual(generic[0].lb_request_id, end.lb_request_id)
+        self.assertFalse(generic[0].terminal_seen)
 
     async def test_exception_text_never_reaches_logs(self):
         logs, _, _, _, _ = await self.drive()
@@ -118,13 +149,27 @@ class DiagnosticLifecycleTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(main, 'proxy', proxy), patch.object(main, 'usage_store', None), self.assertLogs('main', level='INFO') as logs:
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(main.app), base_url='http://local', trust_env=False) as client:
                     result = await client.post('/v1/messages', json={'model': 'claude-opus-5', 'messages': []},
-                                               headers={'Authorization': 'Bearer synthetic'})
+                                               headers={'Authorization': 'Bearer synthetic', 'X-Request-Id': 'client-auxiliary-id'})
             self.assertEqual(result.status_code, 400)
+            self.assertEqual(result.json()['detail']['error']['lb_request_id'], result.headers['x-lb-request-id'])
+            self.assertEqual(result.headers['x-request-id'], 'client-auxiliary-id')
             for record in logs.records:
                 self.assertNotIn(marker, record.getMessage())
                 self.assertNotIn(marker, main._JsonLogFormatter().format(record))
         finally:
             await proxy.close()
+
+    async def test_untrusted_external_id_is_not_echoed_unbounded(self):
+        from types import SimpleNamespace
+        route = AsyncMock(return_value=main.JSONResponse({'type': 'message', 'stop_reason': 'end_turn'}))
+        proxy = SimpleNamespace(verify_api_key=lambda key: key == 'synthetic', proxy_request=route)
+        with patch.object(main, 'proxy', proxy):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(main.app), base_url='http://local') as client:
+                response = await client.post('/v1/messages', json={'model': 'claude-opus-5', 'messages': []},
+                    headers={'Authorization': 'Bearer synthetic', 'X-Request-Id': 'x' * 10000})
+        self.assertEqual(response.status_code, 200)
+        self.assertLessEqual(len(response.headers['x-request-id']), 128)
+        self.assertNotEqual(response.headers['x-request-id'], 'x' * 10000)
 
 
 class DiagnosticSinkTests(unittest.TestCase):

@@ -7,7 +7,7 @@ from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_
                                set_parameter_policy, note_parameter_drops,
                                log_context, note_request_context, note_exception,
                                note_local_terminal, note_failure, log_event, note_content_offered)
-from request_telemetry import note_parameter_transforms, require_image_trim_consent
+from request_telemetry import note_parameter_transforms, require_image_trim_consent, note_reported_model, safe_id, note_stream_end
 from chat_adapter import build_payload as build_chat_payload, messages_to_items, tools_to_items, content as chat_content
 import model_capabilities
 from model_capabilities import observe_route_budget, estimate_payload
@@ -673,6 +673,8 @@ def _sse_terminal_error(api_type: str, code: str, message: str,
     message = _apply_request_id_prefix(message, metadata)
     error_body: dict = {"code": code, "message": message,
                         "retryable": False, "execution_certainty": "unknown"}
+    if telemetry_request_id():
+        error_body['lb_request_id'] = telemetry_request_id()
     if metadata:
         error_body["metadata"] = metadata
     if api_type == "responses":
@@ -698,6 +700,8 @@ def _sse_terminal_from_upstream_detail(api_type: str, upstream_detail: dict,
     """
     upstream_detail = upstream_detail or {}
     error = dict(upstream_detail.get("error") or {"message": "upstream error"})
+    if telemetry_request_id():
+        error['lb_request_id'] = telemetry_request_id()
     if metadata:
         merged = dict(error.get("metadata") or {})
         merged.update(metadata)
@@ -1201,6 +1205,12 @@ class _SSEObservation:
         if self.terminal:
             return
         response = data.get("response") if data else None
+        if isinstance(response, dict):
+            note_reported_model(response.get('model'))
+        elif data and self.api_type == 'chat':
+            note_reported_model(data.get('model'))
+        elif data and kind == 'message_start' and isinstance(data.get('message'), dict):
+            note_reported_model(data['message'].get('model'))
         if self.api_type == "responses" and data:
             # Fields in pinned ResponsesStreamEvent are typed even on terminals.
             for key in ("item_id", "call_id", "delta", "text"):
@@ -2414,20 +2424,34 @@ class LoadBalancer:
                              detail={"error": {"code": "endpoint_unavailable",
                                                "message": "Configured upstream temporarily unavailable; retry after cooldown."}})
 
-    def _open(self, ep):
+    def _circuit_event(self, ep, previous, reason):
+        provider = 'copilot' if isinstance(ep, CopilotEndpoint) else 'azure_openai' if isinstance(ep, AzureOpenAIEndpoint) else 'databricks'
+        fields = {'kind': 'lb_circuit_transition', 'provider': provider, 'endpoint_alias': ep.name,
+                  'previous_state': previous, 'circuit_state': self.circuit_state(ep),
+                  'transition_reason': reason, 'circuit_generation': ep.circuit_generation,
+                  'consecutive_errors': ep.consecutive_errors}
+        if reason in ('trial_admitted', 'administrative_reset'):
+            fields['upstream_attempt_id'] = None
+        log_event(fields)
+
+    def _open(self, ep, *, reason='failure_threshold'):
+        previous = self.circuit_state(ep)
         ep.circuit_open = True
         ep.circuit_generation += 1
         ep.circuit_retry_at = time.monotonic() + self.circuit_breaker_timeout
         ep.half_open_in_flight = False
+        self._circuit_event(ep, previous, reason)
         logger.warning("Circuit breaker opened for %s", ep.name)
 
     def reset_circuit(self, ep):
         # Administrative reset invalidates old admission generations, not their ownership.
+        previous = self.circuit_state(ep)
         ep.circuit_open = False
         ep.consecutive_errors = 0
         ep.circuit_generation += 1
         ep.half_open_in_flight = False
         ep.circuit_retry_at = 0.0
+        self._circuit_event(ep, previous, 'administrative_reset')
 
     def current_attempt(self, ep):
         # Compatibility for direct low-level callers with one outstanding admission.
@@ -2540,6 +2564,7 @@ class LoadBalancer:
         probe = endpoint.circuit_open
         if probe:
             endpoint.half_open_in_flight = True
+            self._circuit_event(endpoint, 'OPEN', 'trial_admitted')
         lease = RequestAttempt(endpoint, endpoint.circuit_generation, probe)
         self._attempts.setdefault(id(endpoint), {})[id(lease)] = lease
         endpoint.active_requests += 1
@@ -2577,13 +2602,14 @@ class LoadBalancer:
                 endpoint.circuit_open = False
                 endpoint.consecutive_errors = 0
                 endpoint.circuit_generation += 1
+                self._circuit_event(endpoint, 'HALF_OPEN', 'trial_succeeded')
                 logger.info("Circuit breaker recovered for %s", endpoint.name)
             else:
                 # A cancelled/client-rejected trial is inconclusive, not recovery.
                 # Delay the next real trial to prevent repeated cancellation storms.
                 if failed:
                     endpoint.consecutive_errors += 1
-                self._open(endpoint)
+                self._open(endpoint, reason='trial_failed' if failed else 'trial_inconclusive')
         elif success:
             endpoint.consecutive_errors = 0
         elif failed:
@@ -3123,6 +3149,7 @@ class ClaudeProxy:
 
                 finally:
                     timing_end_stream()
+                    note_stream_end(observation)
                     _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                     await _finish_cleanup(_close_stream_resources(pump_task, response))
 
@@ -3523,6 +3550,7 @@ class AzureOpenAIProxy:
 
                 finally:
                     timing_end_stream()
+                    note_stream_end(observation)
                     _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                     await _finish_cleanup(_close_stream_resources(pump_task, response))
 
@@ -3695,6 +3723,7 @@ def _format_upstream_ids_suffix(ids: dict) -> str:
 
 def _build_upstream_error_detail(status, body_text, provider, endpoint_name, content_type=None,
                                  upstream_headers=None, lb_request_id=None):
+    lb_request_id = telemetry_request_id() or safe_id(lb_request_id)
     detail = _build_legacy_upstream_error_detail(status,body_text,provider,endpoint_name,
                                                 content_type,upstream_headers,lb_request_id)
     try:
@@ -4504,7 +4533,7 @@ class CopilotProxy:
 
     def _mark_endpoint_unhealthy(self, endpoint: CopilotEndpoint, reason: str):
         endpoint.auth_unhealthy = True
-        self.load_balancer._open(endpoint)
+        self.load_balancer._open(endpoint, reason='authentication')
         endpoint.last_error_time = time.time()
         endpoint.total_errors += 1
         logger.error(f"[Copilot] endpoint '{endpoint.name}' marked unhealthy: {reason}")
@@ -6102,6 +6131,7 @@ class CopilotProxy:
 
                 finally:
                     timing_end_stream()
+                    note_stream_end(observation)
                     _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                     await _finish_cleanup(_close_stream_resources(pump_task, response))
 
@@ -6608,7 +6638,7 @@ async def _inject_request_id_middleware(request: Request, call_next):
     an upstream proxy/ingress already assigned one) or synthesise a fresh id
     so every response gets a traceable value.
     """
-    inbound = request.headers.get("x-request-id") or request.headers.get("openai-request-id")
+    inbound = safe_id(request.headers.get("x-request-id")) or safe_id(request.headers.get("openai-request-id"))
     if inbound:
         request.state.request_id = inbound
     response = await call_next(request)
@@ -6640,6 +6670,7 @@ MAX_RAW_REQUEST_SIZE = 64 * 1024 * 1024  # LB 入口宽容上限：压缩前最�
 async def _read_bounded_request_body(request: Request):
     """Keep Request.body caching semantics while checking size before retention."""
     def too_large():
+        note_failure('invalid_input', origin='local')
         return HTTPException(status_code=413, detail={'error':{
             'type':'request_too_large','message':'Request exceeds LB raw body limit.'}})
     try:
@@ -6665,6 +6696,7 @@ async def _read_bounded_request_body(request: Request):
         raise HTTPException(status_code=503, headers={'Retry-After':'1'}, detail={'error':{
             'code':'lb_overloaded','reason':exc.reason,'message':'Local request body memory budget exhausted.'}}) from None
     except TimeoutError:
+        note_failure('request_body_timeout', origin='client')
         raise HTTPException(status_code=408, detail={'error':{
             'code':'request_body_timeout','message':'Request upload did not finish within the body read budget.'}}) from None
     request._body = b''.join(parts)
@@ -6675,8 +6707,8 @@ async def _read_bounded_request_body(request: Request):
 async def messages(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
     # P1.4: generate/honour request_id so error SSE frames + upstream logs correlate.
     request_id = (
-        request.headers.get("x-request-id")
-        or request.headers.get("openai-request-id")
+        safe_id(request.headers.get("x-request-id"))
+        or safe_id(request.headers.get("openai-request-id"))
         or f"req_{uuid.uuid4().hex[:8]}"
     )
     request.state.request_id = request_id
@@ -6713,7 +6745,7 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
 
-    note_request_context(body.get("model"), stream=body.get("stream", False))
+    note_request_context(body.get("model"), stream=body.get("stream", False), body_size=body_size)
     # 大请求先尝试压缩图片（小请求跳过节省 CPU）
     if body_size > _IMG_COMPRESS_THRESHOLD:
         try:
@@ -7542,8 +7574,8 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
     # Honour inbound request id when the upstream proxy / ingress already
     # assigned one so log correlation survives an extra hop.
     request_id = (
-        request.headers.get("x-request-id")
-        or request.headers.get("openai-request-id")
+        safe_id(request.headers.get("x-request-id"))
+        or safe_id(request.headers.get("openai-request-id"))
         or f"req_{uuid.uuid4().hex[:8]}"
     )
     request.state.request_id = request_id
@@ -7573,7 +7605,7 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
     stream = body.get("stream", False)
-    note_request_context(body.get("model"), stream=stream)
+    note_request_context(body.get("model"), stream=stream, body_size=len(body_bytes))
     _log_openai_request(request_id, "/v1/responses", request, body, len(body_bytes), stream)
     if len(body_bytes) > _IMG_COMPRESS_THRESHOLD:
         try:
@@ -7615,8 +7647,8 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
     # Honour inbound request id when the upstream proxy / ingress already
     # assigned one so log correlation survives an extra hop.
     request_id = (
-        request.headers.get("x-request-id")
-        or request.headers.get("openai-request-id")
+        safe_id(request.headers.get("x-request-id"))
+        or safe_id(request.headers.get("openai-request-id"))
         or f"req_{uuid.uuid4().hex[:8]}"
     )
     request.state.request_id = request_id
@@ -7646,7 +7678,7 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
     stream = body.get("stream", False)
-    note_request_context(body.get("model"), stream=stream)
+    note_request_context(body.get("model"), stream=stream, body_size=len(body_bytes))
     _log_openai_request(request_id, "/v1/chat/completions", request, body, len(body_bytes), stream)
     if len(body_bytes) > _IMG_COMPRESS_THRESHOLD:
         try:
@@ -8085,6 +8117,8 @@ async def metrics(schema: str = 'lb-metrics-v2'):
         lines.append(diagnostic_metrics().rstrip())
     if usage_store:
         lines.append(usage_store.render_metrics().rstrip())
+        if schema == 'lb-metrics-v3':
+            lines.append(usage_store.render_extended_metrics().rstrip())
     body = "\n".join(lines) + "\n" if lines else "# no providers configured\n"
     return Response(content=body, media_type="text/plain; version=0.0.4", headers={'X-LB-Metrics-Schema': schema})
 

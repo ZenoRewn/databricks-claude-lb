@@ -154,6 +154,11 @@
       "type": "counter",
       "unit": "sends"
     },
+    "lb_usage_accepted_events_total": {
+      "labels": [],
+      "type": "counter",
+      "unit": "events"
+    },
     "lb_usage_backend_ready": {
       "labels": [],
       "type": "gauge",
@@ -179,6 +184,11 @@
       "type": "gauge",
       "unit": "unix_seconds"
     },
+    "lb_usage_oldest_pending_age_seconds": {
+      "labels": [],
+      "type": "gauge",
+      "unit": "seconds"
+    },
     "lb_usage_pending_events": {
       "labels": [],
       "type": "gauge",
@@ -189,10 +199,20 @@
       "type": "gauge",
       "unit": "groups"
     },
+    "lb_usage_persisted_events_total": {
+      "labels": [],
+      "type": "counter",
+      "unit": "events"
+    },
     "lb_usage_rejected_events_total": {
       "labels": [],
       "type": "counter",
       "unit": "events"
+    },
+    "lb_usage_volatile_buffer": {
+      "labels": [],
+      "type": "gauge",
+      "unit": "boolean"
     }
   },
   "identifiers_in_labels": false,
