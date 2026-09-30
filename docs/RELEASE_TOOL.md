@@ -32,6 +32,8 @@ preflight → gating → pausing → draining → stopping → starting
 
 每次写入带对象 UID、resourceVersion、发布 ID 和执行代次条件。接管者重新读回现场；API ACK 丢失不等于写入未发生。前一次执行的暂停/恢复命令会被文件 revision 和 epoch 拒绝。
 
+镜像与 `lb.zeno.ink/source-revision` Pod template 注解在同一次条件补丁中更新；回滚恢复原注解值或其缺失状态，保留无关注解。计划、集群预检和每次实际切换前的 server dry-run 均核对返回的完整目标 Pod spec/注解，正常 ACK 也读回核对；admission 改写不能被当成已应用。ACK 丢失仍先读回，不为补注解重复滚动。注解不替代 runtime hash 或 registry digest 证明。修复与验证见 [源码身份回执](reviews/2026-09-30-release-source-identity/REPORT.md)。
+
 单写者停止使用受控 Pod finalizer 保留容器终止证据，再允许启动替代实例；不通过 force delete 应用 Pod 冒充排空。未调度且已进入删除的 Pod 单独记录“未分配运行节点”的证据。节点失联而没有终止证据时不会启动另一 writer。
 
 默认维护预算为 300 秒，前向切换最多 150 秒、排空最多 60 秒，至少保留 150 秒恢复时间。回滚到已经接过流量的新版之前，同样先暂停、排空并确认退出。预算是自动化恢复目标，不能保证控制平面或节点故障时仍在五分钟内恢复，也不授权强杀长请求。
