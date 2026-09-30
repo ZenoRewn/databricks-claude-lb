@@ -1,0 +1,24 @@
+.................................................... [ 30%]
+...............................................F........................................ [ 80%]
+.................................                                        [100%]
+=================================== FAILURES ===================================
+_ ImageAdmissionOverHttpTests.test_too_many_images_yields_json_413_after_trim_cannot_help _
+tests/test_http_entrypoints.py:202: in test_too_many_images_yields_json_413_after_trim_cannot_help
+    self.assertEqual(r.json()["detail"]["error"]["type"], "request_too_large")
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'type'
+----------------------------- Captured stderr call -----------------------------
+{"ts": "2026-09-30T09:21:41.496Z", "level": "INFO", "logger": "main", "message": "lb_request_received", "request_id": "req_476483f3", "client_class": "other", "kind": "lb_request_received", "lb_request_id": "a6e9368e-9db5-4fa3-bccc-a9d8f4d83963", "api_type": "responses", "route": "/v1/responses", "requested_model": "gpt-test", "schema_version": 1, "body_size_bytes": 93600, "stream": false, "downstream_headers_sent": false, "downstream_content_started": false}
+{"ts": "2026-09-30T09:21:41.496Z", "level": "INFO", "logger": "main", "message": "lb_upstream_error", "reason": "invalid_input", "kind": "lb_upstream_error", "lb_request_id": "a6e9368e-9db5-4fa3-bccc-a9d8f4d83963", "exc_type": null, "upstream_code_class": "invalid_input", "api_type": "responses", "error_origin": "local", "requested_model": "gpt-test", "upstream_http_status": null, "schema_version": 1, "stream": false, "downstream_headers_sent": false, "downstream_content_started": false}
+{"ts": "2026-09-30T09:21:41.496Z", "level": "INFO", "logger": "main", "message": "lb_parameter_policy", "kind": "lb_parameter_policy", "lb_request_id": "a6e9368e-9db5-4fa3-bccc-a9d8f4d83963", "api_type": "responses", "action": "rejected", "requested_model": "gpt-test", "schema_version": 1, "stream": false, "downstream_headers_sent": false, "downstream_content_started": false, "parameters": ["images.trimmed"]}
+{"ts": "2026-09-30T09:21:41.497Z", "level": "INFO", "logger": "main", "message": "lb_request_end", "request_id": "req_476483f3", "admission_reason": null, "deadline_phase": null, "kind": "lb_request_end", "lb_request_id": "a6e9368e-9db5-4fa3-bccc-a9d8f4d83963", "operation_id": null, "generation_outcome": "unknown", "parameter_policy": "compat", "api_type": "responses", "image_trim_policy": "reject", "error_origin": "local", "requested_model": "gpt-test", "source_tenant": "default", "failure_reason": "invalid_input", "outcome": "rejected", "schema_version": 1, "admissions": 0, "http_status": 413, "upstream_sends": 0, "duration_seconds": 0.000793, "startup_budget_seconds": null, "total_budget_seconds": 1800.0, "stream": false, "draining_at_finish": false, "downstream_headers_sent": true, "downstream_body_completed": true, "downstream_content_started": false, "rejected_parameters": ["images.trimmed"], "transformed_parameters": [], "dropped_parameters": [], "phase_seconds": {"body_read": 0.00012583399802679196, "admission_wait": 2.7079986466560513e-06, "auth_prepare": null, "send_to_headers": null, "send_call": null, "first_event_from_ingress": null, "first_content_from_ingress": null, "stream": null, "cleanup": null, "dns": null, "tcp": null, "tls": null, "pool": null}, "phase_offsets_seconds": {"admission_wait_started": 5.2374998631421477e-05, "admission_wait_finished": 5.52079982298892e-05, "body_read_started": 0.00018533299953560345, "body_read_finished": 0.00031141699946601875}}
+{"ts": "2026-09-30T09:21:41.497Z", "level": "INFO", "logger": "httpx2", "message": "HTTP Request: POST http://testserver/v1/responses \"HTTP/1.1 413 Content Too Large\""}
+------------------------------ Captured log call -------------------------------
+INFO     main:request_telemetry.py:52 lb_request_received
+INFO     main:request_telemetry.py:52 lb_upstream_error
+INFO     main:request_telemetry.py:52 lb_parameter_policy
+INFO     main:request_telemetry.py:52 lb_request_end
+INFO     httpx2:_client.py:1085 HTTP Request: POST http://testserver/v1/responses "HTTP/1.1 413 Content Too Large"
+=========================== short test summary info ============================
+FAILED tests/test_http_entrypoints.py::ImageAdmissionOverHttpTests::test_too_many_images_yields_json_413_after_trim_cannot_help
+1 failed, 172 passed, 76 subtests passed in 3.94s

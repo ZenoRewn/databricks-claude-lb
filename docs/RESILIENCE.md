@@ -1,5 +1,9 @@
 # Local admission, outcome accounting, and replay safety
 
+Author: Zeno Ren
+
+2026-09-30 adds safe circuit transition evidence and [offline experiment gates](OPERATIONS_EXPERIMENTS.md), without widening the replay allowlist or changing endpoint thresholds. [Request diagnostics](OBSERVABILITY_AND_CONTEXT.md) distinguish local overload, transport/protocol failures and recovered attempts. The independent review gate below remains applicable.
+
 ## Scope and invariants
 
 This change builds on `5dc6e12` response/transport ownership and `9dd80a3`

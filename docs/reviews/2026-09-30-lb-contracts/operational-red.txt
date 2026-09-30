@@ -1,0 +1,28 @@
+F..FF                                                                    [100%]
+=================================== FAILURES ===================================
+_ CircuitEvidenceTests.test_transition_events_are_mutation_bound_and_readiness_stays_pure _
+tests/test_operational_evidence.py:29: in test_transition_events_are_mutation_bound_and_readiness_stays_pure
+    self.assertEqual([r.transition_reason for r in events], ['failure_threshold', 'trial_admitted', 'trial_succeeded'])
+E   AssertionError: Lists differ: [] != ['failure_threshold', 'trial_admitted', 'trial_succeeded']
+E   
+E   Second list contains 3 additional elements.
+E   First extra element 0:
+E   'failure_threshold'
+E   
+E   - []
+E   + ['failure_threshold', 'trial_admitted', 'trial_succeeded']
+______ UsageEvidenceTests.test_unknown_pending_timestamp_is_not_zero_age _______
+tests/test_operational_evidence.py:56: in test_unknown_pending_timestamp_is_not_zero_age
+    self.assertIsNone(store.extended_persistence_stats()['oldest_pending_age_seconds'])
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'JsonUsageStore' object has no attribute 'extended_persistence_stats'
+_ UsageEvidenceTests.test_v3_reports_accepted_acknowledged_and_oldest_pending_separately _
+tests/test_operational_evidence.py:40: in test_v3_reports_accepted_acknowledged_and_oldest_pending_separately
+    before = store.extended_persistence_stats()
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'JsonUsageStore' object has no attribute 'extended_persistence_stats'
+=========================== short test summary info ============================
+FAILED tests/test_operational_evidence.py::CircuitEvidenceTests::test_transition_events_are_mutation_bound_and_readiness_stays_pure
+FAILED tests/test_operational_evidence.py::UsageEvidenceTests::test_unknown_pending_timestamp_is_not_zero_age
+FAILED tests/test_operational_evidence.py::UsageEvidenceTests::test_v3_reports_accepted_acknowledged_and_oldest_pending_separately
+3 failed, 2 passed in 0.46s

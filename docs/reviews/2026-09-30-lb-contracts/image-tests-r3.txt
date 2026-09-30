@@ -1,0 +1,20 @@
+{"runtime_dependency_changes": {}, "identity": {"available": true, "source_revision": "c137f7bc37719f7b84f71aa23490c8c397ded387", "source_tree_dirty": false, "out_of_tree": false, "source_attested": true, "source_manifest_sha256": "18b97772e1fa2177c9884fc7f9297a106632897b34868c6c50489c6c708e7b82", "runtime_files_match": true, "manifest_covers_current_runtime": true}}
+ssssss.................................................................... [ 10%]
+.................................................................... [ 19%]
+............................................................................................ [ 32%]
+.......................................... [ 38%]
+...............................................s.......................................................................................... [ 57%]
+................................. [ 62%]
+..................................................................................... [ 74%]
+............................. [ 78%]
+................................................................................................................................................. [ 98%]
+........                                                                 [100%]
+=========================== short test summary info ============================
+SKIPPED [1] tests/integration/test_mysql_usage.py:122: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:96: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:113: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:88: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:131: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:104: requires disposable loopback MySQL test server
+SKIPPED [1] tests/test_databricks_payload_compat.py:574: opentelemetry tracing deps incomplete: missing opentelemetry.trace
+707 passed, 7 skipped, 662 subtests passed in 42.73s

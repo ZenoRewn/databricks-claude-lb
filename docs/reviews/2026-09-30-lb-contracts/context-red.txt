@@ -1,0 +1,66 @@
+FFFFFFFFF                                                                [100%]
+=================================== FAILURES ===================================
+_ CapabilityTests.test_catalog_rejects_invalid_limits_duplicate_routes_and_sensitive_urls _
+tests/test_context_capabilities.py:75: in test_catalog_rejects_invalid_limits_duplicate_routes_and_sensitive_urls
+    from model_capabilities import CapabilityCatalog
+E   ModuleNotFoundError: No module named 'model_capabilities'
+_ CapabilityTests.test_images_opaque_and_server_side_history_are_explicitly_incomplete _
+tests/test_context_capabilities.py:41: in test_images_opaque_and_server_side_history_are_explicitly_incomplete
+    from model_capabilities import estimate_payload
+E   ModuleNotFoundError: No module named 'model_capabilities'
+____ CapabilityTests.test_low_confidence_large_input_is_never_hard_rejected ____
+tests/test_context_capabilities.py:57: in test_low_confidence_large_input_is_never_hard_rejected
+    from model_capabilities import evaluate_budget
+E   ModuleNotFoundError: No module named 'model_capabilities'
+_ CapabilityTests.test_system_tools_and_unicode_affect_estimate_without_mutating_content _
+tests/test_context_capabilities.py:32: in test_system_tools_and_unicode_affect_estimate_without_mutating_content
+    from model_capabilities import estimate_payload
+E   ModuleNotFoundError: No module named 'model_capabilities'
+_ CapabilityTests.test_unknown_expired_and_other_channel_do_not_gain_verified_limits _
+tests/test_context_capabilities.py:49: in test_unknown_expired_and_other_channel_do_not_gain_verified_limits
+    catalog = self.make()
+              ^^^^^^^^^^^
+tests/test_context_capabilities.py:28: in make
+    from model_capabilities import CapabilityCatalog
+E   ModuleNotFoundError: No module named 'model_capabilities'
+_ CapabilityTests.test_verified_output_limit_and_feature_rejection_are_precise _
+tests/test_context_capabilities.py:64: in test_verified_output_limit_and_feature_rejection_are_precise
+    from model_capabilities import evaluate_budget
+E   ModuleNotFoundError: No module named 'model_capabilities'
+_ CapabilityEntryTests.test_known_output_rejected_before_any_copilot_send_or_stream_headers _
+tests/test_context_capabilities.py:113: in test_known_output_rejected_before_any_copilot_send_or_stream_headers
+    from model_capabilities import CapabilityCatalog
+E   ModuleNotFoundError: No module named 'model_capabilities'
+_ CapabilityEntryTests.test_models_schema_stays_compatible_and_admin_catalog_requires_auth _
+tests/test_context_capabilities.py:93: in test_models_schema_stays_compatible_and_admin_catalog_requires_auth
+    self.assertEqual(unauth.status_code, 401)
+E   AssertionError: 404 != 401
+----------------------------- Captured stderr call -----------------------------
+{"ts": "2026-09-30T09:29:12.935Z", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://local/admin/model-capabilities \"HTTP/1.1 404 Not Found\""}
+{"ts": "2026-09-30T09:29:12.936Z", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://local/admin/model-capabilities \"HTTP/1.1 404 Not Found\""}
+------------------------------ Captured log call -------------------------------
+INFO     httpx:_client.py:1740 HTTP Request: GET http://local/admin/model-capabilities "HTTP/1.1 404 Not Found"
+INFO     httpx:_client.py:1740 HTTP Request: GET http://local/admin/model-capabilities "HTTP/1.1 404 Not Found"
+_ CapabilityEntryTests.test_token_count_covers_system_and_tools_and_declares_estimation _
+tests/test_context_capabilities.py:106: in test_token_count_covers_system_and_tools_and_declares_estimation
+    self.assertEqual(missing.status_code, 401)
+E   AssertionError: 200 != 401
+----------------------------- Captured stderr call -----------------------------
+{"ts": "2026-09-30T09:29:12.947Z", "level": "INFO", "logger": "httpx", "message": "HTTP Request: POST http://local/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-30T09:29:12.951Z", "level": "INFO", "logger": "httpx", "message": "HTTP Request: POST http://local/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-30T09:29:12.954Z", "level": "INFO", "logger": "httpx", "message": "HTTP Request: POST http://local/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+------------------------------ Captured log call -------------------------------
+INFO     httpx:_client.py:1740 HTTP Request: POST http://local/v1/messages/count_tokens "HTTP/1.1 200 OK"
+INFO     httpx:_client.py:1740 HTTP Request: POST http://local/v1/messages/count_tokens "HTTP/1.1 200 OK"
+INFO     httpx:_client.py:1740 HTTP Request: POST http://local/v1/messages/count_tokens "HTTP/1.1 200 OK"
+=========================== short test summary info ============================
+FAILED tests/test_context_capabilities.py::CapabilityTests::test_catalog_rejects_invalid_limits_duplicate_routes_and_sensitive_urls
+FAILED tests/test_context_capabilities.py::CapabilityTests::test_images_opaque_and_server_side_history_are_explicitly_incomplete
+FAILED tests/test_context_capabilities.py::CapabilityTests::test_low_confidence_large_input_is_never_hard_rejected
+FAILED tests/test_context_capabilities.py::CapabilityTests::test_system_tools_and_unicode_affect_estimate_without_mutating_content
+FAILED tests/test_context_capabilities.py::CapabilityTests::test_unknown_expired_and_other_channel_do_not_gain_verified_limits
+FAILED tests/test_context_capabilities.py::CapabilityTests::test_verified_output_limit_and_feature_rejection_are_precise
+FAILED tests/test_context_capabilities.py::CapabilityEntryTests::test_known_output_rejected_before_any_copilot_send_or_stream_headers
+FAILED tests/test_context_capabilities.py::CapabilityEntryTests::test_models_schema_stays_compatible_and_admin_catalog_requires_auth
+FAILED tests/test_context_capabilities.py::CapabilityEntryTests::test_token_count_covers_system_and_tools_and_declares_estimation
+9 failed in 0.65s

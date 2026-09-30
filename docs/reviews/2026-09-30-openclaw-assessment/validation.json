@@ -1,0 +1,79 @@
+{
+  "author": "Zeno Ren",
+  "recorded_at": "2026-09-30T15:36:08.704059+08:00",
+  "scope": "Assessment only; documentation and synthetic probes, no application implementation or deployment",
+  "revision": "16de51d29d1fbb3e81c65434ce55fadc3573da61",
+  "attachment": {
+    "name": "LB项目优化开发清单-20260930.md",
+    "sha256": "0501d397ac8070e64714a493108c57a18d1b78de72d2a01fe6f994ff08c9abea"
+  },
+  "local_regression": {
+    "command": "python3 -m pytest tests/ -q --tb=short",
+    "exit_code": 0,
+    "passed": 651,
+    "skipped": 6,
+    "subtests_passed": 627,
+    "duration_seconds": 40.98,
+    "result_source": "Captured command completion output during this assessment",
+    "python_version": "3.14.5",
+    "skip_reason": "Six opt-in disposable-loopback MySQL integration tests; no MySQL server was enabled",
+    "collection_note": "Historical revision2 fixtures retain the existing repository collection policy",
+    "target_container_or_ci_matrix": false
+  },
+  "synthetic_probes": {
+    "command": "python3 docs/reviews/2026-09-30-openclaw-assessment/assessment_probes.py",
+    "exit_code": 0,
+    "result": "assessment-probes.json",
+    "purpose": "Reproduce current behavior, not claim fixes passed",
+    "external_upstream_calls": false
+  },
+  "not_executed": [
+    "AKS live inspection or mutation",
+    "OpenClaw automation or collector changes",
+    "Production inference or paid model calls",
+    "Target image build or validation",
+    "Real client E2E",
+    "Real MySQL integration",
+    "Load or soak testing",
+    "Git commit or push",
+    "Independent implementation QA"
+  ],
+  "packages": {
+    "pytest": "9.1.1",
+    "httpx": "0.28.1",
+    "fastapi": "0.139.0",
+    "starlette": "1.3.1",
+    "anyio": "4.14.1",
+    "aiomysql": "0.3.2"
+  },
+  "source_hashes": {
+    "main.py": "d7c9f191c78cd51d51e015ccf0c7dd73f5e685bd8344cf4ba6f64b766ab22c53",
+    "request_telemetry.py": "567e254eb522f0b8dbbc31cf7d70e296e26662f9ca1f7df8175242fe489c1ee8",
+    "request_budget.py": "0e26b6b14135461a8ae6ab86aa0e4234e5b507d6261b2bcbefcfad6ce9c2b4a4",
+    "response_semantics.py": "c2da11dd821e6edb30eea160a8810eeb464aea58b083935d254e8781844196b2",
+    "upstream_body.py": "639f2416464e39b850af94ab037713d2a8bc03b66ea73cc64e0d9c7d60c7d4fd",
+    "admission.py": "0b9fc601938cea860f68d7a2d1fa1db5e2c6db4bedbd203015c1b4ee80ae2dbe",
+    "usage_store.py": "b0c3a0a353bda41f11fb4910604970bd428ff3fcd6fddf4c729c6aad73cc5042",
+    "cleanup_observability.py": "d23076d64c995ba5d57600d539a86646952f38912e354304eebd57c7f1654612",
+    "Dockerfile": "5ee1e154e6ca7368c11369a3fc3d1fc7f3c7698f96985eb8b22069d239d163d3",
+    "operations/metrics_contract.py": "6d64d5563eeabf16b2a88349179847489cca942397508a273a18a0472b639e0f",
+    "operations/reporting.py": "dfc9a9c42cf3d4b9bdd4404e60e3dc086fbfcec3567633976e55e69dade968eb"
+  },
+  "tracked_worktree_diff": [],
+  "document_validation": {
+    "local_links_valid": 9,
+    "author_present": true,
+    "probe_python_syntax": "valid",
+    "json_files": "valid",
+    "rendering": "marked GFM rendered in Codex in-app browser; screenshot inspected",
+    "rendered_tables": 6,
+    "horizontal_overflow": false,
+    "overflowing_table_cells": 0,
+    "temporary_preview_closed": true
+  },
+  "assessment_artifacts_sha256": {
+    "ASSESSMENT.md": "e1f1d94ff497259ae0a5b5eb1675cc8c65c1f9172048c3c4feed427d203764eb",
+    "assessment_probes.py": "51d6f2d129d44315ebf676037b54e4212f93540c8bceac1135579de2b4f19fda",
+    "assessment-probes.json": "774381edda7cb8c67778ed3bf414ee0b668b48995ac31720e529c789f544e54f"
+  }
+}

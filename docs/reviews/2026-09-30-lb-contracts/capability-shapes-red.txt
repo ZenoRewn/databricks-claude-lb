@@ -1,0 +1,20 @@
+.                                                                      [100%]
+=================================== FAILURES ===================================
+_ CapabilityTests.test_enforcement_does_not_mistake_plain_text_or_schema_examples_for_features (payload={'input': 'synthetic', 'text': {'format': {'type': 'text'}}}) _
+tests/test_context_capabilities.py:38: in test_enforcement_does_not_mistake_plain_text_or_schema_examples_for_features
+    result = evaluate_budget(catalog, 'copilot', 'responses', 'synthetic-model', payload, mode='enforce')
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+model_capabilities.py:213: in evaluate_budget
+    raise HTTPException(status_code=400, detail={'error': {'code': code,
+E   fastapi.exceptions.HTTPException: 400: {'error': {'code': 'model_capability_mismatch', 'message': 'The requested output budget or feature conflicts with the configured verified channel contract.', 'unsupported_features': ['structured_output'], 'output_limit': 200, 'lb_request_id': None, 'retryable': False}}
+_ CapabilityTests.test_enforcement_does_not_mistake_plain_text_or_schema_examples_for_features (payload={'input': 'synthetic', 'tools': [{'type': 'function', 'name': 'describe', 'parameters': {'type': 'object', 'properties...ontent': {'type': 'string'}}, 'examples': [{'type': 'input_image', 'image_url': 'https://fixture.invalid/example'}]}}]}) _
+tests/test_context_capabilities.py:38: in test_enforcement_does_not_mistake_plain_text_or_schema_examples_for_features
+    result = evaluate_budget(catalog, 'copilot', 'responses', 'synthetic-model', payload, mode='enforce')
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+model_capabilities.py:213: in evaluate_budget
+    raise HTTPException(status_code=400, detail={'error': {'code': code,
+E   fastapi.exceptions.HTTPException: 400: {'error': {'code': 'model_capability_mismatch', 'message': 'The requested output budget or feature conflicts with the configured verified channel contract.', 'unsupported_features': ['images', 'opaque_state'], 'output_limit': 200, 'lb_request_id': None, 'retryable': False}}
+=========================== short test summary info ============================
+SUBFAILED(payload={'input': 'synthetic', 'text': {'format': {'type': 'text'}}}) tests/test_context_capabilities.py::CapabilityTests::test_enforcement_does_not_mistake_plain_text_or_schema_examples_for_features
+SUBFAILED(payload={'input': 'synthetic', 'tools': [{'type': 'function', 'name': 'describe', 'parameters': {'type': 'object', 'properties...ontent': {'type': 'string'}}, 'examples': [{'type': 'input_image', 'image_url': 'https://fixture.invalid/example'}]}}]}) tests/test_context_capabilities.py::CapabilityTests::test_enforcement_does_not_mistake_plain_text_or_schema_examples_for_features
+2 failed, 1 passed in 0.28s

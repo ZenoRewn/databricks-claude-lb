@@ -1,0 +1,7 @@
+{
+  "author": "Zeno Ren",
+  "isolated_mysql_fixture_removed": true,
+  "fixture_name": "lb-contracts-mysql84-ab397fbb",
+  "temporary_database_storage": "tmpfs removed with fixture",
+  "production_resources_modified": false
+}

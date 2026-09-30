@@ -1,0 +1,31 @@
+FFFFF                                                                    [100%]
+=================================== FAILURES ===================================
+_ BuildIdentityTests.test_build_manifest_mismatch_fails_and_unknown_is_not_attested _
+tests/test_build_identity.py:29: in test_build_manifest_mismatch_fails_and_unknown_is_not_attested
+    from build_metadata import build_info
+E   ModuleNotFoundError: No module named 'build_metadata'
+_ BuildIdentityTests.test_clean_dirty_and_untracked_runtime_sources_are_distinguished _
+tests/test_build_identity.py:12: in test_clean_dirty_and_untracked_runtime_sources_are_distinguished
+    from operations.build_identity import snapshot
+E   ModuleNotFoundError: No module named 'operations.build_identity'
+____ BuildIdentityTests.test_packaging_manifest_covers_every_runtime_module ____
+tests/test_build_identity.py:56: in test_packaging_manifest_covers_every_runtime_module
+    from build_metadata import RUNTIME_FILES
+E   ModuleNotFoundError: No module named 'build_metadata'
+_ BuildIdentityTests.test_runtime_tampering_is_detected_and_private_files_are_not_included _
+tests/test_build_identity.py:44: in test_runtime_tampering_is_detected_and_private_files_are_not_included
+    from build_metadata import build_info, runtime_identity
+E   ModuleNotFoundError: No module named 'build_metadata'
+_ DiagnosticSinkTests.test_timestamp_uses_event_creation_instead_of_delayed_sink_time _
+tests/test_diagnostic_contract.py:134: in test_timestamp_uses_event_creation_instead_of_delayed_sink_time
+    self.assertEqual(json.loads(main._JsonLogFormatter().format(record))['ts'], '1970-01-01T00:00:01.000Z')
+E   AssertionError: '2026-09-30T09:38:44.116Z' != '1970-01-01T00:00:01.000Z'
+E   - 2026-09-30T09:38:44.116Z
+E   + 1970-01-01T00:00:01.000Z
+=========================== short test summary info ============================
+FAILED tests/test_build_identity.py::BuildIdentityTests::test_build_manifest_mismatch_fails_and_unknown_is_not_attested
+FAILED tests/test_build_identity.py::BuildIdentityTests::test_clean_dirty_and_untracked_runtime_sources_are_distinguished
+FAILED tests/test_build_identity.py::BuildIdentityTests::test_packaging_manifest_covers_every_runtime_module
+FAILED tests/test_build_identity.py::BuildIdentityTests::test_runtime_tampering_is_detected_and_private_files_are_not_included
+FAILED tests/test_diagnostic_contract.py::DiagnosticSinkTests::test_timestamp_uses_event_creation_instead_of_delayed_sink_time
+5 failed in 0.25s

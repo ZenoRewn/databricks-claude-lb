@@ -1,0 +1,27 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_ DiagnosticLifecycleTests.test_local_admission_rejection_is_not_attributed_to_upstream _
+tests/test_diagnostic_contract.py:40: in test_local_admission_rejection_is_not_attributed_to_upstream
+    self.assertEqual((end.failure_reason, end.error_origin), ('local_overload', 'local'))
+E   AssertionError: Tuples differ: ('upstream_unavailable', 'unknown') != ('local_overload', 'local')
+E   
+E   First differing element 0:
+E   'upstream_unavailable'
+E   'local_overload'
+E   
+E   - ('upstream_unavailable', 'unknown')
+E   + ('local_overload', 'local')
+_ DiagnosticLifecycleTests.test_stream_and_send_share_server_identity_and_model_context _
+tests/test_diagnostic_contract.py:130: in test_stream_and_send_share_server_identity_and_model_context
+    self.assertEqual(len(generic), 1)
+E   AssertionError: 0 != 1
+----------------------------- Captured stderr call -----------------------------
+{"ts": "2026-09-30T09:57:11.315Z", "level": "INFO", "logger": "main", "message": "[Copilot] HTTP/2 negotiation enabled (h2 pkg 4.4.1). Actual protocol depends on TLS ALPN — see stream_end log field `http_version`."}
+{"ts": "2026-09-30T09:57:11.320Z", "level": "INFO", "logger": "httpx", "message": "lb_legacy_diagnostic", "endpoint_alias": "synthetic", "lb_request_id": "91e8aa72-c669-4a2c-87c9-6a73fa4e36a7", "upstream_attempt_id": "cd390c85-56af-4f36-a9ad-3dae1b2e1eb1", "requested_model": "unknown", "body_size_bucket": "unknown", "api_type": "responses", "provider": "copilot", "resolved_model": "unknown", "forwarded_model": "synthetic-model", "started_at_unix": 1790762231.317027, "upstream_stream": true, "downstream_headers_sent": true, "downstream_content_started": false, "stream": false, "kind": "lb_legacy_diagnostic", "source": "_send_single_request", "source_line": 1740, "schema_version": 1}
+------------------------------ Captured log call -------------------------------
+INFO     main:main.py:3924 [Copilot] HTTP/2 negotiation enabled (h2 pkg 4.4.1). Actual protocol depends on TLS ALPN — see stream_end log field `http_version`.
+INFO     httpx:_client.py:1740 lb_legacy_diagnostic
+=========================== short test summary info ============================
+FAILED tests/test_diagnostic_contract.py::DiagnosticLifecycleTests::test_local_admission_rejection_is_not_attributed_to_upstream
+FAILED tests/test_diagnostic_contract.py::DiagnosticLifecycleTests::test_stream_and_send_share_server_identity_and_model_context
+2 failed in 0.35s

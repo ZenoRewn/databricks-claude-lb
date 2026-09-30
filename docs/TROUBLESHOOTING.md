@@ -1,5 +1,9 @@
 # 故障排查 Cheat Sheet
 
+Author: Zeno Ren
+
+2026-09-30 的错误归因、日志格式、图片裁剪、token-count 鉴权及 adapter 行为以 [当前契约](OBSERVABILITY_AND_CONTEXT.md) 为准。下文历史复现和运行数据仍保留其原日期；不能当作当前 AKS 状态。
+
 记录使用本项目时常见且不直观的坑，按"症状 → 真因 → 解决"组织。
 
 ---
@@ -176,7 +180,7 @@ GHCP 部分新模型（gpt-5.5、gpt-5.6-sol、gpt-5.6-luna、gpt-5.6-terra、gp
 
 ### 解决
 
-优先把客户端配置成 `wire_api = "responses"`（Codex 默认就是）。如果客户端只支持 Chat Completions，LB 默认会把 `gpt-5.5,gpt-5-codex,gpt-5.6-sol,gpt-5.6-luna,gpt-5.6-terra` 的 `/v1/chat/completions` 请求 buffered 转到 `/v1/responses`，再包装回 Chat Completions 响应；这种适配会牺牲首字延迟。可用 `OPENAI_CHAT_TO_RESPONSES_MODELS` 覆盖模型列表，或改用 GHCP 原生接受 Chat Completions 的模型（gpt-4o、gpt-4.1 等）。
+优先使用客户端支持的原生 Responses 接口。如果客户端只支持 Chat Completions，LB 默认会把 `gpt-5.5,gpt-5-codex,gpt-5.6-sol,gpt-5.6-luna,gpt-5.6-terra` 的请求 buffered 转到 Responses，再包装回 Chat 响应；`X-LB-Stream-Mode: buffered-adapter` 明示这一点，会牺牲首字延迟。2026-09-30 的转换保留 schema、工具配对和 incomplete/refusal，无法等价转换的字段明确拒绝。可用 `OPENAI_CHAT_TO_RESPONSES_MODELS` 控制模型列表，模型在真实渠道上的 API 能力仍需确认，见 [当前契约](OBSERVABILITY_AND_CONTEXT.md)。
 
 如果游戏选择 `gpt-5.5` 后报 `No provider available for model 'gpt-5.5': Copilot configured but failing; Azure not configured`，通常不是客户端 key 错，而是 Copilot 上游拒绝了该模型且没有 Azure fallback。新版 LB 会返回更明确的 `unsupported_model`，并在日志中记录 request id、客户端 header 形态、provider 选择、Copilot endpoint 是否熔断、模型是否命中白名单、session token 是否存在等信息。不要先做 silent fallback；先看同一 request id 的 `[OpenAICompat]`、`[route]`、`[Copilot responses]` 日志，确认上游到底拒绝了哪个模型。
 

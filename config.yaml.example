@@ -1,5 +1,17 @@
 # Databricks Claude Load Balancer 配置示例
+# Author: Zeno Ren
 # 复制此文件为 config.yaml 并填入真实值
+#
+# 2026-09-30 新增运行开关是环境变量，不是下面 YAML 的额外字段：
+# LB_DIAGNOSTIC_QUEUE_CAPACITY=4096
+# LB_STARTUP_BUDGET_OVERRIDES=[]               # 精确 provider/api_type/model 规则，默认不调预算
+# LB_IMAGE_TRIM_POLICY=reject                 # allow 必须由管理员或调用方明确选择
+# LB_CHAT_ADAPTER_CONTRACT=preserve           # 可回退为 text-only，拒绝无法保留的关键语义
+# LB_CHAT_ADAPTER_PRESERVE_MODELS             # 未设置=全部已配置 adapter 模型；空=仅文本
+# LB_CONTEXT_BUDGET_MODE=observe              # off/observe/enforce；估算永不作为输入硬拒绝依据
+# LB_MODEL_CAPABILITIES_PATH                 # 可选本地 JSON；参见 model-capabilities.example.json
+# 新监控契约显式请求 /metrics?schema=lb-metrics-v3，默认仍为 v2。
+# 当前行为与采用步骤：docs/OBSERVABILITY_AND_CONTEXT.md
 
 load_balancer:
   strategy: least_requests        # 负载均衡策略: least_requests, round_robin, random

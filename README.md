@@ -2,6 +2,10 @@
 
 Author: Zeno Ren
 
+2026-09-30 的请求诊断、阶段计时、参数/图片语义和渠道能力观测见 [当前契约](docs/OBSERVABILITY_AND_CONTEXT.md)；单路由实验工具、熔断证据及易失用量边界见 [运维实验说明](docs/OPERATIONS_EXPERIMENTS.md)。[本轮验收](docs/reviews/2026-09-30-lb-contracts/VALIDATION.md) 分开记录主机、目标镜像、隔离 MySQL、独立复核和 GitHub 状态。
+
+兼容性变化：Token 估算接口需要鉴权；图片裁剪默认拒绝、可显式允许；Chat 适配器保留工具/schema/refusal/incomplete，无法等价转换的关键参数明确拒绝。新指标采用显式 `/metrics?schema=lb-metrics-v3`，默认 `/metrics` 仍为 v2。默认不按低置信度上下文估算拒绝请求，不自动增加 timeout、重试或副本。
+
 可靠性优化的实现范围、指标口径和验证边界见 [服务可靠性说明](docs/SERVICE_RELIABILITY.md)。
 
 后续协议、记账和类型化监控变更见 [升级后加固说明](docs/POST_UPGRADE_HARDENING.md)；集群内发布与恢复工具见 [操作指南](docs/RELEASE_TOOL.md)。本地验证不等于已经更新生产，实际交付状态以对应验证回执为准。

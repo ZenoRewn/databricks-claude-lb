@@ -1,5 +1,7 @@
 # Streaming protocol, retained-byte policy and API eligibility
 
+Author: Zeno Ren
+
 This contract extends [RESILIENCE.md](RESILIENCE.md). It does not diagnose any original client incident, set model token/context limits, authorize account enrollment, or change deployment probes. Existing ownership/close adapters and token-exchange isolation are retained.
 
 ## Wire contract
@@ -61,7 +63,7 @@ api_types: [responses]
 - Explicit field: nonempty list of unique exact values `responses` / `chat`. Null, empty, strings, duplicates and unknown values fail closed at startup, **before token resolution**.
 - Eligibility, availability, selection, retries, routing diagnostics and unavailable/unsupported status filter model **and actual upstream API before trial admission**. Inspection does not claim a HALF_OPEN trial.
 - Existing `models: []` wildcard behavior is unchanged. API eligibility is separate; a catalog name alone does not certify Chat support.
-- Existing configured Chat→Responses adapters select using actual upstream `responses`. Their inherited buffered payload transformations are unchanged. No Astra membership, identity headers, model swapping or context/tool/history dropping is introduced.
+- Configured Chat→Responses adapters select using actual upstream `responses`. The 2026-09-30 [adapter contract](OBSERVABILITY_AND_CONTEXT.md) preserves schema, tool-call/result IDs, roles, refusal and incomplete outcomes while declaring `X-LB-Stream-Mode: buffered-adapter`. It does not add native upstream streaming, Astra membership, identity headers or model swapping.
 - `least_requests` retains active/weight then total/weight tie-breaking. Four equal-weight model-matching Responses-only accounts distribute evenly in synthetic sequential/held-concurrent tests and are never selected for actual Chat.
 - The startup loader rejects duplicate resolved credential strings, including several new entries resolving through the same legacy cache. It never logs credential values. This intentionally rejects a previously possible duplicate-credential configuration; distinct strings are not by themselves proof of distinct account identity. External account validation/projection remains the installer's responsibility. Missing credentials retain the old skipped-endpoint behavior; mandatory Secret projection/init validation is a separate deployment guard.
 

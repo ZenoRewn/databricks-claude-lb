@@ -1,0 +1,40 @@
+FFFFFFF                                                                  [100%]
+=================================== FAILURES ===================================
+_ TimingTests.test_attempt_header_time_is_distinct_from_buffered_send_duration _
+tests/test_phase_observability.py:31: in test_attempt_header_time_is_distinct_from_buffered_send_duration
+    from request_timing import Timeline
+E   ModuleNotFoundError: No module named 'request_timing'
+_ TimingTests.test_budget_overrides_are_exact_route_scoped_and_validate_before_use _
+tests/test_phase_observability.py:51: in test_budget_overrides_are_exact_route_scoped_and_validate_before_use
+    rules = request_budget.parse_startup_overrides([
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: module 'request_budget' has no attribute 'parse_startup_overrides'
+_ TimingTests.test_nested_cleanup_is_not_double_counted_and_unknown_phases_stay_null _
+tests/test_phase_observability.py:17: in test_nested_cleanup_is_not_double_counted_and_unknown_phases_stay_null
+    from request_timing import Timeline
+E   ModuleNotFoundError: No module named 'request_timing'
+_______ TimingTests.test_send_result_counters_have_finite_zero_baselines _______
+tests/test_phase_observability.py:46: in test_send_result_counters_have_finite_zero_baselines
+    self.assertTrue(results)
+E   AssertionError: [] is not true
+_ PhaseIntegrationTests.test_deadline_records_observed_stage_without_changing_cancellation _
+tests/test_phase_observability.py:101: in test_deadline_records_observed_stage_without_changing_cancellation
+    from request_timing import observed_phase
+E   ModuleNotFoundError: No module named 'request_timing'
+__ PhaseIntegrationTests.test_heartbeat_does_not_mark_content_or_valid_event ___
+tests/test_phase_observability.py:65: in test_heartbeat_does_not_mark_content_or_valid_event
+    from request_timing import CURRENT, Timeline
+E   ModuleNotFoundError: No module named 'request_timing'
+__ PhaseIntegrationTests.test_v2_default_stays_compatible_and_v3_is_explicit ___
+tests/test_phase_observability.py:82: in test_v2_default_stays_compatible_and_v3_is_explicit
+    from operations.metrics_contract import CONTRACT_V3
+E   ImportError: cannot import name 'CONTRACT_V3' from 'operations.metrics_contract' (<repository>/operations/metrics_contract.py)
+=========================== short test summary info ============================
+FAILED tests/test_phase_observability.py::TimingTests::test_attempt_header_time_is_distinct_from_buffered_send_duration
+FAILED tests/test_phase_observability.py::TimingTests::test_budget_overrides_are_exact_route_scoped_and_validate_before_use
+FAILED tests/test_phase_observability.py::TimingTests::test_nested_cleanup_is_not_double_counted_and_unknown_phases_stay_null
+FAILED tests/test_phase_observability.py::TimingTests::test_send_result_counters_have_finite_zero_baselines
+FAILED tests/test_phase_observability.py::PhaseIntegrationTests::test_deadline_records_observed_stage_without_changing_cancellation
+FAILED tests/test_phase_observability.py::PhaseIntegrationTests::test_heartbeat_does_not_mark_content_or_valid_event
+FAILED tests/test_phase_observability.py::PhaseIntegrationTests::test_v2_default_stays_compatible_and_v3_is_explicit
+7 failed in 0.32s
