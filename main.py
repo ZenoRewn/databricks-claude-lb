@@ -9,6 +9,8 @@ from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_
                                note_local_terminal, note_failure, log_event, note_content_offered)
 from request_telemetry import note_parameter_transforms, require_image_trim_consent
 from chat_adapter import build_payload as build_chat_payload, messages_to_items, tools_to_items, content as chat_content
+import model_capabilities
+from model_capabilities import observe_route_budget, estimate_payload
 from safe_diagnostics import (DiagnosticFilter, DiagnosticStreamHandler, default_handler,
                               render_metrics as diagnostic_metrics, EVENT_NAMES)
 from request_timing import (observed_phase, begin_stream as timing_begin_stream,
@@ -254,7 +256,10 @@ class LBSettings:
                                             for (provider, api, model), seconds in sorted(STARTUP_OVERRIDES.items())],
                 'metrics_default_schema': 'lb-metrics-v2', 'metrics_extended_schema': 'lb-metrics-v3',
                 'image_trim_policy': IMAGE_TRIM_POLICY, 'chat_adapter_contract': MODE,
-                'chat_adapter_preserve_models': sorted(PRESERVE_MODELS) if PRESERVE_MODELS is not None else None}
+                'chat_adapter_preserve_models': sorted(PRESERVE_MODELS) if PRESERVE_MODELS is not None else None,
+                'context_budget_mode': model_capabilities.MODE,
+                'capability_catalog_sha256': model_capabilities.CATALOG.sha256,
+                'capability_catalog_entries': len(model_capabilities.CATALOG.entries)}
 
 
 # 单例，模块导入时创建。旧的散点式 os.getenv() 也继续存在（作为 backing store），
@@ -2829,6 +2834,7 @@ class ClaudeProxy:
                 raise self.load_balancer.unavailable()
             tried.add(endpoint.name)
 
+            observe_route_budget('databricks', 'messages', model, body, endpoint.name)
             attempt_lease = await self.load_balancer.on_request_start(endpoint)
 
             # 使用原生 Anthropic 端点
@@ -3240,6 +3246,7 @@ class AzureOpenAIProxy:
                     detail={"error": {"message": f"No endpoint available for model '{model}'"}},
                 )
 
+            observe_route_budget('azure_openai', api_type, model, body, endpoint.name)
             attempt_lease = await self.load_balancer.on_request_start(endpoint)
             tried.add(endpoint.name)
             attempt_ended = False
@@ -5224,6 +5231,7 @@ class CopilotProxy:
                 pinned_endpoint = endpoint
             tried.add(endpoint.name)
 
+            observe_route_budget('copilot', api_type, model, body, endpoint.name)
             attempt_lease = await self.load_balancer.on_request_start(endpoint)
             attempt_ended = False
             attempt_transferred = False
@@ -6759,10 +6767,40 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
 
 @app.post("/v1/messages/count_tokens")
 async def count_tokens(request: Request):
-    body = await request.json()
-    content = json.dumps(body.get("messages", []))
-    estimated_tokens = len(content) // 4
-    return {"input_tokens": estimated_tokens}
+    key = _extract_api_key(request)
+    if not _verify_lb_api_key(key):
+        raise HTTPException(status_code=401, detail={'error': {'message': 'Invalid API key'}})
+    sync_drain(INFERENCE_ADMISSION)
+    try:
+        lease = await INFERENCE_ADMISSION.acquire(_lookup_tenant(key) or 'default')
+    except AdmissionError as exc:
+        raise HTTPException(status_code=503, headers={'Retry-After': '1'}, detail={'error': {
+            'code': 'lb_overloaded', 'reason': exc.reason, 'message': 'Local estimation admission unavailable.'}}) from None
+    token = CURRENT_LEASE.set(lease)
+    try:
+        raw = await _read_bounded_request_body(request)
+        try:
+            body = json.loads(raw)
+            if not isinstance(body, dict):
+                raise ValueError('Expected an object')
+        except (ValueError, UnicodeError):
+            raise HTTPException(status_code=400, detail={'error': {'message': 'Invalid token count request'}}) from None
+        estimate = estimate_payload(body)
+        return JSONResponse({'input_tokens': estimate['estimated_input_tokens']}, headers={
+            'X-LB-Token-Count-Method': estimate['estimate_method'],
+            'X-LB-Token-Count-Confidence': estimate['estimate_confidence'],
+            'X-LB-Token-Count-Complete': str(estimate['estimate_complete']).lower(),
+            'X-LB-Unknown-Components': ','.join(estimate['unknown_components'])})
+    finally:
+        CURRENT_LEASE.reset(token)
+        lease.release()
+
+
+@app.get('/admin/model-capabilities')
+async def model_capability_catalog(request: Request):
+    if not _verify_lb_api_key(_extract_api_key(request)):
+        raise HTTPException(status_code=401, detail={'error': {'message': 'Invalid API key'}})
+    return {**model_capabilities.CATALOG.public_view(), 'mode': model_capabilities.MODE}
 
 
 def _extract_api_key(request: Request, x_api_key: Optional[str] = None) -> str:

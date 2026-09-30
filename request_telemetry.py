@@ -137,6 +137,7 @@ class RequestRecord:
     last_error_key: tuple | None = None
     downstream_headers_sent: bool = False
     downstream_content_started: bool = False
+    context_budget: dict = field(default_factory=dict)
 
 
 def log_context():
@@ -424,6 +425,9 @@ class RequestTelemetryMiddleware:
                     headers.append((b'x-lb-dropped-parameters',','.join(sorted(record.dropped_parameters)).encode('ascii')))
                 if record.transformed_parameters:
                     headers.append((b'x-lb-transformed-parameters',','.join(sorted(record.transformed_parameters)).encode('ascii')))
+                if record.context_budget:
+                    headers.extend([(b'x-lb-context-policy',record.context_budget['budget_mode'].encode('ascii')),
+                                    (b'x-lb-capability-status',record.context_budget['capability_status'].encode('ascii'))])
                 message={**message,'headers':headers}
             try:
                 await send(message)

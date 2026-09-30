@@ -15,14 +15,15 @@ IDENTIFIERS = set('kind lb_request_id request_id req operation_id upstream_attem
                   'source_tenant outcome generation_outcome failure_reason reason error_origin result action '
                   'parameter_policy admission_reason selection_reason execution_certainty first_event last_event '
                   'error_type exc_type source classification http_version upstream_code_class deadline_phase '
-                  'body_size_bucket client_class capability_status estimate_method budget_mode route image_trim_policy'.split())
+                  'body_size_bucket client_class capability_status estimate_method estimate_confidence context_status '
+                  'budget_mode route image_trim_policy'.split())
 NUMBERS = set('schema_version upstream_status upstream_http_status http_status duration_seconds attempt admissions '
               'upstream_sends input_bytes body_size_bytes input_tokens output_tokens cache_read_tokens chunks '
               'chunks_yielded decoded_bytes decoded_deliveries frames pending_eof_bytes peak_pending_bytes '
               'eligible_count tried_count untried_count remaining_loop_attempts remaining_seconds retry_after_seconds '
               'pool_saturated upstream_stall httpx_active httpx_total max_attempts attempts error_count '
               'startup_budget_seconds total_budget_seconds diagnostic_dropped_events source_line estimated_input_tokens '
-              'reserved_output_tokens input_limit context_limit output_limit age_seconds'.split())
+              'reserved_output_tokens input_limit context_limit output_limit age_seconds text_bytes image_count'.split())
 BOOLEANS = set('retry retry_allowed retryable retry_after_present downstream_headers_sent downstream_content_started '
                'downstream_body_completed draining_at_finish saw_completion terminal_seen terminal_valid has_image '
                'sent_any_chunk account_neutral read_timeout probe_ok httpx_pool_observed_full upstream_headers_received '
