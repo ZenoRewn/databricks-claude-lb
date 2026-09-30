@@ -25,10 +25,15 @@ FROM ${DEPENDENCY_STAGE} AS runtime
 #   usage_store.py  —— 顶层 import（main.py:1888），无保护；缺失 → ModuleNotFoundError，启动即崩
 #   otel_setup.py   —— lifespan 内 import + except Exception 兜底；缺失 tracing 静默失能
 #   dashboard.html  —— import 时按 __file__ 同级路径读取，except OSError 降级空壳
-COPY main.py chat_adapter.py model_capabilities.py effort_compat.py request_telemetry.py safe_diagnostics.py request_timing.py request_budget.py admission.py gateway_lifecycle.py upstream_body.py usage_store.py otel_setup.py response_semantics.py cleanup_observability.py copilot_pricing.py release_probe.py dashboard.html ./
+COPY main.py build_metadata.py chat_adapter.py model_capabilities.py effort_compat.py request_telemetry.py safe_diagnostics.py request_timing.py request_budget.py admission.py gateway_lifecycle.py upstream_body.py usage_store.py otel_setup.py response_semantics.py cleanup_observability.py copilot_pricing.py release_probe.py dashboard.html ./
 
 ARG SOURCE_REVISION=working-tree
-RUN SOURCE_REVISION="$SOURCE_REVISION" python -c 'import os,json,pathlib,hashlib,importlib.metadata as m,subprocess; pathlib.Path("/app/build-info.json").write_text(json.dumps({"source_revision":os.environ["SOURCE_REVISION"],"files":{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in pathlib.Path("/app").iterdir() if p.is_file()},"packages":{d.metadata["Name"]:d.version for d in m.distributions()},"os_packages":subprocess.check_output(["dpkg-query","-W"],text=True)},sort_keys=True))'
+ARG SOURCE_TREE_DIRTY=unknown
+ARG SOURCE_OUT_OF_TREE=unknown
+ARG SOURCE_MANIFEST_SHA256=unknown
+RUN SOURCE_REVISION="$SOURCE_REVISION" SOURCE_TREE_DIRTY="$SOURCE_TREE_DIRTY" \
+    SOURCE_OUT_OF_TREE="$SOURCE_OUT_OF_TREE" SOURCE_MANIFEST_SHA256="$SOURCE_MANIFEST_SHA256" \
+    python build_metadata.py
 
 # 非 root 用户 + 准备目录（usage_data + token 缓存挂载点）
 RUN useradd -m -u 1000 -s /bin/bash app \

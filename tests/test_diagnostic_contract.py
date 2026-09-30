@@ -128,6 +128,11 @@ class DiagnosticLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DiagnosticSinkTests(unittest.TestCase):
+    def test_timestamp_uses_event_creation_instead_of_delayed_sink_time(self):
+        record = logging.LogRecord('synthetic', logging.INFO, __file__, 1, 'safe', (), None)
+        record.created = 1.0
+        self.assertEqual(json.loads(main._JsonLogFormatter().format(record))['ts'], '1970-01-01T00:00:01.000Z')
+
     def test_allowlist_removes_raw_and_nested_secrets_and_rejects_injection(self):
         from safe_diagnostics import safe_fields
         cleaned = safe_fields({'kind': 'lb_upstream_error', 'error_origin': 'upstream_http',

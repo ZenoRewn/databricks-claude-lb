@@ -11,6 +11,7 @@ from request_telemetry import note_parameter_transforms, require_image_trim_cons
 from chat_adapter import build_payload as build_chat_payload, messages_to_items, tools_to_items, content as chat_content
 import model_capabilities
 from model_capabilities import observe_route_budget, estimate_payload
+from build_metadata import runtime_identity
 from safe_diagnostics import (DiagnosticFilter, DiagnosticStreamHandler, default_handler,
                               render_metrics as diagnostic_metrics, EVENT_NAMES)
 from request_timing import (observed_phase, begin_stream as timing_begin_stream,
@@ -273,7 +274,7 @@ class _JsonLogFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload = {
             # Python 3.12+ 弃用 utcnow()；用 timezone-aware datetime 输出保持 "...Z" wire 格式
-            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "ts": datetime.fromtimestamp(record.created, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -8326,6 +8327,7 @@ async def config_effective(
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
     return {
         "settings": LB_SETTINGS.as_dict(),
+        "build_identity": runtime_identity(),
         "note": "Values are read once at process startup; rolling restart required to pick up env changes.",
     }
 
