@@ -19,6 +19,19 @@ def body(**extras):
 
 
 class AdapterContractTests(unittest.TestCase):
+    def test_refusal_is_preserved_in_the_chat_message(self):
+        response = {'status': 'completed', 'output': [{'type': 'message', 'content': [
+            {'type': 'refusal', 'refusal': 'synthetic refusal'}]}]}
+        result = main._responses_json_to_chat_completion(response, 'synthetic')
+        self.assertEqual(result['choices'][0]['message']['refusal'], 'synthetic refusal')
+
+    def test_shared_cache_controls_are_forwarded_without_changing_retention(self):
+        result = main._build_responses_payload_from_chat(body(prompt_cache_retention='24h',
+            prompt_cache_options={'ttl': '30m'}, store=False))
+        self.assertEqual(result['prompt_cache_retention'], '24h')
+        self.assertEqual(result['prompt_cache_options'], {'ttl': '30m'})
+        self.assertFalse(result['store'])
+
     def test_schema_reasoning_store_and_explicit_tool_choice_are_preserved(self):
         schema = {'type': 'object', 'properties': {'ok': {'type': 'boolean'}},
                   'required': ['ok'], 'additionalProperties': False}
@@ -86,6 +99,27 @@ class AdapterContractTests(unittest.TestCase):
 
 
 class AdapterEntryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_locally_echoed_model_is_not_misreported_as_upstream_resolution(self):
+        import request_telemetry as telemetry
+        route = AsyncMock(return_value=main.JSONResponse({'id': 'synthetic', 'status': 'completed',
+            'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': 'synthetic'}]}]}))
+        async def app(scope, receive, send):
+            with patch.object(main, '_route_openai_responses', route):
+                response = await main._route_chat_via_responses(body(), stream=False)
+                await send({'type': 'http.response.start', 'status': response.status_code, 'headers': []})
+                await send({'type': 'http.response.body', 'body': response.body})
+        with self.assertLogs('main', level='INFO') as logs:
+            await telemetry.RequestTelemetryMiddleware(app, telemetry.RequestTelemetry())(
+                {'type': 'http', 'method': 'POST', 'path': '/v1/chat/completions', 'headers': []}, AsyncMock(), AsyncMock())
+        end = next(row for row in logs.records if getattr(row, 'kind', '') == 'lb_request_end')
+        self.assertEqual(end.resolved_model, 'unknown')
+
+    async def test_refusal_survives_buffered_sse(self):
+        payload = main._responses_json_to_chat_completion({'status': 'completed', 'output': [
+            {'type': 'message', 'content': [{'type': 'refusal', 'refusal': 'synthetic refusal'}]}]}, 'synthetic')
+        wire = b''.join([chunk async for chunk in main._chat_completion_sse_from_payload(payload)])
+        self.assertIn(b'"refusal": "synthetic refusal"', wire)
+
     async def test_real_openai_sdk_reads_text_tools_usage_and_finish_reason(self):
         from openai import OpenAI
         response = {'status': 'completed', 'output': [

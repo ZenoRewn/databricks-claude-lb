@@ -32,8 +32,8 @@ def content(value):
         if not isinstance(part, dict):
             reject('messages.content')
         kind = part.get('type')
-        if kind == 'text' and isinstance(part.get('text'), str) and set(part) <= {'type', 'text'}:
-            result.append({'type': 'input_text', 'text': part['text']})
+        if kind == 'text' and isinstance(part.get('text'), str) and set(part) <= {'type', 'text', 'prompt_cache_breakpoint'}:
+            result.append({**part, 'type': 'input_text'})
         elif kind == 'image_url' and isinstance(part.get('image_url'), dict):
             image = part['image_url']
             if not isinstance(image.get('url'), str) or set(image) - {'url', 'detail'} or set(part) - {'type', 'image_url'}:
@@ -142,7 +142,7 @@ def build_payload(body, *, removed_sampling=()):
     supported = {'model', 'messages', 'stream', 'stream_options', 'max_tokens', 'max_completion_tokens',
                  'temperature', 'top_p', 'tools', 'tool_choice', 'response_format', 'reasoning_effort',
                  'parallel_tool_calls', 'store', 'metadata', 'prompt_cache_key', 'safety_identifier',
-                 'service_tier', 'user', 'verbosity', 'n'}
+                 'prompt_cache_retention', 'prompt_cache_options', 'service_tier', 'user', 'verbosity', 'n'}
     if set(body) - supported:
         reject('adapter.unsupported')
     if 'n' in body and body['n'] is not None and (type(body['n']) is not int or body['n'] != 1):
@@ -168,7 +168,7 @@ def build_payload(body, *, removed_sampling=()):
         result['max_output_tokens'] = modern if modern is not None else legacy
         note_parameter_transforms({'max_completion_tokens' if modern is not None else 'max_tokens'})
     for key in ('temperature', 'top_p', 'store', 'metadata', 'parallel_tool_calls', 'prompt_cache_key',
-                'safety_identifier', 'service_tier', 'user'):
+                'safety_identifier', 'service_tier', 'user', 'prompt_cache_retention', 'prompt_cache_options'):
         if key in body and body[key] is not None and key not in removed_sampling:
             if key in ('store', 'parallel_tool_calls') and type(body[key]) is not bool:
                 reject('adapter.unsupported')

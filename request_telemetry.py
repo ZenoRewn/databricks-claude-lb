@@ -148,6 +148,7 @@ def log_context():
         return {}
     return {'lb_request_id': record.request_id, 'api_type': record.api_type,
             'requested_model': record.requested_model, 'stream': record.stream,
+            'provider': 'unknown', 'forwarded_model': 'unknown', 'resolved_model': 'unknown',
             'started_at_unix': record.started_at_unix, 'body_size_bucket': record.body_size_bucket,
             'downstream_headers_sent': record.downstream_headers_sent,
             'downstream_content_started': record.downstream_content_started,
@@ -348,13 +349,13 @@ def current_request_id():
     return record.request_id if record else None
 
 
-def note_json_result(payload, api_type):
+def note_json_result(payload, api_type, *, observe_model=True):
     """Observe explicit result semantics without changing the response contract."""
     record = CURRENT.get()
     if not record:
         return
     result = assess_json(payload, api_type)
-    if isinstance(payload, dict):
+    if observe_model and isinstance(payload, dict):
         note_reported_model(payload.get('model'))
     record.generation = result.outcome
     record.failure_reason = result.reason

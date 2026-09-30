@@ -1187,7 +1187,7 @@ class _SSEObservation:
         if data and (name in EVENT_NAMES or self.api_type == 'chat' and isinstance(data.get('choices'), list)):
             observe_event()
             if self.api_type == 'responses':
-                self.frame_has_content = kind in ('response.output_text.delta', 'response.function_call_arguments.delta') and isinstance(data.get('delta'), str) and bool(data['delta'])
+                self.frame_has_content = kind in ('response.output_text.delta', 'response.function_call_arguments.delta', 'response.refusal.delta') and isinstance(data.get('delta'), str) and bool(data['delta'])
             elif self.api_type == 'messages':
                 delta = data.get('delta')
                 self.frame_has_content = kind == 'content_block_delta' and isinstance(delta, dict) and any(
@@ -1197,6 +1197,7 @@ class _SSEObservation:
                 self.frame_has_content = isinstance(choices, list) and any(
                     isinstance(choice, dict) and isinstance(choice.get('delta'), dict) and (
                         isinstance(choice['delta'].get('content'), str) and bool(choice['delta']['content'])
+                        or isinstance(choice['delta'].get('refusal'), str) and bool(choice['delta']['refusal'])
                         or isinstance(choice['delta'].get('tool_calls'), list) and bool(choice['delta']['tool_calls']))
                     for choice in choices)
         if name:
@@ -7117,6 +7118,11 @@ def _responses_json_to_chat_completion(response_json: dict, model: str) -> dict:
     else:
         message = {"role": "assistant", "content": _responses_text(response_json)}
         finish_reason = "stop"
+    refusals = [part['refusal'] for item in response_json.get('output', []) if isinstance(item, dict)
+                for part in (item.get('content') if isinstance(item.get('content'), list) else [])
+                if isinstance(part, dict) and part.get('type') == 'refusal' and isinstance(part.get('refusal'), str)]
+    if refusals:
+        message['refusal'] = ''.join(refusals)
     if response_json.get('status') == 'incomplete':
         details = response_json.get('incomplete_details')
         reason = details.get('reason') if isinstance(details, dict) else None
@@ -7193,6 +7199,11 @@ async def _chat_completion_sse_from_payload(chat_payload: dict, *, include_usage
             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode()
         finish_reason = "stop"
 
+    if message.get('refusal'):
+        refusal_chunk = {'id': chat_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model,
+                         'choices': [{'index': 0, 'delta': {'refusal': message['refusal']}, 'finish_reason': None}]}
+        note_content_offered(True)
+        yield ('data: ' + json.dumps(refusal_chunk, ensure_ascii=False) + '\n\n').encode()
     finish_reason = choice.get('finish_reason') or finish_reason
     final_chunk = {
         "id": chat_id,
@@ -7244,7 +7255,8 @@ async def _route_chat_via_responses(body: dict, stream: bool, request_id: Option
         raise HTTPException(status_code=502, detail={"error": {"message": f"Responses adapter failed to parse upstream JSON: {e}"}}) from e
 
     chat_payload = _responses_json_to_chat_completion(response_json, str(model))
-    note_json_result(chat_payload, 'chat')
+    note_reported_model(response_json.get('model'))
+    note_json_result(chat_payload, 'chat', observe_model=False)
     if stream:
         note_parameter_transforms({'stream.buffered'})
         return StreamingResponse(
