@@ -15,4 +15,4 @@ Author: Zeno Ren
 - [每次写入前检查失败](source-write-dry-run-red.txt)
 - [最终目标回归](source-readback-final-green.txt)
 
-应用运行模块未改变；此前已验证的应用镜像仍以其独立 runtime manifest 和 registry digest 为准。本报告仅覆盖发布工具变更及验证，不能替代具体 AKS 发布的备份、独立复核、双协调器就绪、业务和账本验收。独立 QA、协调器镜像及 GitHub 检查结果在完成后补充。
+应用运行模块未改变；此前已验证的应用镜像仍以其独立 runtime manifest 和 registry digest 为准。本报告仅覆盖发布工具变更及验证，不能替代具体 AKS 发布的备份、独立复核、双协调器就绪、业务和账本验收。独立 QA 在 11746b3 上通过（27 passed、29 subtests）；最终协调器镜像内 35 项测试通过，所有发布工具源文件与该提交匹配。主机完整回归为 730 passed、6 skipped、711 subtests；6 个 skip 为显式 opt-in 的隔离 MySQL 测试，应用存储代码未在本补丁改变。原始输出见 [主机回归](host-full.txt)、[协调器镜像回归](controller-image-tests.txt) 和 [结构化回执](validation.json)。GitHub 状态以本补丁 PR 的实时 Checks 与合并记录为准。
