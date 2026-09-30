@@ -1,0 +1,25 @@
+{
+  "log_first_timestamp": "2026-09-30T13:04:07.887434238Z",
+  "received_bytes": 3671627,
+  "periodic_flush_records": [
+    {
+      "timestamp": "2026-09-30T13:19:48.570547742Z",
+      "kind": "lb_legacy_diagnostic",
+      "source": "_periodic_flush",
+      "source_line": 167
+    },
+    {
+      "timestamp": "2026-09-30T14:00:59.376538190Z",
+      "kind": "lb_legacy_diagnostic",
+      "source": "_periodic_flush",
+      "source_line": 167
+    },
+    {
+      "timestamp": "2026-09-30T14:34:10.272869151Z",
+      "kind": "lb_legacy_diagnostic",
+      "source": "_periodic_flush",
+      "source_line": 167
+    }
+  ],
+  "source_error_type_available": false
+}

@@ -72,7 +72,7 @@ OpenAI 兼容客户端使用 `http://127.0.0.1:8000/v1`，API Key 同样使用�
 
 按渠道查看主要指标、模型分布、端点状态和连接池观测；历史页展示持久化用量。支持深浅主题、暂停/手动刷新、明确的失败提示和需要鉴权确认的数据维护。
 
-![Dashboard 桌面预览，合成数据](pictures/dashboard.jpg)
+![Dashboard 桌面预览，合成数据](docs/reviews/2026-09-30-chart-usage-review/dashboard-light.jpg)
 
 *图片为本地合成数据预览，不是生产流量或性能证据。*
 

@@ -15,8 +15,9 @@
   --separator-border: #e8ebf0; --border-button-default: #dce1e9; --border-focus-ring: #4675e8;
   --accent: #315ecb; --accent-soft: #edf2ff; --ok: #147454; --ok-soft: #eaf6f0;
   --warn: #8a5c0c; --warn-soft: #fff5df; --err: #c23e43; --err-soft: #fff0f0;
-  --chart-1: #4675d5; --chart-2: #2a9a86; --chart-3: #9a7bd1; --chart-4: #d69a44; --chart-5: #ce6975;
-  --chart-6: #559cbe; --chart-7: #81964f; --chart-8: #bd7caa; --chart-9: #6977a6; --chart-10: #9d8d78;
+  --chart-1: #3b82f6; --chart-2: #14b8a6; --chart-3: #a78bfa; --chart-4: #f59e0b; --chart-5: #f472b6;
+  --chart-6: #06b6d4; --chart-7: #84cc16; --chart-8: #f97316; --chart-9: #6366f1; --chart-10: #ec4899;
+  --chart-latency: #0ea5e9;
   --tooltip-bg: #202735; --tooltip-text: #f8fafc; --tooltip-border: #3e485b;
   --chart-grid: #edf0f5; --chart-grid-strong: #e1e6ee; --chart-border: #ffffff;
   --shadow-dialog: 0 16px 48px #1c202818;
@@ -32,8 +33,9 @@
   --separator-border: #2a303a; --border-button-default: #3b4350; --border-focus-ring: #8bacff;
   --accent: #a3bcff; --accent-soft: #29374f; --ok: #70d7b2; --ok-soft: #1d3b32;
   --warn: #edc177; --warn-soft: #3d3321; --err: #f39ca0; --err-soft: #402a30;
-  --chart-1: #8bacf0; --chart-2: #63bba6; --chart-3: #bba0e9; --chart-4: #e1b16d; --chart-5: #e68b99;
-  --chart-6: #81bcd7; --chart-7: #a5b77f; --chart-8: #d6a0c5; --chart-9: #a0add7; --chart-10: #b9ab95;
+  --chart-1: #60a5fa; --chart-2: #2dd4bf; --chart-3: #c084fc; --chart-4: #fbbf24; --chart-5: #fb7185;
+  --chart-6: #22d3ee; --chart-7: #a3e635; --chart-8: #fb923c; --chart-9: #a5b4fc; --chart-10: #f0abfc;
+  --chart-latency: #38bdf8;
   --tooltip-bg: #eceef3; --tooltip-text: #202735; --tooltip-border: #bbc2d0;
   --chart-grid: #2a303a; --chart-grid-strong: #3b4350; --chart-border: #1a1d24;
   --shadow-dialog: 0 16px 48px #00000040;
@@ -298,7 +300,7 @@ function applyThemeToChart(c) {
     c.data.datasets[0].borderColor = chartBorder;
     c.data.datasets[0].backgroundColor = [...chartColors];
   }
-  if (c.config.type === 'bar' && c.data.datasets[0]) { c.data.datasets[0].backgroundColor = chartColors[0]; c.data.datasets[0].borderColor = chartColors[0]; }
+  if (c.config.type === 'bar' && c.data.datasets[0]) { c.data.datasets[0].backgroundColor = cssVar('--chart-latency'); c.data.datasets[0].borderColor = cssVar('--chart-latency'); }
   if (c.config.type === 'line') c.data.datasets.forEach((dataset, index) => { dataset.borderColor = chartColors[index]; dataset.backgroundColor = chartColors[index]; });
   c.update('none');
 }
@@ -382,7 +384,7 @@ function ensureBar(canvasId) {
   if (charts[canvasId]) return charts[canvasId];
   charts[canvasId] = new Chart(ctx, {
     type: 'bar',
-    data: { labels: [], datasets: [{ label: 'Avg Latency (ms)', data: [], backgroundColor: chartColors[0], borderColor: chartColors[0], borderWidth: 1, borderRadius: 6 }] },
+    data: { labels: [], datasets: [{ label: 'Avg Latency (ms)', data: [], backgroundColor: cssVar('--chart-latency'), borderColor: cssVar('--chart-latency'), borderWidth: 1, borderRadius: 6 }] },
     options: {
       indexAxis: 'y',
       responsive: true, maintainAspectRatio: false,

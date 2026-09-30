@@ -1,0 +1,11 @@
+{
+  "scope": "synthetic filter reproduction; not a diagnosis of the live database failure",
+  "result": {
+    "kind": "lb_legacy_diagnostic",
+    "source": "_periodic_flush",
+    "source_line": 167,
+    "error_type": null,
+    "exc_type": null
+  },
+  "filtered_message": "lb_legacy_diagnostic"
+}
