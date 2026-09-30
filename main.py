@@ -7,6 +7,8 @@ from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_
                                set_parameter_policy, note_parameter_drops,
                                log_context, note_request_context, note_exception,
                                note_local_terminal, note_failure, log_event, note_content_offered)
+from request_telemetry import note_parameter_transforms, require_image_trim_consent
+from chat_adapter import build_payload as build_chat_payload, messages_to_items, tools_to_items, content as chat_content
 from safe_diagnostics import (DiagnosticFilter, DiagnosticStreamHandler, default_handler,
                               render_metrics as diagnostic_metrics, EVENT_NAMES)
 from request_timing import (observed_phase, begin_stream as timing_begin_stream,
@@ -245,10 +247,14 @@ class LBSettings:
         from dataclasses import asdict
         from safe_diagnostics import QUEUE_CAPACITY
         from request_budget import STARTUP_OVERRIDES
+        from request_telemetry import IMAGE_TRIM_POLICY
+        from chat_adapter import MODE, PRESERVE_MODELS
         return {**asdict(self), 'diagnostic_queue_capacity': QUEUE_CAPACITY,
                 'startup_budget_overrides': [dict(provider=provider, api_type=api, model=model, seconds=seconds)
                                             for (provider, api, model), seconds in sorted(STARTUP_OVERRIDES.items())],
-                'metrics_default_schema': 'lb-metrics-v2', 'metrics_extended_schema': 'lb-metrics-v3'}
+                'metrics_default_schema': 'lb-metrics-v2', 'metrics_extended_schema': 'lb-metrics-v3',
+                'image_trim_policy': IMAGE_TRIM_POLICY, 'chat_adapter_contract': MODE,
+                'chat_adapter_preserve_models': sorted(PRESERVE_MODELS) if PRESERVE_MODELS is not None else None}
 
 
 # 单例，模块导入时创建。旧的散点式 os.getenv() 也继续存在（作为 backing store），
@@ -1668,9 +1674,12 @@ def check_image_admission(payload) -> None:
     visit(payload)
 
 
-def trim_excess_images(payload, max_count: int = _IMG_MAX_COUNT) -> int:
+def trim_excess_images(payload, max_count: Optional[int] = None) -> int:
     """Walk payload and remove oldest images beyond max_count, keeping the most recent ones.
     Returns number of images removed. Images are replaced with a text placeholder."""
+    max_count = _IMG_MAX_COUNT if max_count is None else max_count
+    if type(max_count) is not int or max_count < 1:
+        raise ValueError('Image retention count must be positive')
     # Collect all image node locations: (parent_list, index) in traversal order
     image_locations: list = []
 
@@ -1706,6 +1715,7 @@ def trim_excess_images(payload, max_count: int = _IMG_MAX_COUNT) -> int:
 
     if len(image_locations) <= max_count:
         return 0
+    require_image_trim_consent()
 
     # Remove oldest (earliest in traversal), keep the last max_count
     to_remove = image_locations[:-max_count]
@@ -6670,7 +6680,7 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
     # P3.2: 记录租户名到 request.state，供 metrics / structured log 打 label
     request.state.tenant = _lookup_tenant(actual_key) or "default"
     _CURRENT_TENANT.set(request.state.tenant)
-    set_parameter_policy(request.headers.get('x-lb-strict-parameters'))
+    set_parameter_policy(request.headers.get('x-lb-strict-parameters'), image_trim=request.headers.get('x-lb-image-trim'))
 
     # 读取原始请求体，先做粗暴上限保护避免 OOM，然后尝试压图
     body_bytes = await _read_bounded_request_body(request)
@@ -6719,6 +6729,7 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
                 raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
         stats = await compress_images_async(body)
         if stats["count"] > 0:
+            note_parameter_transforms({'images.compressed'})
             saved_kb = (stats["before"] - stats["after"]) / 1024
             logger.info(
                 f"[image-compress] /v1/messages: {stats['count']} imgs "
@@ -6934,63 +6945,11 @@ def _positive_int(value) -> Optional[int]:
 
 
 def _chat_content_for_responses(content):
-    if content is None:
-        return ""
-    if isinstance(content, (str, list)):
-        return content
-    try:
-        return json.dumps(content, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(content)
-
-
-def _chat_content_as_text(content) -> str:
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    try:
-        return json.dumps(content, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(content)
+    return chat_content(content)
 
 
 def _messages_to_responses_input(messages) -> list:
-    converted = []
-    for message in messages or []:
-        if not isinstance(message, dict):
-            continue
-        role = str(message.get("role") or "user")
-        content = message.get("content", "")
-
-        if role == "tool":
-            tool_call_id = str(message.get("tool_call_id") or "")
-            prefix = "Tool result"
-            if tool_call_id:
-                prefix = f"{prefix} for {tool_call_id}"
-            converted.append({"role": "user", "content": f"{prefix}: {_chat_content_as_text(content)}"})
-            continue
-
-        if role == "assistant" and message.get("tool_calls"):
-            names = []
-            for tool_call in message.get("tool_calls") or []:
-                if not isinstance(tool_call, dict):
-                    continue
-                fn = tool_call.get("function") or {}
-                name = fn.get("name") if isinstance(fn, dict) else None
-                if name:
-                    names.append(str(name))
-            if names:
-                converted.append({"role": "assistant", "content": "Requested tool call: " + ", ".join(names)})
-                continue
-
-        if role not in ("system", "user", "assistant"):
-            role = "user"
-        converted.append({"role": role, "content": _chat_content_for_responses(content)})
-
-    if not converted:
-        converted.append({"role": "user", "content": "Please complete the task as requested."})
-    return converted
+    return messages_to_items(messages)
 
 
 def _has_tool_result(messages) -> bool:
@@ -6998,23 +6957,7 @@ def _has_tool_result(messages) -> bool:
 
 
 def _tools_to_responses_tools(tools) -> Optional[list]:
-    converted = []
-    for tool in tools or []:
-        if not isinstance(tool, dict) or tool.get("type") != "function":
-            continue
-        fn = tool.get("function") or {}
-        if not isinstance(fn, dict):
-            continue
-        item = {
-            "type": "function",
-            "name": str(fn.get("name") or ""),
-            "description": str(fn.get("description") or ""),
-            "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
-        }
-        if "strict" in fn:
-            item["strict"] = fn["strict"]
-        converted.append(item)
-    return converted or None
+    return tools_to_items(tools)
 
 
 def _responses_adapter_removed_sampling_fields(chat_body: dict) -> list:
@@ -7035,33 +6978,7 @@ def _strip_unsupported_responses_sampling_fields(body: dict) -> list:
 
 
 def _build_responses_payload_from_chat(chat_body: dict) -> dict:
-    messages = chat_body.get("messages") or []
-    payload = {
-        "model": chat_body.get("model", "unknown"),
-        "input": _messages_to_responses_input(messages),
-        "stream": False,
-    }
-
-    token_limit = _positive_int(chat_body.get("max_tokens"))
-    if token_limit is None:
-        token_limit = _positive_int(chat_body.get("max_completion_tokens"))
-    if token_limit is not None:
-        payload["max_output_tokens"] = token_limit
-
-    removed_sampling_fields = set(_responses_adapter_removed_sampling_fields(chat_body))
-    for field_name in ("temperature", "top_p"):
-        if field_name in removed_sampling_fields:
-            continue
-        if field_name in chat_body and chat_body[field_name] is not None:
-            payload[field_name] = chat_body[field_name]
-
-    tools = _tools_to_responses_tools(chat_body.get("tools"))
-    if tools and not _has_tool_result(messages):
-        payload["tools"] = tools
-        if "tool_choice" in chat_body:
-            payload["tool_choice"] = chat_body["tool_choice"]
-
-    return payload
+    return build_chat_payload(chat_body, removed_sampling=_responses_adapter_removed_sampling_fields(chat_body))
 
 
 def _responses_text(response_json: dict) -> str:
@@ -7084,13 +7001,18 @@ def _responses_tool_calls(response_json: dict) -> Optional[list]:
     for item in response_json.get("output") or []:
         if not isinstance(item, dict) or item.get("type") != "function_call":
             continue
-        call_id = str(item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:12]}")
+        call_id = item.get('call_id')
+        if (not isinstance(call_id, str) or not call_id or not isinstance(item.get('name'), str)
+                or not item['name'] or not isinstance(item.get('arguments'), str)):
+            note_failure('invalid_protocol', origin='local')
+            raise _SemanticResponseError({'error': {'code': 'invalid_upstream_response',
+                'message': 'The upstream tool call is missing its call ID, name or arguments.', 'retryable': False}})
         calls.append({
             "id": call_id,
             "type": "function",
             "function": {
-                "name": str(item.get("name") or ""),
-                "arguments": str(item.get("arguments") or "{}"),
+                "name": item['name'],
+                "arguments": item['arguments'],
             },
         })
     return calls or None
@@ -7119,11 +7041,22 @@ def _responses_usage_to_chat_usage(usage: Optional[dict]) -> Optional[dict]:
 def _responses_json_to_chat_completion(response_json: dict, model: str) -> dict:
     tool_calls = _responses_tool_calls(response_json)
     if tool_calls:
-        message = {"role": "assistant", "content": None, "tool_calls": tool_calls}
+        message = {"role": "assistant", "content": _responses_text(response_json) or None, "tool_calls": tool_calls}
         finish_reason = "tool_calls"
     else:
         message = {"role": "assistant", "content": _responses_text(response_json)}
         finish_reason = "stop"
+    if response_json.get('status') == 'incomplete':
+        details = response_json.get('incomplete_details')
+        reason = details.get('reason') if isinstance(details, dict) else None
+        if reason not in ('max_output_tokens', 'content_filter'):
+            raise _SemanticResponseError({'error': {'code': 'upstream_incomplete',
+                'message': 'The upstream response is incomplete and cannot be represented as a completed Chat response.',
+                'retryable': False}})
+        finish_reason = 'length' if reason == 'max_output_tokens' else 'content_filter'
+    if response_json.get('status') == 'failed' or response_json.get('error'):
+        raise _SemanticResponseError({'error': {'code': 'upstream_failed',
+            'message': 'The upstream response failed.', 'retryable': False}})
 
     payload = {
         "id": f"chatcmpl-lb-{uuid.uuid4().hex}",
@@ -7146,7 +7079,7 @@ def _should_adapt_chat_to_responses(model: str) -> bool:
     return (model or "").strip().lower() in OPENAI_CHAT_TO_RESPONSES_MODELS_LOWER
 
 
-async def _chat_completion_sse_from_payload(chat_payload: dict):
+async def _chat_completion_sse_from_payload(chat_payload: dict, *, include_usage=False):
     chat_id = chat_payload.get("id") or f"chatcmpl-lb-{uuid.uuid4().hex}"
     created = chat_payload.get("created") or int(time.time())
     model = chat_payload.get("model") or "unknown"
@@ -7154,7 +7087,12 @@ async def _chat_completion_sse_from_payload(chat_payload: dict):
     message = choice.get("message") or {}
 
     if message.get("tool_calls"):
-        delta = {"tool_calls": message["tool_calls"]}
+        if message.get('content'):
+            text_chunk = {'id': chat_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model,
+                          'choices': [{'index': 0, 'delta': {'content': message['content']}, 'finish_reason': None}]}
+            note_content_offered(True)
+            yield ('data: ' + json.dumps(text_chunk, ensure_ascii=False) + '\n\n').encode()
+        delta = {"tool_calls": [dict(call, index=index) for index, call in enumerate(message["tool_calls"])]}
         chunk = {
             "id": chat_id,
             "object": "chat.completion.chunk",
@@ -7162,6 +7100,7 @@ async def _chat_completion_sse_from_payload(chat_payload: dict):
             "model": model,
             "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
         }
+        note_content_offered(True)
         yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode()
         finish_reason = "tool_calls"
     else:
@@ -7179,9 +7118,11 @@ async def _chat_completion_sse_from_payload(chat_payload: dict):
                 "model": model,
                 "choices": [{"index": 0, "delta": {"content": part}, "finish_reason": None}],
             }
+            note_content_offered(bool(part))
             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode()
         finish_reason = "stop"
 
+    finish_reason = choice.get('finish_reason') or finish_reason
     final_chunk = {
         "id": chat_id,
         "object": "chat.completion.chunk",
@@ -7190,11 +7131,15 @@ async def _chat_completion_sse_from_payload(chat_payload: dict):
         "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
     }
     yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n".encode()
+    if include_usage and isinstance(chat_payload.get('usage'), dict):
+        yield ('data: ' + json.dumps({'id': chat_id, 'object': 'chat.completion.chunk',
+               'created': created, 'model': model, 'choices': [], 'usage': chat_payload['usage']}) + '\n\n').encode()
     yield b"data: [DONE]\n\n"
 
 
 async def _route_chat_via_responses(body: dict, stream: bool, request_id: Optional[str] = None,
                                     disconnect_checker=None):
+    note_parameter_drops(_responses_adapter_removed_sampling_fields(body))
     responses_body = _build_responses_payload_from_chat(body)
     model = responses_body.get("model", body.get("model", "unknown"))
     rid = request_id or "-"
@@ -7228,17 +7173,20 @@ async def _route_chat_via_responses(body: dict, stream: bool, request_id: Option
         raise HTTPException(status_code=502, detail={"error": {"message": f"Responses adapter failed to parse upstream JSON: {e}"}}) from e
 
     chat_payload = _responses_json_to_chat_completion(response_json, str(model))
+    note_json_result(chat_payload, 'chat')
     if stream:
+        note_parameter_transforms({'stream.buffered'})
         return StreamingResponse(
-            _chat_completion_sse_from_payload(chat_payload),
+            _chat_completion_sse_from_payload(chat_payload, include_usage=bool((body.get('stream_options') or {}).get('include_usage'))),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
+                "X-LB-Stream-Mode": "buffered-adapter",
             },
         )
-    return JSONResponse(content=chat_payload, status_code=response.status_code)
+    return JSONResponse(content=chat_payload, status_code=response.status_code, headers={'X-LB-Stream-Mode': 'buffered-adapter'})
 
 
 def _copilot_endpoint_diagnostics(model: str, api_type: Optional[str] = None) -> list:
@@ -7571,7 +7519,7 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
     request.state.tenant = _lookup_tenant(actual_key) or "default"  # P3.2
     _CURRENT_TENANT.set(request.state.tenant)
-    set_parameter_policy(request.headers.get('x-lb-strict-parameters'))
+    set_parameter_policy(request.headers.get('x-lb-strict-parameters'), image_trim=request.headers.get('x-lb-image-trim'))
 
     body_bytes = await _read_bounded_request_body(request)
     if len(body_bytes) > MAX_RAW_REQUEST_SIZE:
@@ -7611,6 +7559,7 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
                 raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
         stats = await compress_images_async(body)
         if stats["count"] > 0:
+            note_parameter_transforms({'images.compressed'})
             logger.info(
                 f"[image-compress] /v1/responses: {stats['count']} imgs "
                 f"{stats['before']/1024:.0f}KB -> {stats['after']/1024:.0f}KB"
@@ -7643,7 +7592,7 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
     request.state.tenant = _lookup_tenant(actual_key) or "default"  # P3.2
     _CURRENT_TENANT.set(request.state.tenant)
-    set_parameter_policy(request.headers.get('x-lb-strict-parameters'))
+    set_parameter_policy(request.headers.get('x-lb-strict-parameters'), image_trim=request.headers.get('x-lb-image-trim'))
 
     body_bytes = await _read_bounded_request_body(request)
     if len(body_bytes) > MAX_RAW_REQUEST_SIZE:
@@ -7683,12 +7632,14 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
                 raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
         stats = await compress_images_async(body)
         if stats["count"] > 0:
+            note_parameter_transforms({'images.compressed'})
             logger.info(
                 f"[image-compress] /v1/chat/completions: {stats['count']} imgs "
                 f"{stats['before']/1024:.0f}KB -> {stats['after']/1024:.0f}KB"
             )
     removed_token_fields = _drop_nonpositive_token_limits(body)
     if removed_token_fields:
+        note_parameter_drops(removed_token_fields)
         logger.info(f"[Chat] removed non-positive token fields: {', '.join(removed_token_fields)}")
     logger.info(f"[Chat] model={body.get('model')}, stream={stream}")
     disconnect_checker = _stream_disconnect_checker(request, stream)

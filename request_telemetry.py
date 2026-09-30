@@ -10,6 +10,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -31,7 +32,14 @@ BUCKETS = (.1,.5,1,2,5,10,30,60,120,300,600,1800)
 CURRENT = ContextVar('lb_request_lifecycle', default=None)
 PARAMETERS = ('context_management','output_config','output_config.effort','output_config.format',
               'output_config.other','tools.defer_loading','tools.input_examples','messages.tool_reference',
-              'cache_control.extras','thinking.budget_tokens','temperature','top_p','other')
+              'cache_control.extras','thinking.budget_tokens','temperature','top_p','other',
+              'response_format','reasoning_effort','tools','tools.strict','tool_choice','parallel_tool_calls',
+              'messages.tool_calls','messages.tool_results','messages.content','messages.role',
+              'max_tokens','max_completion_tokens','stream.buffered','stream_options','images.trimmed','images.compressed',
+              'adapter.unsupported')
+IMAGE_TRIM_POLICY = os.getenv('LB_IMAGE_TRIM_POLICY', 'reject')
+if IMAGE_TRIM_POLICY not in ('reject', 'allow'):
+    raise ValueError('LB_IMAGE_TRIM_POLICY must be reject or allow')
 
 
 def safe_id(value):
@@ -119,6 +127,8 @@ class RequestRecord:
     parameter_policy: str = 'compat'
     dropped_parameters: set = field(default_factory=set)
     rejected_parameters: set = field(default_factory=set)
+    transformed_parameters: set = field(default_factory=set)
+    image_trim_policy: str = field(default_factory=lambda: IMAGE_TRIM_POLICY)
     failure_reason: str = 'none'
     error_origin: str = 'none'
     requested_model: str = 'unknown'
@@ -192,7 +202,7 @@ def note_local_terminal(code):
     note_generation('failed')
 
 
-def set_parameter_policy(value):
+def set_parameter_policy(value, *, image_trim=None):
     record = CURRENT.get()
     normalized = (value or 'false').strip().lower()
     if normalized not in ('false','0','true','1'):
@@ -202,6 +212,45 @@ def set_parameter_policy(value):
             'message':'X-LB-Strict-Parameters must be true, false, 1 or 0.'}})
     if record:
         record.parameter_policy = 'strict' if normalized in ('true','1') else 'compat'
+        image_trim = IMAGE_TRIM_POLICY if image_trim is None else image_trim.strip().lower()
+        if image_trim not in ('reject', 'allow'):
+            raise HTTPException(status_code=400, detail={'error': {'code': 'invalid_image_trim_policy',
+                'message': 'X-LB-Image-Trim must be reject or allow.'}})
+        record.image_trim_policy = image_trim
+
+
+def note_parameter_transforms(fields):
+    record = CURRENT.get()
+    if record is not None and fields:
+        values = {value if value in PARAMETERS else 'other' for value in fields}
+        record.transformed_parameters.update(values)
+        log_event({'kind': 'lb_parameter_policy', 'action': 'transformed', 'parameters': sorted(values)})
+
+
+def reject_parameters(fields, *, status=400, code='parameter_not_forwarded'):
+    values = {value if value in PARAMETERS else 'other' for value in fields}
+    record = CURRENT.get()
+    if record is not None:
+        for value in values - record.rejected_parameters:
+            record.metrics.parameter_decisions[('rejected', value)] += 1
+        record.rejected_parameters.update(values)
+    note_failure('invalid_input', origin='local')
+    log_event({'kind': 'lb_parameter_policy', 'action': 'rejected', 'parameters': sorted(values)})
+    raise HTTPException(status_code=status, detail={'error': {'code': code,
+        'type': 'request_too_large' if status == 413 else 'invalid_request_error',
+        'message': 'The gateway cannot preserve the requested semantics on this route. Use the native API or adjust the named parameters.',
+        'parameters': sorted(values), 'lb_request_id': current_request_id(), 'retryable': False}})
+
+
+def require_image_trim_consent():
+    record = CURRENT.get()
+    if record is None:
+        return  # Explicit standalone transformation helper, outside serving.
+    if record.parameter_policy == 'strict':
+        reject_parameters({'images.trimmed'})
+    if record.image_trim_policy != 'allow':
+        reject_parameters({'images.trimmed'}, status=413, code='image_trim_requires_consent')
+    note_parameter_drops({'images.trimmed'})
 
 
 def note_parameter_drops(fields):
@@ -366,11 +415,15 @@ class RequestTelemetryMiddleware:
             if message['type']=='http.response.start':
                 status=message['status']
                 headers=[(k,v) for k,v in message.get('headers',[]) if k.lower() not in
-                         (b'x-lb-request-id',b'x-lb-parameter-policy',b'x-lb-dropped-parameters')]
+                         (b'x-lb-request-id',b'x-lb-parameter-policy',b'x-lb-dropped-parameters',
+                          b'x-lb-transformed-parameters',b'x-lb-image-trim')]
                 headers.extend([(b'x-lb-request-id',record.request_id.encode('ascii')),
-                                (b'x-lb-parameter-policy',record.parameter_policy.encode('ascii'))])
+                                (b'x-lb-parameter-policy',record.parameter_policy.encode('ascii')),
+                                (b'x-lb-image-trim',record.image_trim_policy.encode('ascii'))])
                 if record.dropped_parameters:
                     headers.append((b'x-lb-dropped-parameters',','.join(sorted(record.dropped_parameters)).encode('ascii')))
+                if record.transformed_parameters:
+                    headers.append((b'x-lb-transformed-parameters',','.join(sorted(record.transformed_parameters)).encode('ascii')))
                 message={**message,'headers':headers}
             try:
                 await send(message)
@@ -439,6 +492,7 @@ class RequestTelemetryMiddleware:
                     'admission_reason':scope.get('state',{}).get('lb_admission_reason'),
                     'parameter_policy':record.parameter_policy,'dropped_parameters':sorted(record.dropped_parameters),
                     'rejected_parameters':sorted(record.rejected_parameters),
+                    'transformed_parameters':sorted(record.transformed_parameters), 'image_trim_policy':record.image_trim_policy,
                     'outcome':outcome,'http_status':status,'generation_outcome':record.generation,
                     'failure_reason':record.failure_reason,
                     'error_origin':record.error_origin,
