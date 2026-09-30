@@ -1,0 +1,9 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_ DiagnosticSinkTests.test_default_descriptor_handles_partial_writes_and_counts_failures _
+tests/test_diagnostic_contract.py:226: in test_default_descriptor_handles_partial_writes_and_counts_failures
+    self.assertEqual(written, 'synthetic-汉\n'.encode())
+E   AssertionError: bytearray(b'') != b'synthetic-\xe6\xb1\x89\n'
+=========================== short test summary info ============================
+FAILED tests/test_diagnostic_contract.py::DiagnosticSinkTests::test_default_descriptor_handles_partial_writes_and_counts_failures
+1 failed, 16 deselected in 0.25s

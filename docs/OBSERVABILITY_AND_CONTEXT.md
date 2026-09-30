@@ -34,6 +34,8 @@ HTTP 200、发送返回、有效生成终态、用量落盘和客户端业务成
 
 默认 stdout/stderr 日志 sink 通过有界队列运行，容量由 `LB_DIAGNOSTIC_QUEUE_CAPACITY` 控制，默认 4096，范围 1～65536。队列满、sink 写入失败、事件编码失败和关闭后的丢弃可在 v3 指标中观察。sink 卡住不会让请求等待磁盘/网络 I/O；关闭只做有界等待，不承诺日志无丢失。第三方主动重配 logging handler 的行为不在默认出口保证内。
 
+`LOG_FORMAT=text` 的通用结构化事件在 `LEVEL:logger:` 后保留安全 JSON 字段，既有 Copilot request/stream summary 保留文本标记及安全键值；`LOG_FORMAT=json` 继续输出字段在外层的 JSON。两种模式都保留关联主键与结果。默认 stderr 使用直接文件描述符写入，避免真实日志管道背压让解释器退出等待 Python stdio 缓冲锁；短写和写入异常也有回归。
+
 JSON `ts` 使用 LogRecord 创建时间，避免把异步排队时间写成业务发生时间。`started_at_unix` 是入口时间，供按开始时段建立 cohort；持续时间使用 monotonic clock。
 
 服务不新增诊断文件或无限历史库。外部日志平台仍需配置访问权限、保留期和容量；队列不是持久审计账本。回退可以关闭额外观测或降低日志级别，不恢复原始正文日志。
@@ -119,6 +121,8 @@ DNS/TCP/TLS/pool 没有可靠独立 hook，保持 null。阶段可能嵌套，�
 
 每条记录精确匹配 provider/API/model，可进一步限定 endpoint alias；包含模型版本、输入/总窗口/输出限额、特性、来源、核验时间和失效时间。`operator_verified` 是管理员对渠道证据的声明，不是 LB 自动认证。过期、未知或未核验记录不会自动成为硬限制；不能拿 OpenAI 直连参数冒充 Copilot 渠道事实。
 
-`LB_CONTEXT_BUDGET_MODE=observe` 默认只输出安全观测。`off` 关闭附加预算观测。`enforce` 也**永远不按低置信度输入估算硬拒绝**，只会在有效已核验记录下检查明确输出上限和已知不支持的特性；检查在端点 lease、发送和流 headers 之前完成。不会摘要、删除历史、换账号或换模型。
+`LB_CONTEXT_BUDGET_MODE=observe` 默认只输出安全观测。`off` 关闭附加预算观测。`enforce` 也**永远不按低置信度输入估算硬拒绝**，只会在有效已核验记录下检查明确输出上限和已知不支持的特性。首次检查发生在端点 lease、发送和流 headers 之前；既有重试切换端点时，在新 lease 和 POST 之前重新检查。若此前已返回流 headers，拒绝会成为对应协议的不可重试错误终态，不向不兼容端点发第二次请求，也不把本地拒绝记作该端点故障。不会摘要、删除历史、换账号或换模型。
+
+特性检查包含 Responses `function_call_output.output` 数组中的图片，同时继续排除工具 schema/example 内的示意数据。Chat 入口不再通过整数强转把布尔值或小数输出上限当零删除；适配器会明确拒绝这些非法类型，保留原有合法整数及整数文本的兼容行为。
 
 `GET /admin/model-capabilities` 沿用管理接口的 LB 鉴权，显示目录来源和状态；标准 `/v1/models` 的 data/models 返回结构保持兼容。`/config/effective` 展示实际开关与目录 hash，并返回构建身份、文件匹配和完整 manifest 覆盖状态。

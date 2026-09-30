@@ -1,0 +1,145 @@
+..F....................... [ 70%]
+...........                                                   [100%]
+=================================== FAILURES ===================================
+_ CapabilityTests.test_function_result_images_are_features_but_schema_examples_are_not _
+tests/test_context_capabilities.py:32: in test_function_result_images_are_features_but_schema_examples_are_not
+    self.assertTrue(requested_features(payload)['images'])
+E   AssertionError: False is not true
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='databricks', api='messages', trigger='429') _
+tests/test_context_capabilities.py:202: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='databricks', api='messages', trigger='connect') _
+tests/test_context_capabilities.py:202: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='azure_openai', api='responses', trigger='429') _
+tests/test_context_capabilities.py:202: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='azure_openai', api='responses', trigger='connect') _
+tests/test_context_capabilities.py:202: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='azure_openai', api='chat', trigger='429') _
+tests/test_context_capabilities.py:202: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='azure_openai', api='chat', trigger='connect') _
+tests/test_context_capabilities.py:202: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='copilot', api='responses', trigger='429') _
+tests/test_context_capabilities.py:202: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='copilot', api='responses', trigger='connect') _
+tests/test_context_capabilities.py:202: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='copilot', api='responses', trigger='pool') _
+tests/test_context_capabilities.py:202: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='copilot', api='chat', trigger='429') _
+tests/test_context_capabilities.py:202: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='copilot', api='chat', trigger='connect') _
+tests/test_context_capabilities.py:202: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='copilot', api='chat', trigger='pool') _
+tests/test_context_capabilities.py:202: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ AdapterEntryTests.test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation (field='max_tokens', value=False) _
+tests/test_adapter_semantics.py:113: in test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation
+    self.assertEqual(response.status_code, 400)
+E   AssertionError: 200 != 400
+_ AdapterEntryTests.test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation (field='max_tokens', value=0.5) _
+tests/test_adapter_semantics.py:113: in test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation
+    self.assertEqual(response.status_code, 400)
+E   AssertionError: 200 != 400
+_ AdapterEntryTests.test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation (field='max_tokens', value=0.0) _
+tests/test_adapter_semantics.py:113: in test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation
+    self.assertEqual(response.status_code, 400)
+E   AssertionError: 200 != 400
+_ AdapterEntryTests.test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation (field='max_tokens', value=-0.5) _
+tests/test_adapter_semantics.py:113: in test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation
+    self.assertEqual(response.status_code, 400)
+E   AssertionError: 200 != 400
+_ AdapterEntryTests.test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation (field='max_completion_tokens', value=False) _
+tests/test_adapter_semantics.py:113: in test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation
+    self.assertEqual(response.status_code, 400)
+E   AssertionError: 200 != 400
+_ AdapterEntryTests.test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation (field='max_completion_tokens', value=0.5) _
+tests/test_adapter_semantics.py:113: in test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation
+    self.assertEqual(response.status_code, 400)
+E   AssertionError: 200 != 400
+_ AdapterEntryTests.test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation (field='max_completion_tokens', value=0.0) _
+tests/test_adapter_semantics.py:113: in test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation
+    self.assertEqual(response.status_code, 400)
+E   AssertionError: 200 != 400
+_ AdapterEntryTests.test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation (field='max_completion_tokens', value=-0.5) _
+tests/test_adapter_semantics.py:113: in test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation
+    self.assertEqual(response.status_code, 400)
+E   AssertionError: 200 != 400
+_ ExperimentEvidenceTests.test_unknown_or_different_evidence_scopes_cannot_qualify (baseline='synthetic', candidate='unknown') _
+tests/test_experiment_evidence.py:51: in test_unknown_or_different_evidence_scopes_cannot_qualify
+    self.assertEqual(result['status'], 'inconclusive')
+E   AssertionError: 'eligible_for_review' != 'inconclusive'
+E   - eligible_for_review
+E   + inconclusive
+_ ExperimentEvidenceTests.test_unknown_or_different_evidence_scopes_cannot_qualify (baseline='unknown', candidate='synthetic') _
+tests/test_experiment_evidence.py:51: in test_unknown_or_different_evidence_scopes_cannot_qualify
+    self.assertEqual(result['status'], 'inconclusive')
+E   AssertionError: 'eligible_for_review' != 'inconclusive'
+E   - eligible_for_review
+E   + inconclusive
+_ ExperimentEvidenceTests.test_unknown_or_different_evidence_scopes_cannot_qualify (baseline='unknown', candidate='unknown') _
+tests/test_experiment_evidence.py:51: in test_unknown_or_different_evidence_scopes_cannot_qualify
+    self.assertEqual(result['status'], 'inconclusive')
+E   AssertionError: 'eligible_for_review' != 'inconclusive'
+E   - eligible_for_review
+E   + inconclusive
+_ ExperimentEvidenceTests.test_unknown_or_different_evidence_scopes_cannot_qualify (baseline='synthetic', candidate='reported_production') _
+tests/test_experiment_evidence.py:51: in test_unknown_or_different_evidence_scopes_cannot_qualify
+    self.assertEqual(result['status'], 'inconclusive')
+E   AssertionError: 'eligible_for_review' != 'inconclusive'
+E   - eligible_for_review
+E   + inconclusive
+_ ExperimentEvidenceTests.test_unknown_or_different_evidence_scopes_cannot_qualify (baseline='reported_production', candidate='synthetic') _
+tests/test_experiment_evidence.py:51: in test_unknown_or_different_evidence_scopes_cannot_qualify
+    self.assertEqual(result['status'], 'inconclusive')
+E   AssertionError: 'eligible_for_review' != 'inconclusive'
+E   - eligible_for_review
+E   + inconclusive
+=========================== short test summary info ============================
+FAILED tests/test_context_capabilities.py::CapabilityTests::test_function_result_images_are_features_but_schema_examples_are_not
+SUBFAILED(provider='databricks', api='messages', trigger='429') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='databricks', api='messages', trigger='connect') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='azure_openai', api='responses', trigger='429') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='azure_openai', api='responses', trigger='connect') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='azure_openai', api='chat', trigger='429') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='azure_openai', api='chat', trigger='connect') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='copilot', api='responses', trigger='429') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='copilot', api='responses', trigger='connect') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='copilot', api='responses', trigger='pool') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='copilot', api='chat', trigger='429') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='copilot', api='chat', trigger='connect') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='copilot', api='chat', trigger='pool') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(field='max_tokens', value=False) tests/test_adapter_semantics.py::AdapterEntryTests::test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation
+SUBFAILED(field='max_tokens', value=0.5) tests/test_adapter_semantics.py::AdapterEntryTests::test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation
+SUBFAILED(field='max_tokens', value=0.0) tests/test_adapter_semantics.py::AdapterEntryTests::test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation
+SUBFAILED(field='max_tokens', value=-0.5) tests/test_adapter_semantics.py::AdapterEntryTests::test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation
+SUBFAILED(field='max_completion_tokens', value=False) tests/test_adapter_semantics.py::AdapterEntryTests::test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation
+SUBFAILED(field='max_completion_tokens', value=0.5) tests/test_adapter_semantics.py::AdapterEntryTests::test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation
+SUBFAILED(field='max_completion_tokens', value=0.0) tests/test_adapter_semantics.py::AdapterEntryTests::test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation
+SUBFAILED(field='max_completion_tokens', value=-0.5) tests/test_adapter_semantics.py::AdapterEntryTests::test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation
+SUBFAILED(baseline='synthetic', candidate='unknown') tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_unknown_or_different_evidence_scopes_cannot_qualify
+SUBFAILED(baseline='unknown', candidate='synthetic') tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_unknown_or_different_evidence_scopes_cannot_qualify
+SUBFAILED(baseline='unknown', candidate='unknown') tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_unknown_or_different_evidence_scopes_cannot_qualify
+SUBFAILED(baseline='synthetic', candidate='reported_production') tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_unknown_or_different_evidence_scopes_cannot_qualify
+SUBFAILED(baseline='reported_production', candidate='synthetic') tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_unknown_or_different_evidence_scopes_cannot_qualify
+26 failed, 36 passed, 32 subtests passed in 1.28s

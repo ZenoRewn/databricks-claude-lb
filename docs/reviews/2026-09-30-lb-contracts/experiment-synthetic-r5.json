@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "author": "Zeno Ren",
+  "status": "eligible_for_review",
+  "production_acceptance": false,
+  "reported_scopes": [
+    "synthetic"
+  ],
+  "reasons": [],
+  "stop_reasons": [],
+  "resource_comparison": {
+    "rss_bytes_ratio": 1.0,
+    "admission_active_ratio": 1.0
+  },
+  "cohorts": [
+    {
+      "cohort": {
+        "provider": "copilot",
+        "requested_model": "synthetic-model",
+        "forwarded_model": "synthetic-model",
+        "api_type": "responses",
+        "stream": true,
+        "body_size_bucket": "small",
+        "source_tenant": "synthetic",
+        "hour": 9
+      },
+      "baseline": {
+        "requests": 200,
+        "outcomes": {
+          "cancelled": 0,
+          "client_disconnected": 0,
+          "completed": 100,
+          "deadline_exceeded": 0,
+          "failed": 100,
+          "http_error": 0,
+          "incomplete": 0,
+          "internal_error": 0,
+          "overloaded": 0,
+          "rejected": 0,
+          "unknown": 0
+        },
+        "completion_rate": 0.5,
+        "completion_interval_95": [
+          0.43136085960389187,
+          0.5686391403961082
+        ],
+        "disconnect_rate": 0.0,
+        "send_amplification": 1.0,
+        "p95_seconds": 180
+      },
+      "candidate": {
+        "requests": 200,
+        "outcomes": {
+          "cancelled": 0,
+          "client_disconnected": 0,
+          "completed": 200,
+          "deadline_exceeded": 0,
+          "failed": 0,
+          "http_error": 0,
+          "incomplete": 0,
+          "internal_error": 0,
+          "overloaded": 0,
+          "rejected": 0,
+          "unknown": 0
+        },
+        "completion_rate": 1.0,
+        "completion_interval_95": [
+          0.9811546736227335,
+          1
+        ],
+        "disconnect_rate": 0.0,
+        "send_amplification": 1.0,
+        "p95_seconds": 1
+      },
+      "status": "eligible_for_review"
+    }
+  ],
+  "statistical_limit": "Wilson intervals describe samples; traffic is not proven independent or randomized.",
+  "next_step": "Human and client/protocol review; this tool never changes settings or calls a model.",
+  "input_sha256": {
+    "baseline": "9c649f12169e9fee8b819c8bfeda38a03451483f7e31d7c5efaa64cd80a5a34b",
+    "candidate": "252687badb00a1b22df33cabe54518a8b7a9aa0f351cc33fc306f35b90d316d1",
+    "plan": "391fad46df7ea1ae0d310275f2944c542ce04f645ae218934a47330141f411ee"
+  }
+}

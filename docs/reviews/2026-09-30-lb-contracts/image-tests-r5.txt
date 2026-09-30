@@ -1,0 +1,22 @@
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+{"runtime_dependency_changes": {}, "identity": {"available": true, "source_revision": "1d75685655f672177374cf3327cd16c4bcffe2db", "source_tree_dirty": false, "out_of_tree": false, "source_attested": true, "source_manifest_sha256": "87b7a17d60a24d1aa78648d343bbbbb6462cb8f41aed4138be144d119fdb7ffd", "runtime_files_match": true, "manifest_covers_current_runtime": true}}
+ssssss.................................................................................................................................... [ 19%]
+........................................................................ [ 29%]
+.................................................................................................................. [ 44%]
+..s........................................... [ 51%]
+.............................. [ 55%]
+........................................................................ [ 65%]
+.................................. [ 69%]
+................................................... [ 76%]
+.......................... [ 80%]
+...................................... [ 85%]
+.......................................................................................................                    [100%]
+=========================== short test summary info ============================
+SKIPPED [1] tests/integration/test_mysql_usage.py:122: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:96: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:113: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:88: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:131: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:104: requires disposable loopback MySQL test server
+SKIPPED [1] tests/test_databricks_payload_compat.py:574: opentelemetry tracing deps incomplete: missing opentelemetry.trace
+717 passed, 7 skipped, 697 subtests passed in 46.40s

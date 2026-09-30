@@ -1,0 +1,36 @@
+............F.                                                       [100%]
+=================================== FAILURES ===================================
+_ DiagnosticLifecycleTests.test_adapter_attempt_uses_upstream_api_without_changing_ingress_api (failure=False) _
+tests/test_diagnostic_contract.py:57: in test_adapter_attempt_uses_upstream_api_without_changing_ingress_api
+    self.assertEqual({r.api_type for r in attempts}, {'responses'})
+E   AssertionError: Items in the first set but not the second:
+E   'chat'
+_ DiagnosticLifecycleTests.test_adapter_attempt_uses_upstream_api_without_changing_ingress_api (failure=True) _
+tests/test_diagnostic_contract.py:57: in test_adapter_attempt_uses_upstream_api_without_changing_ingress_api
+    self.assertEqual({r.api_type for r in attempts}, {'responses'})
+E   AssertionError: Items in the first set but not the second:
+E   'chat'
+_ DiagnosticSinkTests.test_default_sink_retains_safe_fields_in_text_and_json (format='text') _
+tests/test_diagnostic_contract.py:228: in test_default_sink_retains_safe_fields_in_text_and_json
+    self.assertIn('synthetic-qa-request', event)
+E   AssertionError: 'synthetic-qa-request' not found in 'INFO:main:lb_request_end'
+_ DiagnosticSinkTests.test_interpreter_shutdown_does_not_wait_for_stuck_default_sink _
+tests/test_diagnostic_contract.py:256: in test_interpreter_shutdown_does_not_wait_for_stuck_default_sink
+    result = subprocess.run([sys.executable, '-c', script], capture_output=True,
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py:557: in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py:1221: in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py:2154: in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py:1268: in _check_timeout
+    raise TimeoutExpired(
+E   subprocess.TimeoutExpired: Command '['/usr/local/bin/python3', '-c', "\nimport logging\nimport threading\nfrom safe_diagnostics import DiagnosticStreamHandler, default_handler\nentered = threading.Event()\nclass StuckStream:\n    def write(self, text):\n        entered.set()\n        threading.Event().wait()\n    def flush(self):\n        pass\nhandler = default_handler(DiagnosticStreamHandler(StuckStream()))\nlogging.basicConfig(level=logging.INFO, handlers=[handler], force=True)\nlogging.info('synthetic')\nif not entered.wait(1):\n    raise RuntimeError('Synthetic sink did not receive event')\nhandler.close()\nprint('bounded close returned', flush=True)\n"]' timed out after 3 seconds
+=========================== short test summary info ============================
+SUBFAILED(failure=False) tests/test_diagnostic_contract.py::DiagnosticLifecycleTests::test_adapter_attempt_uses_upstream_api_without_changing_ingress_api
+SUBFAILED(failure=True) tests/test_diagnostic_contract.py::DiagnosticLifecycleTests::test_adapter_attempt_uses_upstream_api_without_changing_ingress_api
+SUBFAILED(format='text') tests/test_diagnostic_contract.py::DiagnosticSinkTests::test_default_sink_retains_safe_fields_in_text_and_json
+FAILED tests/test_diagnostic_contract.py::DiagnosticSinkTests::test_interpreter_shutdown_does_not_wait_for_stuck_default_sink
+4 failed, 13 passed, 1 subtests passed in 4.28s

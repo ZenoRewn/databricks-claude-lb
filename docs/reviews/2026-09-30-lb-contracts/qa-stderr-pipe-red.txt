@@ -1,0 +1,15 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_ DiagnosticSinkTests.test_interpreter_exits_when_real_stderr_pipe_is_not_drained _
+tests/test_diagnostic_contract.py:231: in test_interpreter_exits_when_real_stderr_pipe_is_not_drained
+    self.assertEqual(process.wait(timeout=3), 0)
+                     ^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py:1279: in wait
+    return self._wait(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py:2076: in _wait
+    raise TimeoutExpired(self.args, timeout)
+E   subprocess.TimeoutExpired: Command '['/usr/local/bin/python3', '-c', "\nimport logging\nimport time\nfrom safe_diagnostics import DiagnosticStreamHandler, default_handler\nhandler = default_handler(DiagnosticStreamHandler())\nlogging.basicConfig(level=logging.INFO, handlers=[handler], force=True)\nfor _ in range(128):\n    logging.info('synthetic-' + 'x' * 16000)\ntime.sleep(.2)\nhandler.close()\nprint('bounded close returned', flush=True)\n"]' timed out after 3 seconds
+=========================== short test summary info ============================
+FAILED tests/test_diagnostic_contract.py::DiagnosticSinkTests::test_interpreter_exits_when_real_stderr_pipe_is_not_drained
+1 failed, 15 deselected in 3.76s

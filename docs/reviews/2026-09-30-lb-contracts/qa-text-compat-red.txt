@@ -1,0 +1,14 @@
+.                                                                      [100%]
+=================================== FAILURES ===================================
+_ DiagnosticSinkTests.test_text_sink_preserves_legacy_copilot_summary_markers_and_safe_fields (kind='copilot_stream_end') _
+tests/test_diagnostic_contract.py:216: in test_text_sink_preserves_legacy_copilot_summary_markers_and_safe_fields
+    self.assertIn('[Copilot ' + label + ']', rendered)
+E   AssertionError: '[Copilot stream_end]' not found in 'INFO:main:{"outcome":"failed","kind":"copilot_stream_end","lb_request_id":"synthetic-qa-request","schema_version":1}'
+_ DiagnosticSinkTests.test_text_sink_preserves_legacy_copilot_summary_markers_and_safe_fields (kind='copilot_request_end') _
+tests/test_diagnostic_contract.py:216: in test_text_sink_preserves_legacy_copilot_summary_markers_and_safe_fields
+    self.assertIn('[Copilot ' + label + ']', rendered)
+E   AssertionError: '[Copilot request_end]' not found in 'INFO:main:{"outcome":"failed","kind":"copilot_request_end","lb_request_id":"synthetic-qa-request","schema_version":1}'
+=========================== short test summary info ============================
+SUBFAILED(kind='copilot_stream_end') tests/test_diagnostic_contract.py::DiagnosticSinkTests::test_text_sink_preserves_legacy_copilot_summary_markers_and_safe_fields
+SUBFAILED(kind='copilot_request_end') tests/test_diagnostic_contract.py::DiagnosticSinkTests::test_text_sink_preserves_legacy_copilot_summary_markers_and_safe_fields
+2 failed, 1 passed, 14 deselected in 0.26s

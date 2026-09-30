@@ -20,6 +20,8 @@ python -m operations.experiment \
 
 数据需包含完整/部分采集状态、pending、cohort_started、诊断丢弃数、镜像 digest、时间窗、资源峰值、安全事件，以及唯一请求的 outcome、开始时间、时长和发送数。`cohort_started = 已结束请求行数 + pending`；重复 ID 或分母不符拒绝分析。输入的生产 scope 和覆盖声明是采集方证据，不由工具自行认证。
 
+两组 `reported_scope` 必须一致且明确。任一组为 `unknown`，或 synthetic 与 reported_production 混合比较，均输出 `inconclusive` 并列出来源原因；有已报告安全事件时仍优先输出 `stop`。不能把合成数据与生产数据拼成改善证据。
+
 | 结果 | 含义 |
 |---|---|
 | `inconclusive` | 覆盖、来源、资源、安全证据、样本量、闭合请求或匹配 cohort 不足；缺失不当 0 |
