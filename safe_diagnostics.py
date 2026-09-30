@@ -1,11 +1,13 @@
 """Bounded, allowlisted diagnostics; never a request/response archive. Author: Zeno Ren."""
 from collections import Counter
 import copy
+import json
 import logging
 import math
 import os
 import queue
 import re
+import sys
 import threading
 import time
 
@@ -205,11 +207,38 @@ class BoundedLogHandler(logging.Handler):
         super().close()
 
 
-class DiagnosticStreamHandler(logging.StreamHandler):
-    def handleError(self, record):
-        # StreamHandler normally swallows write failures. Let the worker count it
-        # without recursively logging the record or its exception to stderr.
-        raise OSError('Diagnostic sink failed')
+class DiagnosticTextFormatter(logging.Formatter):
+    """Retain the same safe fields as JSON mode in the default text output."""
+    def format(self, record):
+        if getattr(record, 'kind', None):
+            fields = safe_fields(record.__dict__)
+            if fields.get('kind') in ('copilot_stream_end', 'copilot_request_end'):
+                label = 'stream_end' if fields['kind'] == 'copilot_stream_end' else 'request_end'
+                payload = '[Copilot ' + label + '] ' + ' '.join(f'{k}={v}' for k, v in fields.items() if k != 'kind')
+            else:
+                payload = json.dumps(fields, ensure_ascii=False, separators=(',', ':'))
+            return f'{record.levelname}:{record.name}:{payload}'
+        return super().format(record)
+
+
+class DiagnosticStreamHandler:
+    """Single-consumer stream sink owned by the bounded handler's daemon.
+
+    This is deliberately not a logging.Handler: registering a second handler
+    would let logging.shutdown acquire its blocked I/O lock or flush it again
+    after the queue owner's bounded close returned. Only the worker writes and
+    flushes this sink; failures propagate to its observable drop counter.
+    """
+    def __init__(self, stream=None):
+        self.stream = sys.stderr if stream is None else stream
+        self.formatter = logging.Formatter()
+
+    def setFormatter(self, formatter):
+        self.formatter = formatter
+
+    def handle(self, record):
+        self.stream.write(self.formatter.format(record) + '\n')
+        self.stream.flush()
 
 
 def default_handler(sink):

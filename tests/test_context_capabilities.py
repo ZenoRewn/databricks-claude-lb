@@ -5,7 +5,7 @@ import json
 from types import SimpleNamespace
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import HTTPException
 import httpx
@@ -25,6 +25,20 @@ def catalog_data(**overrides):
 
 
 class CapabilityTests(unittest.TestCase):
+    def test_function_result_images_are_features_but_schema_examples_are_not(self):
+        from model_capabilities import evaluate_budget, requested_features
+        image = {'type': 'input_image', 'image_url': 'https://fixture.invalid/synthetic.png'}
+        payload = {'input': [{'type': 'function_call_output', 'call_id': 'call_synthetic', 'output': [image]}]}
+        self.assertTrue(requested_features(payload)['images'])
+        catalog = self.make(features={'tools': True, 'images': False, 'structured_output': False, 'opaque_state': False})
+        with self.assertRaises(HTTPException) as error:
+            evaluate_budget(catalog, 'copilot', 'responses', 'synthetic-model', payload, mode='enforce')
+        self.assertEqual(error.exception.detail['error']['unsupported_features'], ['images'])
+        schema = {'input': 'synthetic', 'tools': [{'type': 'function', 'name': 'lookup', 'parameters': {
+            'type': 'object', 'examples': payload['input']}}]}
+        self.assertFalse(requested_features(schema)['images'])
+        evaluate_budget(catalog, 'copilot', 'responses', 'synthetic-model', schema, mode='enforce')
+
     def test_enforcement_does_not_mistake_plain_text_or_schema_examples_for_features(self):
         from model_capabilities import evaluate_budget
         catalog = self.make(features={'tools': True, 'images': False, 'structured_output': False, 'opaque_state': False})
@@ -106,6 +120,108 @@ class CapabilityTests(unittest.TestCase):
 
 
 class CapabilityEntryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stream_retry_checks_new_endpoint_before_lease_or_send(self):
+        import model_capabilities
+        import request_telemetry as telemetry
+        routes = [('databricks', 'messages'), ('azure_openai', 'responses'), ('azure_openai', 'chat'),
+                  ('copilot', 'responses'), ('copilot', 'chat')]
+        for provider, api in routes:
+            for trigger in (('429', 'connect', 'pool') if provider == 'copilot' else ('429', 'connect')):
+                with self.subTest(provider=provider, api=api, trigger=trigger):
+                    model = 'databricks-synthetic-model' if provider == 'databricks' else 'synthetic-model'
+                    endpoints = []
+                    for suffix in ('a', 'b'):
+                        name, url = 'synthetic-' + suffix, 'https://synthetic-' + suffix + '.invalid'
+                        if provider == 'databricks':
+                            ep = main.WorkspaceEndpoint(name, url, 'synthetic', models=[model])
+                        elif provider == 'azure_openai':
+                            ep = main.AzureOpenAIEndpoint(name, url, 'synthetic', deployments=[model])
+                        else:
+                            ep = main.CopilotEndpoint(name, 'synthetic', models=[model])
+                            ep.session_base_url = url
+                        endpoints.append(ep)
+                    proxy_type = {'databricks': main.ClaudeProxy, 'azure_openai': main.AzureOpenAIProxy,
+                                  'copilot': main.CopilotProxy}[provider]
+                    proxy = proxy_type(main.LoadBalancer(endpoints), 'synthetic')
+                    if provider == 'databricks':
+                        proxy.load_balancer.select_endpoint = Mock(side_effect=endpoints)
+                    elif provider == 'azure_openai':
+                        proxy.load_balancer.select_endpoint_for_model = Mock(side_effect=endpoints)
+                    else:
+                        proxy._select_endpoint = Mock(side_effect=endpoints)
+                        proxy._build_headers = AsyncMock(return_value={})
+                        proxy._probe_upstream_connect = AsyncMock(return_value={'ok': True})
+                        proxy._describe_pool_timeout = AsyncMock(return_value=('synthetic', 'synthetic', {}))
+                    entries = []
+                    for ep, limit in zip(endpoints, (100, 5)):
+                        entries.extend(catalog_data(provider=provider, api_type=api, model=model, endpoint_alias=ep.name,
+                            limits={'input_tokens': 1000, 'context_tokens': 1200, 'output_tokens': limit})['entries'])
+                    catalog = model_capabilities.CapabilityCatalog({'schema_version': 1, 'entries': entries},
+                        now=lambda: datetime(2026, 9, 30, tzinfo=timezone.utc))
+                    calls, responses, wire = [], [], []
+                    terminal = {
+                        'messages': b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+                        'responses': b'data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n',
+                        'chat': b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'}[api]
+
+                    def upstream(request):
+                        calls.append(request)
+                        if len(calls) == 1:
+                            if trigger == 'connect':
+                                raise httpx.ConnectError('synthetic', request=request)
+                            if trigger == 'pool':
+                                raise httpx.PoolTimeout('synthetic', request=request)
+                            response = httpx.Response(429, json={'error': {'code': 'rate_limit_exceeded'}})
+                        else:
+                            response = httpx.Response(200, content=terminal, headers={'content-type': 'text/event-stream'})
+                        responses.append(response)
+                        return response
+
+                    await proxy.client.aclose()
+                    proxy.client = httpx.AsyncClient(transport=httpx.MockTransport(upstream), trust_env=False)
+                    payload = {'model': model, 'messages': [], 'input': 'synthetic', 'stream': True,
+                               'max_tokens' if api in ('messages', 'chat') else 'max_output_tokens': 10}
+
+                    async def app(scope, receive, send):
+                        response = (await proxy.proxy_request(payload, stream=True) if provider == 'databricks'
+                                    else await proxy._proxy(payload, stream=True, api_type=api))
+                        await send({'type': 'http.response.start', 'status': response.status_code, 'headers': []})
+                        async for part in response.body_iterator:
+                            wire.append(part)
+                            await send({'type': 'http.response.body', 'body': part, 'more_body': True})
+                        await send({'type': 'http.response.body', 'body': b''})
+
+                    try:
+                        with patch.object(model_capabilities, 'CATALOG', catalog), \
+                                patch.object(model_capabilities, 'MODE', 'enforce'), \
+                                patch.object(main, 'usage_store', None), \
+                                patch.object(main.asyncio, 'sleep', AsyncMock()), self.assertLogs('main', level='INFO') as logs:
+                            await telemetry.RequestTelemetryMiddleware(app, telemetry.RequestTelemetry())(
+                                {'type': 'http', 'method': 'POST', 'path': {'messages': '/v1/messages',
+                                    'responses': '/v1/responses', 'chat': '/v1/chat/completions'}[api], 'headers': []},
+                                AsyncMock(), AsyncMock())
+                        self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+                        self.assertEqual(endpoints[1].total_requests, 0, 'Local capability rejection must precede its lease')
+                        self.assertEqual(endpoints[1].total_errors, 0)
+                        self.assertEqual([ep.active_requests for ep in endpoints], [0, 0])
+                        self.assertTrue(all(response.is_closed for response in responses))
+                        events = [json.loads(line[5:]) for line in b''.join(wire).decode().splitlines()
+                                  if line.startswith('data:') and line[5:].strip() != '[DONE]']
+                        self.assertEqual(len(events), 1)
+                        error = (events[0]['response'] if api == 'responses' else events[0])['error']
+                        self.assertEqual(error['code'], 'output_budget_exceeded')
+                        self.assertEqual(error['output_limit'], 5)
+                        self.assertFalse(error['retryable'])
+                        ends = [r for r in logs.records if getattr(r, 'kind', None) == 'lb_request_end']
+                        self.assertEqual(len(ends), 1)
+                        self.assertEqual((ends[0].outcome, ends[0].failure_reason, ends[0].error_origin),
+                                         ('failed', 'invalid_input', 'local'))
+                        self.assertEqual(ends[0].upstream_sends, 1)
+                        if provider == 'copilot':
+                            self.assertFalse(proxy._stream_connections)
+                    finally:
+                        await proxy.close()
+
     async def test_models_schema_stays_compatible_and_admin_catalog_requires_auth(self):
         auth = SimpleNamespace(verify_api_key=lambda k: k == 'synthetic')
         with patch.object(main, 'proxy', None), patch.object(main, 'azure_proxy', None), patch.object(main, 'copilot_proxy', auth):

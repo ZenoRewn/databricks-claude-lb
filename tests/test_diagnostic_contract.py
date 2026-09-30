@@ -2,6 +2,10 @@
 import asyncio
 import json
 import logging
+import os
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 import unittest
@@ -28,6 +32,34 @@ class Stream(httpx.AsyncByteStream):
 
 
 class DiagnosticLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_adapter_attempt_uses_upstream_api_without_changing_ingress_api(self):
+        for failure in (None, httpx.ReadTimeout('SYNTHETIC_PRIVATE_EXCEPTION')):
+            with self.subTest(failure=failure is not None):
+                async def app(scope, receive, send):
+                    call = AsyncMock(return_value=httpx.Response(200), side_effect=failure)
+                    try:
+                        await telemetry.inference_call(call(), 'copilot', 'responses',
+                                                       model='synthetic-model', endpoint='synthetic')
+                    except httpx.ReadTimeout:
+                        telemetry.note_generation('failed')
+                    else:
+                        telemetry.note_generation('completed')
+                    await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+                    await send({'type': 'http.response.body', 'body': b'{}'})
+
+                with self.assertLogs('main', level='INFO') as logs:
+                    await telemetry.RequestTelemetryMiddleware(app, telemetry.RequestTelemetry())(
+                        {'type': 'http', 'method': 'POST', 'path': '/v1/chat/completions', 'headers': []},
+                        AsyncMock(), AsyncMock())
+                attempts = [r for r in logs.records if r.kind in
+                            ('lb_upstream_send_start', 'lb_upstream_send_end', 'lb_upstream_error')]
+                self.assertEqual(len(attempts), 3 if failure else 2)
+                self.assertEqual({r.api_type for r in attempts}, {'responses'})
+                self.assertEqual(len({r.upstream_attempt_id for r in attempts}), 1)
+                end = next(r for r in logs.records if r.kind == 'lb_request_end')
+                self.assertEqual(end.api_type, 'chat')
+                self.assertEqual({r.lb_request_id for r in attempts}, {end.lb_request_id})
+
     async def test_local_admission_rejection_is_not_attributed_to_upstream(self):
         async def app(scope, receive, send):
             scope.setdefault('state', {})['lb_overloaded'] = True
@@ -173,6 +205,72 @@ class DiagnosticLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DiagnosticSinkTests(unittest.TestCase):
+    def test_text_sink_preserves_legacy_copilot_summary_markers_and_safe_fields(self):
+        from safe_diagnostics import DiagnosticFilter, DiagnosticTextFormatter
+        for kind, label in (('copilot_stream_end', 'stream_end'), ('copilot_request_end', 'request_end')):
+            with self.subTest(kind=kind):
+                record = logging.LogRecord('main', logging.INFO, __file__, 1, 'SYNTHETIC_PRIVATE_BODY', (), None)
+                record.__dict__.update(kind=kind, lb_request_id='synthetic-qa-request', outcome='failed')
+                self.assertTrue(DiagnosticFilter().filter(record))
+                rendered = DiagnosticTextFormatter('%(levelname)s:%(name)s:%(message)s').format(record)
+                self.assertIn('[Copilot ' + label + ']', rendered)
+                self.assertIn('lb_request_id=synthetic-qa-request', rendered)
+                self.assertIn('outcome=failed', rendered)
+                self.assertNotIn('SYNTHETIC_PRIVATE_BODY', rendered)
+
+    def test_default_sink_retains_safe_fields_in_text_and_json(self):
+        script = textwrap.dedent('''
+            import logging
+            import main
+            from request_telemetry import log_event
+            log_event({'kind': 'lb_request_end', 'lb_request_id': 'synthetic-qa-request',
+                       'outcome': 'failed', 'failure_reason': 'read_timeout',
+                       'provider': 'copilot', 'api_type': 'responses',
+                       'prompt': 'SYNTHETIC_PRIVATE_BODY',
+                       'extra': {'authorization': 'SYNTHETIC_PRIVATE_BODY'}})
+            if not logging.getLogger().handlers[0].drain(timeout=2):
+                raise RuntimeError('Synthetic diagnostic did not drain')
+        ''')
+        for format_name in ('text', 'json'):
+            with self.subTest(format=format_name):
+                env = {**os.environ, 'LOG_FORMAT': format_name, 'LOG_LEVEL': 'INFO',
+                       'LB_MODEL_CAPABILITIES_PATH': '', 'PYTHONDONTWRITEBYTECODE': '1'}
+                result = subprocess.run([sys.executable, '-c', script], capture_output=True,
+                                        text=True, env=env, timeout=15, check=True)
+                event = next(line for line in result.stderr.splitlines() if 'lb_request_end' in line)
+                self.assertIn('synthetic-qa-request', event)
+                self.assertNotIn('SYNTHETIC_PRIVATE_BODY', result.stderr)
+                payload = json.loads(event.removeprefix('INFO:main:') if format_name == 'text' else event)
+                self.assertEqual(payload['outcome'], 'failed')
+                self.assertEqual(payload['failure_reason'], 'read_timeout')
+                self.assertEqual(payload['provider'], 'copilot')
+                self.assertEqual(payload['api_type'], 'responses')
+
+    def test_interpreter_shutdown_does_not_wait_for_stuck_default_sink(self):
+        script = textwrap.dedent('''
+            import logging
+            import threading
+            from safe_diagnostics import DiagnosticStreamHandler, default_handler
+            entered = threading.Event()
+            class StuckStream:
+                def write(self, text):
+                    entered.set()
+                    threading.Event().wait()
+                def flush(self):
+                    pass
+            handler = default_handler(DiagnosticStreamHandler(StuckStream()))
+            logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+            logging.info('synthetic')
+            if not entered.wait(1):
+                raise RuntimeError('Synthetic sink did not receive event')
+            handler.close()
+            print('bounded close returned', flush=True)
+        ''')
+        result = subprocess.run([sys.executable, '-c', script], capture_output=True,
+                                text=True, timeout=3, check=True,
+                                env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
+        self.assertIn('bounded close returned', result.stdout)
+
     def test_timestamp_uses_event_creation_instead_of_delayed_sink_time(self):
         record = logging.LogRecord('synthetic', logging.INFO, __file__, 1, 'safe', (), None)
         record.created = 1.0

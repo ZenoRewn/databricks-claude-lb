@@ -27,6 +27,10 @@ SEMANTIC_FIELDS = {'messages', 'input', 'system', 'instructions', 'tools', 'tool
                    'conversation', 'conversation_id'}
 
 
+class CapabilityRejection(HTTPException):
+    """A verified local contract conflict, including during endpoint selection."""
+
+
 def timestamp(value):
     if not isinstance(value, str):
         raise ValueError('Capability timestamps require an explicit timezone')
@@ -211,6 +215,8 @@ def requested_features(payload):
             opaque = opaque or kind == 'item_reference' or kind == 'reasoning' and bool(item.get('encrypted_content'))
         if len(stack) < 128 and isinstance(item.get('content'), list):
             stack.append(iter(item['content']))
+        if kind == 'function_call_output' and len(stack) < 128 and isinstance(item.get('output'), list):
+            stack.append(iter(item['output']))
     formats = [payload.get('response_format')]
     formats.extend(payload[key].get('format') for key in ('text', 'output_config') if isinstance(payload.get(key), dict))
     return {'tools': bool(payload.get('tools')), 'images': images, 'opaque_state': bool(opaque),
@@ -238,7 +244,7 @@ def evaluate_budget(catalog, provider, api_type, model, payload, *, endpoint_ali
         if unsupported or output_over:
             code = 'output_budget_exceeded' if output_over else 'model_capability_mismatch'
             note_failure('invalid_input', origin='local')
-            raise HTTPException(status_code=400, detail={'error': {'code': code,
+            raise CapabilityRejection(status_code=400, detail={'error': {'code': code,
                 'message': 'The requested output budget or feature conflicts with the configured verified channel contract.',
                 'unsupported_features': unsupported, 'output_limit': limits['output_tokens'],
                 'lb_request_id': current_request_id(), 'retryable': False}})

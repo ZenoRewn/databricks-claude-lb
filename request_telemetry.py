@@ -367,13 +367,14 @@ async def inference_call(awaitable, provider, api_type, *, model=None, endpoint=
     metrics = record.metrics if record else TELEMETRY
     metrics.sends[(provider,api_type)] += 1
     attempt_id = str(uuid.uuid4())
+    attempt = {'upstream_attempt_id': attempt_id, 'provider': provider, 'api_type': api_type,
+               'forwarded_model': safe_identifier(model), 'resolved_model': 'unknown',
+               'endpoint_alias': safe_identifier(endpoint), 'upstream_stream': bool(stream)}
     if record:
         record.sends += 1
-        record.active_attempt = {'upstream_attempt_id': attempt_id, 'provider': provider,
-                                 'forwarded_model': safe_identifier(model), 'resolved_model': 'unknown',
-                                 'endpoint_alias': safe_identifier(endpoint), 'upstream_stream': bool(stream)}
+        record.active_attempt = attempt
         record.last_error_key = None
-    context = log_context()
+    context = {**log_context(), **attempt}
     log_event({'kind': 'lb_upstream_send_start', **context})
     started = time.monotonic()
     result = 'transport_error'

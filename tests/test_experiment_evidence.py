@@ -37,6 +37,21 @@ class ExperimentEvidenceTests(unittest.TestCase):
         self.assertEqual(result['reported_scopes'], ['synthetic'])
         self.assertTrue(result['cohorts'])
 
+    def test_unknown_or_different_evidence_scopes_cannot_qualify(self):
+        for left, right, reason in (
+                ('synthetic', 'unknown', 'candidate_scope_unknown'),
+                ('unknown', 'synthetic', 'baseline_scope_unknown'),
+                ('unknown', 'unknown', 'baseline_scope_unknown'),
+                ('synthetic', 'reported_production', 'scope_mismatch'),
+                ('reported_production', 'synthetic', 'scope_mismatch')):
+            with self.subTest(baseline=left, candidate=right):
+                baseline, candidate = dataset('baseline', 100), dataset('candidate')
+                baseline['reported_scope'], candidate['reported_scope'] = left, right
+                result = self.compare(baseline, candidate)
+                self.assertEqual(result['status'], 'inconclusive')
+                self.assertIn(reason, result['reasons'])
+                self.assertFalse(result['production_acceptance'])
+
     def test_missing_coverage_resources_samples_and_pending_are_inconclusive(self):
         for key, value in (('coverage', 'partial'), ('resource_peaks', {}),
                            ('pending_requests', 1), ('diagnostic_dropped_events', 1)):

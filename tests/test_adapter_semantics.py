@@ -99,6 +99,21 @@ class AdapterContractTests(unittest.TestCase):
 
 
 class AdapterEntryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_entrypoint_cannot_drop_invalid_token_types_before_adapter_validation(self):
+        for field in ('max_tokens', 'max_completion_tokens'):
+            for value in (False, True, .5, 0.0, -.5, '0.5'):
+                with self.subTest(field=field, value=value):
+                    route = AsyncMock(return_value=main.JSONResponse({'status': 'completed', 'output': []}))
+                    with patch.object(main, 'proxy', None), patch.object(main, 'azure_proxy', None), \
+                            patch.object(main, 'copilot_proxy', SimpleNamespace(verify_api_key=lambda k: k == 'synthetic')), \
+                            patch.object(main, '_route_openai_responses', route):
+                        async with httpx.AsyncClient(transport=httpx.ASGITransport(main.app), base_url='http://local') as client:
+                            response = await client.post('/v1/chat/completions', json=body(**{field: value}),
+                                                         headers={'Authorization': 'Bearer synthetic'})
+                    self.assertEqual(response.status_code, 400)
+                    self.assertFalse(response.json()['detail']['error']['retryable'])
+                    route.assert_not_awaited()
+
     async def test_locally_echoed_model_is_not_misreported_as_upstream_resolution(self):
         import request_telemetry as telemetry
         route = AsyncMock(return_value=main.JSONResponse({'id': 'synthetic', 'status': 'completed',

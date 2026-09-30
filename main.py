@@ -12,7 +12,7 @@ from chat_adapter import build_payload as build_chat_payload, messages_to_items,
 import model_capabilities
 from model_capabilities import observe_route_budget, estimate_payload
 from build_metadata import runtime_identity
-from safe_diagnostics import (DiagnosticFilter, DiagnosticStreamHandler, default_handler,
+from safe_diagnostics import (DiagnosticFilter, DiagnosticStreamHandler, DiagnosticTextFormatter, default_handler,
                               render_metrics as diagnostic_metrics, EVENT_NAMES)
 from request_timing import (observed_phase, begin_stream as timing_begin_stream,
                             end_stream as timing_end_stream, observe_event)
@@ -305,7 +305,7 @@ def _setup_logging():
     if fmt == "json":
         handler.setFormatter(_JsonLogFormatter())
     else:
-        handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+        handler.setFormatter(DiagnosticTextFormatter("%(levelname)s:%(name)s:%(message)s"))
     # 用 force=True 接管 uvicorn 默认配置
     logging.basicConfig(level=level, handlers=[default_handler(handler)], force=True)
     for name in {'main', __name__}:
@@ -715,6 +715,16 @@ def _sse_terminal_from_upstream_detail(api_type: str, upstream_detail: dict,
         return f"event: error\ndata: {json.dumps({'type':'error','error':error},ensure_ascii=False)}\n\n".encode()
     payload_dict = {"error": error}
     return f"data: {json.dumps(payload_dict, ensure_ascii=False)}\n\ndata: [DONE]\n\n".encode()
+
+
+def _stream_capability_error(provider, api_type, model, body, endpoint_alias, *, metadata=None):
+    """Recheck a retry target before admission; an active SSE needs a terminal."""
+    try:
+        observe_route_budget(provider, api_type, model, body, endpoint_alias)
+    except model_capabilities.CapabilityRejection as exc:
+        note_generation('failed')
+        return _sse_terminal_from_upstream_detail(api_type, exc.detail, metadata=metadata)
+    return None
 
 
 def _request_id_response_headers(request_id: Optional[str]) -> dict:
@@ -2987,6 +2997,10 @@ class ClaudeProxy:
         async def start_current_request(current):
             if request_lease["active"]:
                 raise RuntimeError("Databricks stream request lease already active")
+            rejection = _stream_capability_error('databricks', 'messages', model, body, current.name,
+                metadata={'request_id': request_id} if request_id else None)
+            if rejection is not None:
+                return rejection
             request_lease["endpoint"] = current
             tried.add(current.name)
             request_lease["lease"] = await proxy_self.load_balancer.on_request_start(current)
@@ -3060,7 +3074,10 @@ class ClaudeProxy:
                                     "Authorization": f"Bearer {current_endpoint.token}",
                                     "Content-Type": "application/json",
                                 }
-                                await start_current_request(current_endpoint)
+                                rejection = await start_current_request(current_endpoint)
+                                if rejection is not None:
+                                    yield rejection
+                                    return
                                 logger.info(f"[{body.get('model')}] -> {current_endpoint.name} (stream attempt {attempt + 2})")
                                 continue
 
@@ -3129,7 +3146,10 @@ class ClaudeProxy:
                                 "Authorization": f"Bearer {current_endpoint.token}",
                                 "Content-Type": "application/json",
                             }
-                            await start_current_request(current_endpoint)
+                            rejection = await start_current_request(current_endpoint)
+                            if rejection is not None:
+                                yield rejection
+                                return
                             logger.info(f"[{body.get('model')}] -> {current_endpoint.name} (stream retry {attempt + 2})")
                             continue
 
@@ -3409,6 +3429,9 @@ class AzureOpenAIProxy:
         async def start_current_request(current):
             if request_lease["active"]:
                 raise RuntimeError("Azure stream request lease already active")
+            rejection = _stream_capability_error('azure_openai', api_type, model, body, current.name)
+            if rejection is not None:
+                return rejection
             request_lease["endpoint"] = current
             tried.add(current.name)
             request_lease["lease"] = await proxy_self.load_balancer.on_request_start(current)
@@ -3477,7 +3500,10 @@ class AzureOpenAIProxy:
                                 else:
                                     current_url = f"{current_endpoint.endpoint}/openai/deployments/{model}/chat/completions?api-version=2024-10-21"
                                 current_headers = {"api-key": current_endpoint.api_key, "Content-Type": "application/json"}
-                                await start_current_request(current_endpoint)
+                                rejection = await start_current_request(current_endpoint)
+                                if rejection is not None:
+                                    yield rejection
+                                    return
                                 continue
 
                         _account_terminal_http_error(proxy_self,current_endpoint,model,start_time,api_type,response)
@@ -3535,7 +3561,10 @@ class AzureOpenAIProxy:
                             else:
                                 current_url = f"{current_endpoint.endpoint}/openai/deployments/{model}/chat/completions?api-version=2024-10-21"
                             current_headers = {"api-key": current_endpoint.api_key, "Content-Type": "application/json"}
-                            await start_current_request(current_endpoint)
+                            rejection = await start_current_request(current_endpoint)
+                            if rejection is not None:
+                                yield rejection
+                                return
                             continue
 
                     yield _sse_terminal_error(api_type, "upstream_network_error", error_detail)
@@ -5616,6 +5645,10 @@ class CopilotProxy:
         async def start_current_request(current):
             if request_lease["active"]:
                 raise RuntimeError("Copilot stream request lease already active")
+            rejection = _stream_capability_error('copilot', api_type, model, body, current.name,
+                metadata={'endpoint': current.name, **({'request_id': request_id} if request_id else {})})
+            if rejection is not None:
+                return rejection
             request_lease["endpoint"] = current
             tried.add(current.name)
             request_lease["lease"] = await proxy_self.load_balancer.on_request_start(current)
@@ -5894,7 +5927,12 @@ class CopilotProxy:
                                     yield _sse_terminal_error(api_type, "upstream_header_build_failed", str(he))
                                     return
                                 current_url = f"{current_endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
-                                await start_current_request(current_endpoint)
+                                rejection = await start_current_request(current_endpoint)
+                                if rejection is not None:
+                                    _emit_stream_end('capability_rejected', logging.WARNING,
+                                                     account_neutral=True, terminal_valid=False)
+                                    yield rejection
+                                    return
                                 continue
 
                         _account_terminal_http_error(proxy_self,current_endpoint,model,start_time,api_type,response)
@@ -6026,7 +6064,12 @@ class CopilotProxy:
                                                   reason=str(he)[:200])
                                 return
                             current_url = f"{current_endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
-                            await start_current_request(current_endpoint)
+                            rejection = await start_current_request(current_endpoint)
+                            if rejection is not None:
+                                _emit_stream_end('capability_rejected', logging.WARNING,
+                                                 account_neutral=True, terminal_valid=False)
+                                yield rejection
+                                return
                             continue
 
                     yield _sse_terminal_error(api_type, "pool_acquire_timeout", error_detail,
@@ -6109,7 +6152,12 @@ class CopilotProxy:
                                                   reason=str(he)[:200])
                                 return
                             current_url = f"{current_endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
-                            await start_current_request(current_endpoint)
+                            rejection = await start_current_request(current_endpoint)
+                            if rejection is not None:
+                                _emit_stream_end('capability_rejected', logging.WARNING,
+                                                 account_neutral=True, terminal_valid=False)
+                                yield rejection
+                                return
                             continue
 
                     yield _sse_terminal_error(api_type, "upstream_network_error", error_detail,
@@ -6993,13 +7041,17 @@ def _drop_nonpositive_token_limits(body: dict) -> list:
         if field_name not in body:
             continue
         value = body.get(field_name)
-        if isinstance(value, bool):
-            numeric = int(value)
-        else:
+        if type(value) is int:
+            numeric = value
+        elif isinstance(value, str) and re.fullmatch(r'[+-]?[0-9]+', value):
             try:
                 numeric = int(value)
             except (TypeError, ValueError):
                 continue
+        else:
+            # Preserve invalid types for adapter/upstream validation. Coercing
+            # False or 0.5 to zero would silently remove the caller's budget.
+            continue
         if numeric <= 0:
             body.pop(field_name, None)
             removed.append(field_name)

@@ -114,7 +114,11 @@ def compare(baseline, candidate, plan):
     scopes = {data.get('reported_scope') for data in (baseline, candidate)}
     if not scopes <= {'synthetic', 'reported_production', 'unknown'}:
         raise ValueError('Dataset scope must be explicit')
+    if len(scopes) != 1:
+        reasons.append('scope_mismatch')
     for arm, data in (('baseline', baseline), ('candidate', candidate)):
+        if data['reported_scope'] == 'unknown':
+            reasons.append(arm + '_scope_unknown')
         identity = (data.get('identity') or {}).get('image_digest')
         if not isinstance(identity, str) or not re.fullmatch(r'sha256:[a-f0-9]{64}', identity):
             reasons.append(arm + '_identity_unknown')
