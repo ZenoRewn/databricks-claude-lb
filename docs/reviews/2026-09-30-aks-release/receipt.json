@@ -1,0 +1,121 @@
+{
+  "author": "Zeno Ren",
+  "release_id": "lb-20260930-d88d742-0d2ffc",
+  "status": "succeeded",
+  "maintenance": {
+    "started_at": "2026-09-30T21:03:04+08:00",
+    "routes_verified_at": "2026-09-30T21:04:20+08:00",
+    "seconds": 75.165,
+    "completed_at": "2026-09-30T21:04:41+08:00",
+    "rollback_performed": false,
+    "cleanup_errors": [],
+    "markers_cleared": true
+  },
+  "application": {
+    "source_revision": "1d75685655f672177374cf3327cd16c4bcffe2db",
+    "registry_image": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:3389f5ea25e03c4170d5b8243b38d98fddbb7057b455868b521823a8e926f42c",
+    "platform": "linux/amd64",
+    "runtime_files_verified": 21,
+    "source_manifest_sha256": "87b7a17d60a24d1aa78648d343bbbbb6462cb8f41aed4138be144d119fdb7ffd",
+    "replicas": 1,
+    "restarts_at_verification": 0
+  },
+  "coordinators": {
+    "source_revision": "11746b3d1aa8c24bd0e7fb313e52d39f5fdadf23",
+    "registry_image": "zenoseaacr.azurecr.io/lb-release-controller@sha256:b481e1f291ac1eef1c0a3bd746632f0f3de4f129930e3879444d8c009beee3e4",
+    "ready_replicas": 2,
+    "distinct_nodes": true,
+    "files_verified_per_pod": 14
+  },
+  "validation": {
+    "public_health": {
+      "/health/live": 200,
+      "/health/ready": 200,
+      "/health/accepting": 200
+    },
+    "tls_verified": true,
+    "missing_credentials_status": {
+      "/v1/messages": 401,
+      "/v1/responses": 401,
+      "/v1/chat/completions": 401,
+      "/v1/messages/count_tokens": 401,
+      "/config/effective": 401
+    },
+    "default_metrics_schema": "lb-metrics-v2",
+    "optional_metrics_schema": "lb-metrics-v3",
+    "routes_restored": 2,
+    "ready_endpoints_per_service": [
+      1,
+      1
+    ],
+    "business": [
+      {
+        "api": "messages",
+        "model": "databricks-claude-opus-5",
+        "stream": false,
+        "actual_provider": "databricks",
+        "completed": true,
+        "marker_found": true,
+        "unique_completed_ledger_events": 1
+      },
+      {
+        "api": "responses",
+        "model": "gpt-5.4",
+        "stream": true,
+        "actual_provider": "copilot",
+        "completed": true,
+        "marker_found": true,
+        "unique_completed_ledger_events": 1
+      },
+      {
+        "api": "chat",
+        "model": "gpt-5.6-luna",
+        "stream": true,
+        "actual_provider": "copilot",
+        "completed": true,
+        "marker_found": true,
+        "unique_completed_ledger_events": 1
+      }
+    ]
+  },
+  "azure_separate_validation": {
+    "mode": "candidate image, isolated process, one configured East US 2 endpoint",
+    "api": "responses",
+    "stream": true,
+    "model": "gpt-5.4",
+    "completed": true,
+    "marker_found": true,
+    "max_output_tokens": 512,
+    "public_fallback_exercised": false,
+    "production_ledger_acceptance": false
+  },
+  "storage": {
+    "schema_migration_performed": false,
+    "backup_snapshot_begin_utc": "2026-09-30T12:54:55.386410",
+    "backup_snapshot_end_utc": "2026-09-30T12:54:56.799962",
+    "backup_rows": {
+      "usage_batch_ledger": 5747,
+      "usage_daily": 331
+    },
+    "backup_stream_verified": true,
+    "earlier_snapshot_restore_drill": "passed on isolated MySQL 8.4.11, row counts and canonical hashes matched",
+    "latest_snapshot_restored": false,
+    "historical_ledger_batches_preserved": 5747,
+    "database_snapshot_restored_to_production": false
+  },
+  "github": {
+    "application_pr": 8,
+    "application_merge": "d88d7423bbf1a86be6b117d2ab022d7ada0ee08d",
+    "release_tool_pr": 9,
+    "release_tool_merge": "80da865001dfe1a9fcad228e9713368aaea505fd",
+    "release_tool_pr_checks": 6,
+    "release_tool_main_checks": 6,
+    "release_tool_main_run": 36716947093
+  },
+  "boundaries": [
+    "Public probes cover Databricks Messages and Copilot Responses/Chat; Azure is separate isolated-process evidence.",
+    "No exhaustive provider/endpoint matrix, real-client long sessions, production load test, or control-plane fault injection in this release.",
+    "No durable outbox or zero-RPO claim.",
+    "OpenClaw automation, scripts, schedules and history were not modified."
+  ]
+}

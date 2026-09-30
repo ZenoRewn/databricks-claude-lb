@@ -15,8 +15,9 @@ Author: Zeno Ren
 | SDK 协议 | OpenAI Python SDK 读取合成文本、工具索引/ID、usage、finish_reason；现有 OpenAI/Anthropic 不安全重试回归保留 | 不是真实账号、真实客户端应用或上游模型 E2E |
 | 微基准 | `microbenchmark-r5.json`：160/160 完成、160 次发送、结束 active=0、无诊断丢弃 | 最终候选的 context observe/off 比较，4 并发、MockTransport/ASGI、内存诊断 sink；不是生产容量或默认 stderr I/O 成本测试 |
 | 独立 QA | 7 项 findings 修复后，在最终 1d75685 上获只读独立复核通过，见 [QA 回执](QA.md) | 代码及本地合成验证范围；生产与真实供应商未验证 |
-| GitHub | [PR #8](https://github.com/ZenoRewn/databricks-claude-lb/pull/8) 发布本轮代码、文档与证据 | GitHub CI 和合并状态以该 PR 的实时 head、Checks 及 merge 记录为准；本地回执不预先宣告远程验收 |
-| AKS / OpenClaw | 未操作 | 未部署、未发付费推理、未改 scheduler、baseline、历史或生产数据库 |
+| GitHub | [PR #8](https://github.com/ZenoRewn/databricks-claude-lb/pull/8) 已合并为 d88d742，PR/main 各六项 CI 通过；发布身份修复 [PR #9](https://github.com/ZenoRewn/databricks-claude-lb/pull/9) 已合并为 80da865，PR/main 各六项 CI 通过 | 应用运行文件仍为已核验的 1d75685；发布工具与应用镜像分别绑定身份 |
+| AKS | 2026-09-30 发布 succeeded，维护约 75 秒，运行文件、三协议、账本、路由和清理通过，见 [部署回执](../2026-09-30-aks-release/REPORT.md) | 公网实际覆盖 Databricks/Copilot；Azure 另有候选镜像独立进程验证，不等于全部端点或真实客户端验收 |
+| OpenClaw | 外部自动化、脚本、调度、baseline 和历史未修改 | 本轮部署 LB，不代表外部 watcher 已采用新增采集/报告逻辑 |
 
 ## 可复现入口
 
