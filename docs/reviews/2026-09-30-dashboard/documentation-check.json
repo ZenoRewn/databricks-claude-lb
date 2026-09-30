@@ -1,0 +1,15 @@
+{
+  "author": "Zeno Ren",
+  "checked_files": [
+    "README.md",
+    "CLAUDE.md",
+    "docs/README.md",
+    "docs/CONFIGURATION.md",
+    "docs/DEVELOPMENT.md",
+    "docs/reviews/README.md",
+    "docs/reviews/2026-09-30-dashboard/REPORT.md"
+  ],
+  "relative_links_checked": 88,
+  "missing": [],
+  "scope": "relative file targets; remote URLs and anchors not crawled"
+}

@@ -74,6 +74,28 @@ def runtime_identity(root=None):
                 'runtime_files_match': None, 'manifest_covers_current_runtime': False}
 
 
+def release_identity(root=None):
+    """Public commit identity, without configuration, paths or a latest-version claim."""
+    identity = runtime_identity(root)
+    revision = identity.get('source_revision')
+    if not isinstance(revision, str) or not re.fullmatch(r'[a-f0-9]{40}', revision):
+        revision = None
+    verification = 'unknown'
+    if revision and identity.get('available') is True:
+        if (identity.get('runtime_files_match') is False or identity.get('source_tree_dirty') is True
+                or identity.get('out_of_tree') is True):
+            verification = 'modified'
+        elif (identity.get('source_attested') is True and identity.get('runtime_files_match') is True
+                and identity.get('manifest_covers_current_runtime') is True
+                and identity.get('source_tree_dirty') is False and identity.get('out_of_tree') is False):
+            verification = 'matched'
+    repository = 'https://github.com/ZenoRewn/databricks-claude-lb'
+    return {'version': revision[:7] if revision else None, 'source_revision': revision,
+            'verification': verification,
+            'commit_url': f'{repository}/commit/{revision}' if revision else None,
+            'compare_url': f'{repository}/compare/{revision}...main' if revision else None}
+
+
 if __name__ == '__main__':
     root = Path(__file__).parent
     value = build_info(root)

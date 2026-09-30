@@ -1,638 +1,207 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Databricks Claude LB Dashboard</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<title>Claude LB · 网关工作台</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"
         integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g"
         crossorigin="anonymous"></script>
 <style>
-@property --angle { syntax: '<angle>'; initial-value: 0deg; inherits: false; }
 :root {
-  color-scheme: dark;
-  /* BoardUI-aligned semantic tokens (2026-09 refresh, still vanilla HTML) */
-  --bg-0: #0b1020;
-  --bg-1: #0f172a;
-  --surface-1: #111a2e;
-  --surface-2: #17223b;
-  --border: #1f2a44;
-  --border-hi: #334155;
-  --separator-border: #1f2a44;       /* BoardUI alias for hairline borders */
-  --border-button-default: #334155;  /* BoardUI alias */
-  --text-0: #f1f5f9;
-  --text-primary: #f1f5f9;
-  --text-1: #cbd5e1;
-  --text-secondary: #cbd5e1;
-  --text-2: #94a3b8;
-  --text-tertiary: #94a3b8;
-  --text-3: #64748b;
-  --text-placeholder: #64748b;
-  --accent: #60a5fa;
-  --accent-2: #c084fc;
-  --border-focus-ring: #60a5fa;      /* BoardUI focus ring token */
-  --ok: #4ade80;
-  --warn: #fbbf24;
-  --err: #f87171;
-  /* BoardUI radius scale — 4px grid based */
-  --radius: 14px;                    /* legacy */
-  --radius-sm: 10px;
-  --radius-md: 12px;
-  --radius-xl: 16px;
-  --radius-2xl: 20px;
-  --radius-3xl: 24px;                /* BoardUI card standard */
-  /* Motion tokens (BoardUI recipe) */
-  --ease: cubic-bezier(.4,0,.2,1);
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --motion-hover: 150ms;
-  --motion-entrance: 250ms;
-  --motion-exit: 150ms;
-  --bg-image:
-    radial-gradient(ellipse 80% 50% at 50% -10%, rgba(120, 119, 198, 0.22), transparent 60%),
-    radial-gradient(ellipse 60% 40% at 90% 10%, rgba(96, 165, 250, 0.12), transparent 70%),
-    radial-gradient(ellipse 50% 40% at 10% 0%, rgba(192, 132, 252, 0.10), transparent 70%);
-  --card-bg: linear-gradient(135deg, rgba(30, 41, 59, 0.6), rgba(17, 26, 46, 0.6));
-  --chart-card-bg: linear-gradient(135deg, rgba(30, 41, 59, 0.55), rgba(17, 26, 46, 0.55));
-  --table-bg: rgba(17, 26, 46, 0.5);
-  --th-bg: rgba(15, 23, 42, 0.7);
-  --row-hover: rgba(96, 165, 250, 0.06);
-  --tag-bg: rgba(30, 41, 59, 0.5);
-  --pill-bg: rgba(17, 26, 46, 0.6);
-  --input-bg: rgba(15, 23, 42, 0.6);
-  --info-bg: rgba(17, 26, 46, 0.5);
-  --card-hover-glow: rgba(96, 165, 250, 0.10);
-  --chart-border: rgba(15, 23, 42, 0.8);
-  --chart-grid: rgba(51, 65, 85, 0.25);
-  --chart-grid-strong: rgba(51, 65, 85, 0.4);
-  --tooltip-bg: rgba(15, 23, 42, 0.95);
-  --tooltip-border: #334155;
-  --deployments-bg: rgba(96, 165, 250, 0.1);
-  --deployments-border: rgba(96, 165, 250, 0.2);
-  --err-banner-bg: linear-gradient(135deg, rgba(127, 29, 29, 0.35), rgba(127, 29, 29, 0.18));
-  --err-banner-border: rgba(248, 113, 113, 0.25);
-  --err-banner-text: #fca5a5;
-  --btn-primary-bg: linear-gradient(135deg, #3b82f6, #6366f1);
-  --btn-primary-shadow: 0 4px 12px rgba(59, 130, 246, 0.25);
-  --btn-danger-bg: rgba(239, 68, 68, 0.15);
-  --btn-danger-hover: rgba(239, 68, 68, 0.25);
-  --btn-danger-border: rgba(239, 68, 68, 0.3);
-  --btn-danger-text: #fca5a5;
-  --brand-gradient: linear-gradient(90deg, #e2e8f0 0%, #60a5fa 30%, #c084fc 55%, #60a5fa 80%, #e2e8f0 100%);
-  --alert-bar: linear-gradient(180deg, var(--err), #fb923c);
-  --alert-glow: 0 0 8px rgba(248, 113, 113, 0.6);
-  --tab-indicator-glow: 0 0 12px rgba(96, 165, 250, 0.5);
-}
-:root[data-theme="light"] {
   color-scheme: light;
-  --bg-0: #f8fafc;
-  --bg-1: #f5f7fb;
-  --surface-1: #ffffff;
-  --surface-2: #f1f5f9;
-  --border: #e2e8f0;
-  --border-hi: #cbd5e1;
-  --text-0: #0f172a;
-  --text-1: #1e293b;
-  --text-2: #475569;
-  --text-3: #94a3b8;
-  --accent: #2563eb;
-  --accent-2: #7c3aed;
-  --ok: #16a34a;
-  --warn: #d97706;
-  --err: #dc2626;
-  --bg-image:
-    radial-gradient(ellipse 80% 50% at 50% -10%, rgba(99, 102, 241, 0.14), transparent 60%),
-    radial-gradient(ellipse 60% 40% at 90% 10%, rgba(37, 99, 235, 0.10), transparent 70%),
-    radial-gradient(ellipse 50% 40% at 10% 0%, rgba(124, 58, 237, 0.09), transparent 70%);
-  --card-bg: linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(248, 250, 252, 0.85));
-  --chart-card-bg: linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(248, 250, 252, 0.88));
-  --table-bg: rgba(255, 255, 255, 0.72);
-  --th-bg: rgba(241, 245, 249, 0.9);
-  --row-hover: rgba(37, 99, 235, 0.06);
-  --tag-bg: rgba(255, 255, 255, 0.85);
-  --pill-bg: rgba(255, 255, 255, 0.8);
-  --input-bg: rgba(255, 255, 255, 0.92);
-  --info-bg: rgba(255, 255, 255, 0.7);
-  --card-hover-glow: rgba(37, 99, 235, 0.08);
-  --chart-border: rgba(255, 255, 255, 0.95);
-  --chart-grid: rgba(148, 163, 184, 0.25);
-  --chart-grid-strong: rgba(148, 163, 184, 0.35);
-  --tooltip-bg: rgba(15, 23, 42, 0.92);
-  --tooltip-border: #475569;
-  --deployments-bg: rgba(37, 99, 235, 0.08);
-  --deployments-border: rgba(37, 99, 235, 0.2);
-  --err-banner-bg: linear-gradient(135deg, rgba(254, 226, 226, 0.85), rgba(254, 242, 242, 0.65));
-  --err-banner-border: rgba(220, 38, 38, 0.3);
-  --err-banner-text: #991b1b;
-  --btn-primary-bg: linear-gradient(135deg, #2563eb, #6366f1);
-  --btn-primary-shadow: 0 4px 12px rgba(37, 99, 235, 0.22);
-  --btn-danger-bg: rgba(239, 68, 68, 0.08);
-  --btn-danger-hover: rgba(239, 68, 68, 0.16);
-  --btn-danger-border: rgba(239, 68, 68, 0.28);
-  --btn-danger-text: #b91c1c;
-  --brand-gradient: linear-gradient(90deg, #0f172a 0%, #2563eb 30%, #7c3aed 55%, #2563eb 80%, #0f172a 100%);
-  --alert-bar: linear-gradient(180deg, var(--err), #f97316);
-  --alert-glow: 0 0 8px rgba(220, 38, 38, 0.4);
-  --tab-indicator-glow: 0 0 10px rgba(37, 99, 235, 0.35);
+  --background-full: #f5f6f8; --background-primary: #ffffff; --background-secondary: #f8f9fb;
+  --text-primary: #1c2028; --text-secondary: #525b6a; --text-tertiary: #667082;
+  --separator-border: #e8ebf0; --border-button-default: #dce1e9; --border-focus-ring: #4675e8;
+  --accent: #315ecb; --accent-soft: #edf2ff; --ok: #147454; --ok-soft: #eaf6f0;
+  --warn: #8a5c0c; --warn-soft: #fff5df; --err: #c23e43; --err-soft: #fff0f0;
+  --chart-1: #4675d5; --chart-2: #2a9a86; --chart-3: #9a7bd1; --chart-4: #d69a44; --chart-5: #ce6975;
+  --chart-6: #559cbe; --chart-7: #81964f; --chart-8: #bd7caa; --chart-9: #6977a6; --chart-10: #9d8d78;
+  --tooltip-bg: #202735; --tooltip-text: #f8fafc; --tooltip-border: #3e485b;
+  --chart-grid: #edf0f5; --chart-grid-strong: #e1e6ee; --chart-border: #ffffff;
+  --shadow-dialog: 0 16px 48px #1c202818;
+  --text-0: var(--text-primary); --text-1: var(--text-secondary); --text-2: var(--text-tertiary); --text-3: var(--text-tertiary);
+  --surface-1: var(--background-primary); --surface-2: var(--background-secondary);
+  --border: var(--separator-border); --border-hi: var(--border-button-default);
+  --ease: cubic-bezier(.2,0,0,1);
 }
-* { margin: 0; padding: 0; box-sizing: border-box; }
-html, body { height: 100%; }
-body {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  color: var(--text-1);
-  background: var(--bg-1);
-  background-image: var(--bg-image);
-  background-attachment: fixed;
-  padding: 24px clamp(16px, 3vw, 32px) 48px;
-  font-feature-settings: 'cv11', 'ss01';
-  -webkit-font-smoothing: antialiased;
-  min-height: 100vh;
-  transition: background-color .3s var(--ease), color .3s var(--ease);
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background-full: #111318; --background-primary: #1a1d24; --background-secondary: #21252d;
+  --text-primary: #eceef3; --text-secondary: #bbc2d0; --text-tertiary: #929baa;
+  --separator-border: #2a303a; --border-button-default: #3b4350; --border-focus-ring: #8bacff;
+  --accent: #a3bcff; --accent-soft: #29374f; --ok: #70d7b2; --ok-soft: #1d3b32;
+  --warn: #edc177; --warn-soft: #3d3321; --err: #f39ca0; --err-soft: #402a30;
+  --chart-1: #8bacf0; --chart-2: #63bba6; --chart-3: #bba0e9; --chart-4: #e1b16d; --chart-5: #e68b99;
+  --chart-6: #81bcd7; --chart-7: #a5b77f; --chart-8: #d6a0c5; --chart-9: #a0add7; --chart-10: #b9ab95;
+  --tooltip-bg: #eceef3; --tooltip-text: #202735; --tooltip-border: #bbc2d0;
+  --chart-grid: #2a303a; --chart-grid-strong: #3b4350; --chart-border: #1a1d24;
+  --shadow-dialog: 0 16px 48px #00000040;
 }
-.hero {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 20px;
-  flex-wrap: wrap;
-}
-.brand {
-  display: flex;
-  align-items: baseline;
-  gap: 14px;
-  flex-wrap: wrap;
-}
-.brand h1 {
-  font-size: clamp(1.35rem, 2.4vw, 1.7rem);
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  background: var(--brand-gradient);
-  background-size: 250% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  animation: shimmer 6s linear infinite;
-}
-.brand .tag {
-  font-size: .72rem;
-  font-weight: 500;
-  color: var(--text-2);
-  padding: 3px 10px;
-  border: 1px solid var(--border-hi);
-  border-radius: 9999px;
-  background: var(--tag-bg);
-  backdrop-filter: blur(8px);
-}
-.hero-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.theme-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 38px; height: 38px;
-  border: 1px solid var(--border-hi);
-  border-radius: 9999px;
-  background: var(--pill-bg);
-  backdrop-filter: blur(8px);
-  color: var(--text-1);
-  cursor: pointer;
-  transition: color .2s var(--ease), border-color .2s var(--ease), transform .2s var(--ease), background-color .3s var(--ease);
-  font-family: inherit;
-}
-.theme-toggle:hover { color: var(--accent); border-color: var(--accent); transform: translateY(-1px); }
-.theme-toggle:active { transform: scale(0.94); }
-.theme-toggle svg { width: 18px; height: 18px; }
-.theme-toggle .icon-sun { display: none; }
-.theme-toggle .icon-moon { display: block; }
-:root[data-theme="light"] .theme-toggle .icon-sun { display: block; }
-:root[data-theme="light"] .theme-toggle .icon-moon { display: none; }
-@keyframes shimmer {
-  from { background-position: 250% 0; }
-  to { background-position: -250% 0; }
-}
-.refresh-pill {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 14px;
-  border: 1px solid var(--border-hi);
-  border-radius: 9999px;
-  background: var(--pill-bg);
-  backdrop-filter: blur(8px);
-  font-size: .78rem;
-  color: var(--text-2);
-  transition: background-color .3s var(--ease);
-}
-.refresh-pill svg { width: 18px; height: 18px; }
-.refresh-pill .ring-bg { fill: none; stroke: var(--border-hi); stroke-width: 3; }
-.refresh-pill .ring-fg { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; transform: rotate(-90deg); transform-origin: center; transition: stroke-dashoffset 1s linear; }
-.refresh-pill.paused .ring-fg { stroke: var(--text-3); }
-
-.error-banner {
-  background: var(--err-banner-bg);
-  border: 1px solid var(--err-banner-border);
-  color: var(--err-banner-text);
-  padding: 12px 14px;
-  border-radius: var(--radius-sm);
-  margin-bottom: 16px;
-  display: none;
-  font-size: .88rem;
-}
-.error-banner.show { display: block; animation: fadeIn .2s var(--ease); }
-
-.tab-bar {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  position: relative;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 24px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.tab-bar::-webkit-scrollbar { display: none; }
-.tab-btn {
-  background: none; border: none;
-  padding: 12px 20px;
-  font-size: .9rem;
-  font-weight: 600;
-  color: var(--text-3);
-  cursor: pointer;
-  font-family: inherit;
-  transition: color .2s var(--ease);
-  white-space: nowrap;
-  position: relative;
-}
-.tab-btn:hover { color: var(--text-1); }
-.tab-btn.active { color: var(--accent); }
-.tab-indicator {
-  position: absolute;
-  bottom: -1px;
-  height: 2px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
-  border-radius: 2px;
-  transition: transform .35s var(--ease), width .35s var(--ease);
-  pointer-events: none;
-  box-shadow: var(--tab-indicator-glow);
-}
-.tab-panel { display: none; }
-.tab-panel.active { display: block; animation: fadeIn .25s var(--ease); }
-@keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-
-.section-title {
-  font-size: .95rem;
-  font-weight: 600;
-  color: var(--text-1);
-  margin: 28px 0 12px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  letter-spacing: -0.01em;
-}
-.section-title::before {
-  content: '';
-  width: 3px; height: 14px;
-  background: linear-gradient(180deg, var(--accent), var(--accent-2));
-  border-radius: 2px;
-}
-
-.global-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 12px;
-  margin-bottom: 24px;
-}
-.card {
-  position: relative;
-  background: var(--card-bg);
-  backdrop-filter: blur(10px);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);          /* BoardUI: 16px for KPI tiles */
-  padding: 16px 20px;                       /* 4px grid: 16 & 20 */
-  overflow: hidden;
-  transition: border-color var(--motion-hover) var(--ease), transform var(--motion-hover) var(--ease), background-color .3s var(--ease);
-}
-.card::before {
-  content: '';
-  position: absolute; inset: 0;
-  background: radial-gradient(420px circle at var(--mx, 50%) var(--my, 50%), var(--card-hover-glow), transparent 45%);
-  opacity: 0;
-  transition: opacity var(--motion-entrance) var(--ease-out);
-  pointer-events: none;
-}
-.card:hover { border-color: var(--border-hi); transform: translateY(-1px); }
-.card:hover::before { opacity: 1; }
-.card:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--border-focus-ring);
-}
-.card .label {
-  font-size: .68rem;
-  color: var(--text-2);
-  text-transform: uppercase;
-  letter-spacing: .08em;
-  font-weight: 600;
-}
-.card .value {
-  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
-  font-size: 1.55rem;
-  font-weight: 600;
-  margin-top: 6px;
-  color: var(--text-0);
-  letter-spacing: -0.02em;
-  font-variant-numeric: tabular-nums;
-}
-.card .value.green { color: var(--ok); }
-.card .value.blue { color: var(--accent); }
-.card .value.amber { color: var(--warn); }
-.card .value.purple { color: var(--accent-2); }
-
-.grid-2 {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  margin-bottom: 24px;
-}
-@media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
-
-.chart-card {
-  position: relative;
-  background: var(--chart-card-bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-3xl);        /* BoardUI: rounded-3xl for chart panels */
-  padding: 24px;                            /* 4px grid */
-  min-height: 260px;
-  transition: background-color .3s var(--ease), border-color var(--motion-hover) var(--ease);
-}
-.chart-card:hover { border-color: var(--border-hi); }
-.chart-card h3 {
-  font-size: .82rem;
-  font-weight: 600;
-  color: var(--text-2);
-  margin-bottom: 16px;
-  text-transform: uppercase;
-  letter-spacing: .06em;
-}
-.chart-card .canvas-wrap { position: relative; height: 230px; }
-
-.table-wrap {
-  background: var(--table-bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-2xl);         /* BoardUI: 20px */
-  overflow: hidden;
-  margin-bottom: 16px;
-  transition: background-color .3s var(--ease);
-}
-.table-scroll { overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; font-size: .84rem; }
-th {
-  background: var(--th-bg);
-  padding: 11px 14px;
-  text-align: left;
-  color: var(--text-2);
-  font-weight: 600;
-  font-size: .72rem;
-  text-transform: uppercase;
-  letter-spacing: .06em;
-  border-bottom: 1px solid var(--border);
-  white-space: nowrap;
-}
-td {
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--border);
-  color: var(--text-1);
-  font-variant-numeric: tabular-nums;
-}
-tr:last-child td { border-bottom: none; }
-tr.row { transition: background .15s var(--ease); }
-tr.row:hover { background: var(--row-hover); }
-tr.row.alert { position: relative; }
-tr.row.alert td:first-child { position: relative; }
-tr.row.alert td:first-child::before {
-  content: ''; position: absolute; left: 0; top: 12%; bottom: 12%;
-  width: 3px; border-radius: 2px;
-  background: var(--alert-bar);
-  box-shadow: var(--alert-glow);
-  animation: pulseAlert 1.8s ease-in-out infinite;
-}
-@keyframes pulseAlert { 0%, 100% { opacity: .6; } 50% { opacity: 1; } }
-
-td.mono, .mono { font-family: 'JetBrains Mono', monospace; font-size: .8rem; }
-td strong { color: var(--text-0); font-weight: 600; }
-
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 10px;
-  border-radius: 9999px;
-  font-size: .7rem;
-  font-weight: 600;
-  letter-spacing: .02em;
-}
-.badge::before {
-  content: ''; width: 6px; height: 6px; border-radius: 50%;
-}
-.badge.ok { background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 28%, transparent); }
-.badge.ok::before { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-.badge.open { background: color-mix(in srgb, var(--err) 14%, transparent); color: var(--err); border: 1px solid color-mix(in srgb, var(--err) 32%, transparent); }
-.badge.open::before { background: var(--err); box-shadow: 0 0 8px var(--err); animation: blink 1s infinite; }
-@keyframes blink { 50% { opacity: .3; } }
-
-.err-rate { display: inline-flex; align-items: center; gap: 8px; }
-.err-rate .bar { flex: 0 0 42px; height: 5px; background: var(--border); border-radius: 9999px; overflow: hidden; }
-.err-rate .bar > span { display: block; height: 100%; border-radius: 9999px; transition: width .4s var(--ease), background .2s var(--ease); }
-
-.deployments-tag {
-  display: inline-block;
-  font-size: .7rem;
-  padding: 2px 8px;
-  border-radius: 6px;
-  background: var(--deployments-bg);
-  color: var(--accent);
-  border: 1px solid var(--deployments-border);
-  margin-right: 4px;
-  margin-bottom: 2px;
-}
-
-.info-box {
-  background: var(--info-bg);
-  border: 1px dashed var(--border-hi);
-  border-radius: var(--radius-2xl);
-  padding: 40px;                            /* 4px grid */
-  text-align: center;
-  color: var(--text-2);
-  font-size: .92rem;
-}
-.info-box code { font-family: 'JetBrains Mono', monospace; font-size: .85rem; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 1px 6px; border-radius: 4px; }
-
-.history-toolbar {
-  display: flex; gap: 12px; align-items: center; margin-bottom: 16px; flex-wrap: wrap;
-  padding: 12px 16px;
-  background: var(--table-bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  transition: background-color .3s var(--ease);
-}
-.history-toolbar label { color: var(--text-2); font-size: .82rem; }
-.history-toolbar input[type=number] {
-  width: 72px;
-  padding: 7px 10px;
-  background: var(--input-bg);
-  border: 1px solid var(--border-hi);
-  border-radius: 8px;
-  color: var(--text-0);
-  font-size: .85rem;
-  font-family: 'JetBrains Mono', monospace;
-  outline: none;
-  transition: border-color .15s var(--ease);
-}
-.history-toolbar input[type=number]:focus-visible {
-  border-color: var(--border-focus-ring);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--border-focus-ring) 50%, transparent);
-  outline: none;
-}
-.btn {
-  padding: 8px 16px;                        /* 4px grid */
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);          /* BoardUI 12px */
-  cursor: pointer;
-  font-size: .82rem;
-  font-weight: 600;
-  font-family: inherit;
-  transition: transform .1s var(--ease), filter var(--motion-hover) var(--ease), background-color var(--motion-hover) var(--ease);
-}
-.btn:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--border-focus-ring);
-}
-.btn:active { transform: scale(0.97); }
-.btn-primary { background: var(--btn-primary-bg); color: #fff; box-shadow: var(--btn-primary-shadow); }
-.btn-primary:hover { filter: brightness(1.1); }
-.btn-danger { background: var(--btn-danger-bg); color: var(--btn-danger-text); border-color: var(--btn-danger-border); }
-.btn-danger:hover { background: var(--btn-danger-hover); }
-
-/* BoardUI composite typography utilities (single class carries size + weight
-   + line-height + letter-spacing) —— rebuild-safe: never combine
-   `text-sm font-medium leading-5` again on new markup. */
-.text-title-1-medium { font-size: 1.7rem; font-weight: 600; line-height: 2rem; letter-spacing: -0.02em; }
-.text-title-2-medium { font-size: 1.35rem; font-weight: 600; line-height: 1.75rem; letter-spacing: -0.02em; }
-.text-title-3-semibold { font-size: 1.125rem; font-weight: 600; line-height: 1.5rem; letter-spacing: -0.01em; }
-.text-headline-medium { font-size: 1rem; font-weight: 600; line-height: 1.5rem; letter-spacing: -0.005em; }
-.text-body-medium { font-size: 0.9rem; font-weight: 500; line-height: 1.4rem; }
-.text-body-regular { font-size: 0.9rem; font-weight: 400; line-height: 1.4rem; }
-.text-caption-1-semibold { font-size: 0.72rem; font-weight: 600; line-height: 1rem; letter-spacing: 0.06em; text-transform: uppercase; }
-
-/* BoardUI motion respect: reduce all transitions to near-instant + skip
-   shimmer / pulse / entrance blur for users who requested reduced motion. */
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
-  }
-  .brand h1 { animation: none; background-position: 0 0; }
-  .refresh-pill .ring-fg { transition: none; }
-}
-
-@media (max-width: 768px) {
-  body { padding: 16px 12px 32px; }
-  .global-grid { grid-template-columns: repeat(2, 1fr); }
-  .card .value { font-size: 1.25rem; }
-  .table-wrap { overflow: visible; }
-  table, thead, tbody, th, td, tr { display: block; }
-  thead { display: none; }
-  tr.row { padding: 12px; border-bottom: 1px solid var(--border); }
-  tr.row td { border: none; padding: 5px 0; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-  tr.row td::before {
-    content: attr(data-label);
-    font-size: .7rem;
-    font-weight: 600;
-    color: var(--text-3);
-    text-transform: uppercase;
-    letter-spacing: .05em;
-  }
-  tr.row.alert td:first-child::before { display: none; }
-  tr.row.alert { border-left: 3px solid var(--err); }
-}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--background-full); color: var(--text-primary); font: 14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif; -webkit-font-smoothing: antialiased; }
+button,input { font: inherit; } button,a,input,summary { -webkit-tap-highlight-color: transparent; }
+button,a,summary { touch-action: manipulation; } button { cursor: pointer; }
+a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+button:focus-visible,a:focus-visible,input:focus-visible,summary:focus-visible { outline: 2px solid var(--border-focus-ring); outline-offset: 3px; }
+button:disabled { opacity: .5; cursor: wait; } [hidden] { display: none !important; }
+.app-shell { display: grid; grid-template-columns: 216px minmax(0,1fr); min-height: 100vh; }
+.sidebar { position: sticky; top: 0; height: 100vh; background: var(--background-primary); border-right: 1px solid var(--separator-border); display: flex; flex-direction: column; padding: 28px 16px 20px; }
+.brand { display: flex; align-items: center; gap: 12px; padding: 0 12px 30px; }
+.brand-mark { width: 34px; height: 34px; border-radius: 12px; background: var(--accent-soft); display: grid; place-items: center; color: var(--accent); font-weight: 750; letter-spacing: -.05em; }
+.brand-name { font-size: 16px; font-weight: 650; letter-spacing: -.025em; }
+.brand-caption { color: var(--text-tertiary); font-size: 11px; margin-top: 2px; }
+.nav-label,.eyebrow { color: var(--text-tertiary); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+.nav-label { padding: 0 12px; margin: 10px 0; }
+.tab-bar { display: flex; flex-direction: column; gap: 4px; }
+.tab-btn { display: flex; align-items: center; gap: 10px; width: 100%; padding: 11px 12px; background: transparent; border: 0; border-radius: 10px; color: var(--text-secondary); text-align: left; font-weight: 500; transition: background 150ms var(--ease),color 150ms var(--ease); }
+.tab-btn:hover { background: var(--background-secondary); color: var(--text-primary); }
+.tab-btn.active { background: var(--accent-soft); color: var(--accent); }
+.nav-icon { display: grid; place-items: center; width: 21px; height: 21px; font-size: 10px; font-weight: 700; border: 1px solid currentColor; border-radius: 6px; opacity: .8; }
+.nav-divider { height: 1px; background: var(--separator-border); margin: 12px 8px; }
+.sidebar-bottom { margin-top: auto; padding: 24px 12px 0; color: var(--text-tertiary); font-size: 11px; }
+.sidebar-bottom a { color: var(--text-secondary); display: block; margin-bottom: 12px; }
+.workspace { min-width: 0; }
+.topbar { height: 74px; border-bottom: 1px solid var(--separator-border); background: var(--background-primary); display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 32px; }
+.breadcrumb { color: var(--text-tertiary); display: flex; align-items: center; gap: 12px; font-size: 12px; }
+.breadcrumb strong { color: var(--text-primary); font-weight: 550; }
+.topbar-actions { display: flex; align-items: center; gap: 12px; }
+.theme-toggle { display: grid; place-items: center; width: 34px; height: 34px; background: var(--background-primary); color: var(--text-secondary); border: 1px solid var(--border-button-default); border-radius: 10px; }
+.theme-toggle svg { width: 16px; height: 16px; } .icon-sun { display: none; }
+[data-theme="dark"] .icon-sun { display: block; } [data-theme="dark"] .icon-moon { display: none; }
+.release-menu { position: relative; } .release-menu > summary { list-style: none; display: flex; gap: 8px; align-items: center; border: 1px solid var(--border-button-default); border-radius: 10px; padding: 7px 10px; cursor: pointer; font-size: 12px; }
+.release-menu > summary::-webkit-details-marker { display: none; }
+.release-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-tertiary); }
+.release-menu[data-state="matched"] .release-dot { background: var(--ok); }
+.release-menu[data-state="modified"] .release-dot,.release-menu[data-state="stale"] .release-dot { background: var(--warn); }
+.release-card { position: absolute; right: 0; top: calc(100% + 10px); z-index: 20; width: 352px; padding: 22px; border: 1px solid var(--border-button-default); border-radius: 16px; background: var(--background-primary); box-shadow: var(--shadow-dialog); }
+.release-card h2 { font-size: 15px; margin: 0 0 14px; } .release-card p { font-size: 12px; color: var(--text-secondary); line-height: 1.7; }
+.release-card code { display: block; word-break: break-all; margin: 8px 0 16px; padding: 10px; border-radius: 8px; background: var(--background-secondary); font-size: 11px; }
+.release-links { display: flex; gap: 20px; font-size: 12px; }
+.release-state { font-size: 12px; color: var(--text-tertiary); } .release-state[data-state="matched"] { color: var(--ok); } .release-state[data-state="modified"] { color: var(--warn); }
+main { max-width: 1560px; margin: 0 auto; padding: 28px 32px 48px; }
+.page-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 24px; }
+h1 { font-size: 28px; line-height: 1.3; letter-spacing: -.04em; font-weight: 650; margin: 6px 0 8px; }
+.page-description { color: var(--text-secondary); margin: 0; font-size: 12px; max-width: 640px; line-height: 1.7; }
+.refresh-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.refresh-meta { color: var(--text-tertiary); width: 100%; text-align: right; font-size: 11px; font-variant-numeric: tabular-nums; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 12px; border: 1px solid var(--border-button-default); border-radius: 9px; background: var(--background-primary); color: var(--text-secondary); font-size: 12px; font-weight: 550; transition: background 150ms var(--ease),color 150ms var(--ease); }
+.btn:hover { background: var(--background-secondary); color: var(--text-primary); } .btn:active { filter: brightness(.95); }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--background-primary); }
+.btn-primary:hover { background: var(--accent); color: var(--background-primary); filter: brightness(.95); }
+.btn-danger { background: var(--err-soft); color: var(--err); border-color: var(--err); } .btn-danger:hover { color: var(--err); background: var(--err-soft); }
+.error-banner { display: none; color: var(--err); background: var(--err-soft); border: 1px solid var(--err); border-radius: 12px; padding: 12px 16px; margin: 0 0 20px; font-size: 12px; }
+.error-banner.show { display: block; }
+.tab-panel { display: none; } .tab-panel.active { display: block; }
+.global-grid { margin-bottom: 24px; }
+.kpi-primary { display: grid; grid-template-columns: repeat(auto-fit,minmax(165px,1fr)); gap: 14px; }
+.card { background: var(--background-primary); border: 1px solid var(--separator-border); border-radius: 24px; padding: 20px 22px; min-width: 0; }
+.card .label { font-size: 12px; color: var(--text-secondary); } .card .value { font-size: 30px; font-weight: 620; letter-spacing: -.04em; line-height: 1.3; margin-top: 9px; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.card .card-note { color: var(--text-tertiary); font-size: 10px; margin-top: 8px; }
+.value-qualifier { display: inline-block; font-size: 12px; font-weight: 500; letter-spacing: 0; line-height: 1.4; white-space: nowrap; color: var(--text-secondary); }
+.kpi-secondary { display: flex; flex-wrap: wrap; gap: 12px 26px; padding: 18px 6px 0; }
+.metric-inline { display: flex; align-items: baseline; gap: 8px; font-size: 11px; } .metric-inline .label { color: var(--text-tertiary); } .metric-inline .value { font-weight: 550; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1.2fr; gap: 18px; margin-bottom: 28px; }
+.chart-card { background: var(--background-primary); border: 1px solid var(--separator-border); border-radius: 24px; padding: 22px; min-width: 0; }
+.chart-card h3 { margin: 0 0 20px; font-size: 13px; font-weight: 600; } .canvas-wrap { height: 220px; position: relative; }
+.chart-unavailable { color: var(--text-tertiary); font-size: 12px; padding: 24px 0; }
+.section-title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; margin: 26px 0 12px; font-size: 14px; font-weight: 650; letter-spacing: -.015em; }
+.section-title small { font-size: 11px; font-weight: 400; color: var(--text-tertiary); }
+.table-wrap { border: 1px solid var(--separator-border); background: var(--background-primary); border-radius: 16px; overflow: hidden; margin-bottom: 20px; }
+.table-scroll { overflow-x: auto; } table { width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; white-space: nowrap; }
+th { padding: 12px 16px; font-weight: 500; color: var(--text-tertiary); background: var(--background-secondary); border-bottom: 1px solid var(--separator-border); font-size: 11px; }
+td { padding: 14px 16px; border-bottom: 1px solid var(--separator-border); } tbody tr:last-child td { border-bottom: 0; } tbody tr:hover { background: var(--background-secondary); }
+td strong { font-weight: 550; } .mono { font-family: ui-monospace,SFMono-Regular,Consolas,monospace; font-variant-numeric: tabular-nums; font-size: 11px; }
+.badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 999px; font-size: 10px; font-weight: 550; }
+.badge::before { content: ""; width: 4px; height: 4px; border-radius: 50%; background: currentColor; } .badge.ok { color: var(--ok); background: var(--ok-soft); } .badge.open { color: var(--err); background: var(--err-soft); } .badge.trial { color: var(--warn); background: var(--warn-soft); }
+.err-rate { display: flex; align-items: center; gap: 8px; } .err-rate .bar { width: 34px; height: 3px; background: var(--separator-border); border-radius: 2px; overflow: hidden; } .err-rate .bar span { height: 100%; display: block; }
+.deployments-tag { display: inline-block; color: var(--text-secondary); background: var(--background-secondary); border: 1px solid var(--separator-border); padding: 2px 6px; border-radius: 5px; font-size: 10px; margin: 2px 4px 2px 0; }
+.info-box { padding: 16px 20px; border: 1px solid var(--separator-border); border-radius: 12px; background: var(--background-primary); color: var(--text-secondary); font-size: 12px; line-height: 1.8; }
+.scope-note { color: var(--text-tertiary); font-size: 11px; margin: -2px 0 16px; }
+.history-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; color: var(--text-secondary); font-size: 12px; }
+input { color: var(--text-primary); background: var(--background-primary); padding: 8px 10px; border: 1px solid var(--border-button-default); border-radius: 8px; min-width: 0; } input[type=number] { width: 78px; }
+.history-summary { display: grid; grid-template-columns: repeat(auto-fit,minmax(155px,1fr)); gap: 14px; }
+.maintenance-panel { margin-top: 28px; padding: 16px 20px; border: 1px solid var(--separator-border); border-radius: 14px; color: var(--text-secondary); background: var(--background-primary); }
+.maintenance-panel summary { cursor: pointer; font-size: 12px; font-weight: 550; } .maintenance-panel p { color: var(--text-tertiary); font-size: 12px; max-width: 760px; }
+.cleanup-form { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; margin-top: 18px; } .field { display: flex; flex-direction: column; gap: 6px; font-size: 11px; }
+.field-key { flex: 1; min-width: 220px; max-width: 400px; } .feedback { font-size: 12px; line-height: 1.7; margin-top: 12px; color: var(--text-secondary); } .feedback[data-state=error] { color: var(--err); }
+.page-footer { color: var(--text-tertiary); border-top: 1px solid var(--separator-border); margin-top: 32px; padding-top: 18px; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; font-size: 10px; }
+@media (max-width:1100px) { .sidebar { padding-left: 10px; padding-right: 10px; } .app-shell { grid-template-columns: 188px minmax(0,1fr); } main { padding: 24px; } .topbar { padding: 0 24px; } .grid-2 { grid-template-columns: 1fr 1fr; } .page-heading { align-items: start; } }
+@media (max-width:800px) { .app-shell { grid-template-columns: 1fr; } .sidebar { position: static; height: auto; padding: 16px; border-right: 0; border-bottom: 1px solid var(--separator-border); } .brand { padding-bottom: 12px; } .nav-label,.sidebar-bottom,.nav-divider { display:none; } .tab-bar { flex-direction: row; overflow: auto; } .tab-btn { min-width: max-content; width: auto; } .topbar { padding: 0 16px; } main { padding: 24px 16px; } .page-heading { flex-direction: column; align-items: stretch; } .refresh-controls { justify-content: start; } .refresh-meta { text-align: left; } .grid-2 { grid-template-columns: 1fr; } .release-card { width: min(352px,calc(100vw - 32px)); } }
+@media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
 </style>
 </head>
 <body>
-<div class="hero">
-  <div class="brand">
-    <h1>Databricks Claude LB</h1>
-    <span class="tag" id="uptimeTag">-</span>
-  </div>
-  <div class="hero-actions">
-    <button class="theme-toggle" id="themeToggle" type="button" title="Toggle theme" aria-label="Toggle theme">
-      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
-    </button>
-    <div class="refresh-pill" id="refreshPill" title="Auto refresh every 5s">
-      <svg viewBox="0 0 36 36">
-        <circle class="ring-bg" cx="18" cy="18" r="15"/>
-        <circle class="ring-fg" id="refreshRing" cx="18" cy="18" r="15" stroke-dasharray="94.25" stroke-dashoffset="0"/>
-      </svg>
-      <span id="refreshLabel">Updating</span>
-    </div>
+<div class="app-shell">
+  <aside class="sidebar" aria-label="网关导航">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">LB</span><div><div class="brand-name">Claude LB</div><div class="brand-caption">多渠道模型网关</div></div></div>
+    <div class="nav-label">Provider workspace</div>
+    <nav class="tab-bar" role="tablist" aria-label="渠道与用量" aria-orientation="vertical">
+      <button class="tab-btn active" id="nav-anthropic" data-tab="anthropic" role="tab" aria-controls="tab-anthropic" aria-selected="true"><span class="nav-icon" aria-hidden="true">DB</span>Databricks</button>
+      <button class="tab-btn" id="nav-azure" data-tab="azure" role="tab" aria-controls="tab-azure" aria-selected="false" tabindex="-1"><span class="nav-icon" aria-hidden="true">AZ</span>Azure OpenAI</button>
+      <button class="tab-btn" id="nav-copilot" data-tab="copilot" role="tab" aria-controls="tab-copilot" aria-selected="false" tabindex="-1"><span class="nav-icon" aria-hidden="true">GH</span>GitHub Copilot</button>
+      <div class="nav-divider" role="presentation"></div>
+      <button class="tab-btn" id="nav-history" data-tab="history" role="tab" aria-controls="tab-history" aria-selected="false" tabindex="-1"><span class="nav-icon" aria-hidden="true">↗</span>历史用量</button>
+    </nav>
+    <div class="sidebar-bottom"><a href="https://github.com/ZenoRewn/databricks-claude-lb" target="_blank" rel="noopener noreferrer">GitHub 项目 ↗</a><span id="uptimeTag">等待连接网关</span></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar">
+      <div class="breadcrumb"><span>工作台</span><span aria-hidden="true">/</span><strong id="breadcrumbProvider">Databricks</strong></div>
+      <div class="topbar-actions">
+        <details class="release-menu" id="releaseMenu" data-state="unknown">
+          <summary aria-label="查看运行版本"><span class="release-dot" aria-hidden="true"></span><span>Release</span><span class="mono" id="releaseVersion">读取中</span><span aria-hidden="true">⌄</span></summary>
+          <div class="release-card"><h2>当前运行版本</h2><div class="release-state" id="releaseState">正在读取构建标识</div><code id="releaseRevision">—</code><div class="release-links"><a id="releaseCommit" target="_blank" rel="noopener noreferrer">GitHub 提交 ↗</a><a id="releaseCompare" target="_blank" rel="noopener noreferrer">与 main 比较 ↗</a></div><p>来自当前响应实例。文件一致表示运行内容匹配构建记录，不代表 GitHub main 没有后续更新。</p><p id="releaseUpdated">版本信息尚未读取</p></div>
+        </details>
+        <button class="theme-toggle" id="themeToggle" type="button" title="切换主题" aria-label="切换主题">
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+        </button>
+      </div>
+    </header>
+    <main id="mainContent">
+      <div class="page-heading"><div><div class="eyebrow">Gateway observability</div><h1 id="pageTitle">Databricks</h1><p class="page-description" id="pageDescription">请求及 Token 累计包含启动恢复用量；模型与费用为今日累计，端点分布为本进程累计。</p></div><div class="refresh-controls" id="refreshControls"><button class="btn" id="pauseRefresh" type="button" aria-pressed="false">暂停自动刷新</button><button class="btn" id="refreshNow" type="button">立即刷新 ↻</button><div class="refresh-meta"><span id="refreshLabel">等待首次更新</span><span aria-hidden="true"> · </span><span id="refreshCountdown">每 5 秒刷新</span></div></div></div>
+      <div class="error-banner" id="errorBanner" role="status"></div>
+      <section class="tab-panel active" id="tab-anthropic" role="tabpanel" aria-labelledby="nav-anthropic">
+        <div class="global-grid" id="globalGrid"><div class="info-box">正在读取渠道用量…</div></div>
+        <div class="grid-2"><div class="chart-card"><h3>今日模型 Token 分布</h3><div class="canvas-wrap"><canvas id="anthropicModelChart" aria-label="今日模型用量占比" role="img"></canvas></div></div><div class="chart-card"><h3>端点平均响应耗时 · ms</h3><div class="canvas-wrap"><canvas id="anthropicLatencyChart" aria-label="端点响应耗时" role="img"></canvas></div></div></div>
+        <h2 class="section-title">Databricks 端点 <small>本进程累计 · 熔断状态不等于上游 SLA</small></h2>
+        <div class="table-wrap"><div class="table-scroll"><table id="endpointTable"><thead><tr><th>端点</th><th>熔断状态</th><th>进行中</th><th>请求数</th><th>错误率</th><th>平均耗时</th><th>Token</th><th>估算费用</th></tr></thead><tbody id="endpointBody"><tr><td colspan="8">正在读取端点…</td></tr></tbody></table></div></div>
+        <h2 class="section-title">模型用量 <small>今日累计 · 含持久化恢复的用量</small></h2>
+        <div class="table-wrap"><div class="table-scroll"><table><thead><tr><th>模型</th><th>请求数</th><th>输入</th><th>输出</th><th>缓存写入</th><th>缓存读取</th><th>Token 合计</th><th>估算费用</th></tr></thead><tbody id="modelBody"></tbody></table></div></div>
+      </section>
+      <section class="tab-panel" id="tab-azure" role="tabpanel" aria-labelledby="nav-azure"><div id="azureContent"><div class="info-box">正在读取 Azure OpenAI…</div></div></section>
+      <section class="tab-panel" id="tab-copilot" role="tabpanel" aria-labelledby="nav-copilot"><div id="copilotContent"><div class="info-box">正在读取 GitHub Copilot…</div></div></section>
+      <section class="tab-panel" id="tab-history" role="tabpanel" aria-labelledby="nav-history">
+        <div class="history-toolbar"><label for="histDays">最近</label><input id="histDays" type="number" value="7" min="1" max="365"><span>天</span><button class="btn btn-primary" id="refreshHistory" type="button">更新用量</button></div>
+        <p class="scope-note">持久化历史跨进程保留；历史金额按模型参考价估算，不等同于 Copilot 或 Azure 的实际账单。</p>
+        <p class="feedback" id="historyStatus" role="status" hidden></p>
+        <div id="historyContent"><div class="info-box">切换到此页后读取历史用量。</div></div>
+        <details class="maintenance-panel"><summary>数据维护</summary><p>清理保留天数之前的持久化用量。删除后无法通过 Dashboard 撤销；请先确认备份。API Key 只用于本次清理请求，不保存在浏览器中。</p><form class="cleanup-form" id="cleanupForm"><label class="field" for="cleanDays">保留最近天数<input id="cleanDays" type="number" value="30" min="1" max="3650" required></label><label class="field field-key" for="managementKey">LB API Key<input id="managementKey" type="password" autocomplete="off" maxlength="4096" placeholder="仅用于这一次操作" required></label><button class="btn btn-danger" id="cleanupButton" type="submit">清理历史数据</button></form><div class="feedback" id="cleanupStatus" role="status"></div></details>
+      </section>
+      <footer class="page-footer"><span>Author: Zeno Ren</span><span>金额均为估算 · 流式 HTTP 200 不代表生成完成</span></footer>
+    </main>
   </div>
 </div>
-<div class="error-banner" id="errorBanner"></div>
-<div class="tab-bar">
-  <button class="tab-btn active" data-tab="anthropic">Anthropic Models</button>
-  <button class="tab-btn" data-tab="azure">Azure OpenAI Models</button>
-  <button class="tab-btn" data-tab="copilot">GitHub Copilot</button>
-  <button class="tab-btn" data-tab="history">Usage History</button>
-  <span class="tab-indicator" id="tabIndicator"></span>
-</div>
-
-<div class="tab-panel active" id="tab-anthropic">
-  <div class="global-grid" id="globalGrid"></div>
-  <div class="grid-2">
-    <div class="chart-card"><h3>Model Usage Share</h3><div class="canvas-wrap"><canvas id="anthropicModelChart"></canvas></div></div>
-    <div class="chart-card"><h3>Endpoint Latency (ms)</h3><div class="canvas-wrap"><canvas id="anthropicLatencyChart"></canvas></div></div>
-  </div>
-  <h2 class="section-title">Databricks Endpoints</h2>
-  <div class="table-wrap"><div class="table-scroll"><table id="endpointTable">
-    <thead><tr>
-      <th>Name</th><th>Status</th><th>Active</th><th>Total</th><th>Error Rate</th><th>Avg Latency</th><th>Total Tokens</th><th>Est. Cost</th>
-    </tr></thead>
-    <tbody id="endpointBody"></tbody>
-  </table></div></div>
-  <h2 class="section-title">Model Stats</h2>
-  <div class="table-wrap"><div class="table-scroll"><table>
-    <thead><tr>
-      <th>Model</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache Create</th><th>Cache Read</th><th>Total</th><th>Est. Cost</th>
-    </tr></thead>
-    <tbody id="modelBody"></tbody>
-  </table></div></div>
-</div>
-
-<div class="tab-panel" id="tab-azure"><div id="azureContent"><div class="info-box">Loading...</div></div></div>
-
-<div class="tab-panel" id="tab-copilot"><div id="copilotContent"><div class="info-box">Loading...</div></div></div>
-
-<div class="tab-panel" id="tab-history">
-  <div class="history-toolbar">
-    <label>Show last</label>
-    <input id="histDays" type="number" value="7" min="1" max="365">
-    <label>days</label>
-    <button class="btn btn-primary" onclick="loadHistory(+document.getElementById('histDays').value)">Refresh</button>
-    <span style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <label>Clean data older than</label>
-      <input id="cleanDays" type="number" value="30" min="1" max="3650">
-      <label>days</label>
-      <button class="btn btn-danger" onclick="cleanupHistory()">Clean Up</button>
-    </span>
-  </div>
-  <div id="historyContent"><div class="info-box">Loading history...</div></div>
-</div>
-
 <script>
 // ---------- Formatters ----------
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function circuitBadge(endpoint) {
+  const state = endpoint.circuit_state || (endpoint.circuit_open === true ? 'OPEN' : endpoint.circuit_open === false ? 'CLOSED' : 'UNKNOWN');
+  const values = {CLOSED: ['ok','Closed'], OPEN: ['open','Open'], HALF_OPEN: ['trial','Half-open']};
+  const [kind, label] = values[state] || ['trial','未知'];
+  return '<span class="badge ' + kind + '">' + label + '</span>';
+}
+function pricingSummary(models) {
+  const entries = Object.values(models || {});
+  const unknown = entries.some(item => item.estimated_cost_usd == null);
+  const known = entries.some(item => item.estimated_cost_usd != null || item.priced_requests > 0);
+  const subtotal = entries.reduce((sum, item) => sum + (item.known_cost_subtotal_usd ?? item.estimated_cost_usd ?? 0), 0);
+  return {estimated_cost_usd: unknown ? null : subtotal, known_cost_subtotal_usd: subtotal,
+    pricing_status: unknown ? (known ? 'partial' : 'unknown') : 'complete'};
+}
 function fmt(n) { n = +n || 0; if (n >= 1e9) return (n/1e9).toFixed(2)+'B'; if (n >= 1e6) return (n/1e6).toFixed(2)+'M'; if (n >= 1e3) return (n/1e3).toFixed(1)+'K'; return n.toFixed(0); }
 function fmtTime(s) { s = +s || 0; if (s >= 86400) return (s/86400).toFixed(1)+'d'; if (s >= 3600) return (s/3600).toFixed(1)+'h'; if (s >= 60) return (s/60).toFixed(1)+'m'; return s.toFixed(0)+'s'; }
 function fmtCost(v) { if (v == null) return '-'; v = +v; if (v >= 1) return '$'+v.toFixed(2); if (v >= 0.01) return '$'+v.toFixed(4); if (v > 0) return '$'+v.toFixed(6); return '$0'; }
@@ -643,70 +212,68 @@ function fmtModelCost(s, credits = false) {
   if (s.estimated_cost_usd == null) return '未知';
   return format(credits ? s.estimated_ai_credits : s.estimated_cost_usd);
 }
+function priceMarkup(summary) {
+  if (summary.pricing_status === 'partial') return escapeHtml(fmtCost(summary.known_cost_subtotal_usd || 0)) + ' <span class="value-qualifier">+ 未计价</span>';
+  return escapeHtml(fmtModelCost(summary));
+}
 function fmtMs(v) { return (+v || 0).toFixed(0) + 'ms'; }
 function fmtPct(v) { return (+v || 0).toFixed(1) + '%'; }
 
 // ---------- Number Ticker ----------
 function tickTo(el, target, formatter) {
   if (!el) return;
-  target = +target || 0;
-  const start = parseFloat(el.dataset.cur || '0');
-  if (Math.abs(start - target) < 0.0001) { el.textContent = formatter(target); el.dataset.cur = target; return; }
-  cancelAnimationFrame(el._raf || 0);
-  const t0 = performance.now();
-  const dur = 700;
-  const step = (t) => {
-    const p = Math.min(1, (t - t0) / dur);
-    const e = 1 - Math.pow(1 - p, 3);
-    const cur = start + (target - start) * e;
-    el.textContent = formatter(cur);
-    el.dataset.cur = cur;
-    if (p < 1) el._raf = requestAnimationFrame(step);
-    else el.dataset.cur = target;
-  };
-  el._raf = requestAnimationFrame(step);
+  el.textContent = formatter(target);
 }
 
 // ---------- Tab handling ----------
 let activeTab = 'anthropic';
 let historyLoaded = false;
-function switchTab(t) {
-  activeTab = t;
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === t));
-  document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + t));
-  updateTabIndicator();
-  if (t === 'history' && !historyLoaded) loadHistory();
-}
-function updateTabIndicator() {
-  const active = document.querySelector('.tab-btn.active');
-  const ind = document.getElementById('tabIndicator');
-  if (!active || !ind) return;
-  ind.style.width = active.offsetWidth + 'px';
-  ind.style.transform = 'translateX(' + active.offsetLeft + 'px)';
-}
-document.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
-window.addEventListener('resize', updateTabIndicator);
-
-// ---------- Magic card hover ----------
-function bindMagicHover(scope) {
-  (scope || document).querySelectorAll('.card:not([data-magic])').forEach(c => {
-    c.dataset.magic = '1';
-    c.addEventListener('mousemove', e => {
-      const r = c.getBoundingClientRect();
-      c.style.setProperty('--mx', (e.clientX - r.left) + 'px');
-      c.style.setProperty('--my', (e.clientY - r.top) + 'px');
-    });
+const TAB_INFO = {
+  anthropic: ['Databricks','请求及 Token 累计包含启动恢复用量；模型与费用为今日累计，端点分布为本进程累计。'],
+  azure: ['Azure OpenAI','Azure 渠道的请求分布与端点表现。此页为当前进程累计，不等同于资源配额或历史账单。'],
+  copilot: ['GitHub Copilot','Copilot 渠道的请求、账户端点与费用估算。此页为当前进程累计，未知价格不会按零费用处理。'],
+  history: ['历史用量','查看已持久化的每日请求和模型用量，跨进程保留；未落盘的内存事件不在历史记录中。']
+};
+function switchTab(tab) {
+  if (!TAB_INFO[tab]) return;
+  activeTab = tab;
+  document.getElementById('refreshControls').hidden = tab === 'history';
+  document.querySelectorAll('.tab-btn').forEach(button => {
+    const selected = button.dataset.tab === tab;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-selected', String(selected));
+    button.tabIndex = selected ? 0 : -1;
   });
+  document.querySelectorAll('.tab-panel').forEach(panel => panel.classList.toggle('active', panel.id === 'tab-' + tab));
+  document.getElementById('pageTitle').textContent = TAB_INFO[tab][0];
+  document.getElementById('breadcrumbProvider').textContent = TAB_INFO[tab][0];
+  document.getElementById('pageDescription').textContent = TAB_INFO[tab][1];
+  Object.values(charts).forEach(chart => chart.resize());
+  if (tab === 'history' && !historyLoaded) loadHistory();
 }
+document.querySelectorAll('.tab-btn').forEach((button, index, buttons) => {
+  button.addEventListener('click', () => switchTab(button.dataset.tab));
+  button.addEventListener('keydown', event => {
+    let target;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowRight') target = (index + 1) % buttons.length;
+    if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') target = (index + buttons.length - 1) % buttons.length;
+    if (event.key === 'Home') target = 0;
+    if (event.key === 'End') target = buttons.length - 1;
+    if (target == null) return;
+    event.preventDefault(); switchTab(buttons[target].dataset.tab); buttons[target].focus();
+  });
+});
 
 // ---------- Theme ----------
 function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 
 function applyChartDefaults() {
-  Chart.defaults.color = cssVar('--text-2') || '#94a3b8';
-  Chart.defaults.font.family = "'Inter', sans-serif";
+  if (typeof Chart === 'undefined') return;
+  chartColors.splice(0, chartColors.length, ...Array.from({length: 10}, (_, i) => cssVar('--chart-' + (i + 1))));
+  Chart.defaults.color = cssVar('--text-2');
+  Chart.defaults.font.family = "system-ui, sans-serif";
   Chart.defaults.font.size = 11;
-  Chart.defaults.borderColor = cssVar('--chart-grid-strong') || 'rgba(51, 65, 85, 0.4)';
+  Chart.defaults.borderColor = cssVar('--chart-grid-strong');
 }
 
 function applyThemeToChart(c) {
@@ -718,7 +285,7 @@ function applyThemeToChart(c) {
   const grid = cssVar('--chart-grid');
   const chartBorder = cssVar('--chart-border');
   const p = c.options.plugins || {};
-  if (p.tooltip) { p.tooltip.backgroundColor = tooltipBg; p.tooltip.borderColor = tooltipBorder; p.tooltip.titleColor = '#f1f5f9'; p.tooltip.bodyColor = '#e2e8f0'; }
+  if (p.tooltip) { p.tooltip.backgroundColor = tooltipBg; p.tooltip.borderColor = tooltipBorder; p.tooltip.titleColor = cssVar('--tooltip-text'); p.tooltip.bodyColor = cssVar('--tooltip-text'); }
   if (p.legend && p.legend.labels) { p.legend.labels.color = text1; }
   if (c.options.scales) {
     Object.values(c.options.scales).forEach(s => {
@@ -729,7 +296,10 @@ function applyThemeToChart(c) {
   }
   if (c.config.type === 'doughnut' && c.data.datasets[0]) {
     c.data.datasets[0].borderColor = chartBorder;
+    c.data.datasets[0].backgroundColor = [...chartColors];
   }
+  if (c.config.type === 'bar' && c.data.datasets[0]) { c.data.datasets[0].backgroundColor = chartColors[0]; c.data.datasets[0].borderColor = chartColors[0]; }
+  if (c.config.type === 'line') c.data.datasets.forEach((dataset, index) => { dataset.borderColor = chartColors[index]; dataset.backgroundColor = chartColors[index]; });
   c.update('none');
 }
 
@@ -742,7 +312,7 @@ function setTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   try { localStorage.setItem('lb-theme', theme); } catch (e) {}
   const btn = document.getElementById('themeToggle');
-  if (btn) { btn.title = theme === 'light' ? 'Switch to dark' : 'Switch to light'; btn.setAttribute('aria-label', btn.title); }
+  if (btn) { btn.title = theme === 'light' ? '切换深色主题' : '切换浅色主题'; btn.setAttribute('aria-label', btn.title); }
   applyChartTheme();
 }
 
@@ -758,22 +328,38 @@ function initTheme() {
 
 // ---------- Chart registry ----------
 const charts = {};
-const chartColors = ['#60a5fa', '#c084fc', '#4ade80', '#fbbf24', '#f87171', '#22d3ee', '#f472b6', '#a78bfa', '#fb923c', '#34d399'];
+const chartColors = Array.from({length: 10}, (_, i) => cssVar('--chart-' + (i + 1)));
+function chartCanvas(id) {
+  const canvas = document.getElementById(id);
+  if (!canvas) return null;
+  if (typeof Chart === 'undefined') {
+    canvas.hidden = true;
+    if (!canvas.parentElement.querySelector('.chart-unavailable')) {
+      const note = document.createElement('p'); note.className = 'chart-unavailable';
+      note.textContent = '图表组件未能加载，表格数据仍可查看。'; canvas.parentElement.appendChild(note);
+    }
+    return null;
+  }
+  if (charts[id] && charts[id].canvas !== canvas) { charts[id].destroy(); delete charts[id]; }
+  canvas.setAttribute('role', 'img');
+  canvas.setAttribute('aria-label', canvas.closest('.chart-card')?.querySelector('h3')?.textContent || '数据图表');
+  return canvas;
+}
 
 function ensureDoughnut(canvasId) {
-  if (charts[canvasId]) return charts[canvasId];
-  const ctx = document.getElementById(canvasId);
+  const ctx = chartCanvas(canvasId);
   if (!ctx) return null;
+  if (charts[canvasId]) return charts[canvasId];
   charts[canvasId] = new Chart(ctx, {
     type: 'doughnut',
-    data: { labels: [], datasets: [{ data: [], backgroundColor: chartColors, borderColor: cssVar('--chart-border') || 'rgba(15, 23, 42, 0.8)', borderWidth: 2 }] },
+    data: { labels: [], datasets: [{ data: [], backgroundColor: chartColors, borderColor: cssVar('--chart-border'), borderWidth: 2 }] },
     options: {
       responsive: true, maintainAspectRatio: false,
       cutout: '62%',
       plugins: {
         legend: { position: 'right', labels: { boxWidth: 10, boxHeight: 10, padding: 10, color: cssVar('--text-1'), font: { size: 11 } } },
         tooltip: {
-          backgroundColor: cssVar('--tooltip-bg'), borderColor: cssVar('--tooltip-border'), borderWidth: 1, padding: 10, cornerRadius: 8,
+          backgroundColor: cssVar('--tooltip-bg'), titleColor: cssVar('--tooltip-text'), bodyColor: cssVar('--tooltip-text'), borderColor: cssVar('--tooltip-border'), borderWidth: 1, padding: 10, cornerRadius: 8,
           callbacks: {
             label: (c) => {
               const total = c.dataset.data.reduce((a, b) => a + b, 0);
@@ -784,49 +370,49 @@ function ensureDoughnut(canvasId) {
           }
         }
       },
-      animation: { duration: 500, easing: 'easeOutCubic' }
+      animation: false
     }
   });
   return charts[canvasId];
 }
 
 function ensureBar(canvasId) {
-  if (charts[canvasId]) return charts[canvasId];
-  const ctx = document.getElementById(canvasId);
+  const ctx = chartCanvas(canvasId);
   if (!ctx) return null;
+  if (charts[canvasId]) return charts[canvasId];
   charts[canvasId] = new Chart(ctx, {
     type: 'bar',
-    data: { labels: [], datasets: [{ label: 'Avg Latency (ms)', data: [], backgroundColor: 'rgba(96, 165, 250, 0.7)', borderColor: '#60a5fa', borderWidth: 1, borderRadius: 6 }] },
+    data: { labels: [], datasets: [{ label: 'Avg Latency (ms)', data: [], backgroundColor: chartColors[0], borderColor: chartColors[0], borderWidth: 1, borderRadius: 6 }] },
     options: {
       indexAxis: 'y',
       responsive: true, maintainAspectRatio: false,
       plugins: {
         legend: { display: false },
-        tooltip: { backgroundColor: cssVar('--tooltip-bg'), borderColor: cssVar('--tooltip-border'), borderWidth: 1, padding: 10, cornerRadius: 8, callbacks: { label: (c) => fmtMs(c.parsed.x) } }
+        tooltip: { backgroundColor: cssVar('--tooltip-bg'), titleColor: cssVar('--tooltip-text'), bodyColor: cssVar('--tooltip-text'), borderColor: cssVar('--tooltip-border'), borderWidth: 1, padding: 10, cornerRadius: 8, callbacks: { label: (c) => fmtMs(c.parsed.x) } }
       },
       scales: {
         x: { beginAtZero: true, grid: { color: cssVar('--chart-grid') }, ticks: { callback: (v) => v + 'ms' } },
         y: { grid: { display: false } }
       },
-      animation: { duration: 500, easing: 'easeOutCubic' }
+      animation: false
     }
   });
   return charts[canvasId];
 }
 
 function ensureHistoryLine(canvasId) {
-  if (charts[canvasId]) return charts[canvasId];
-  const ctx = document.getElementById(canvasId);
+  const ctx = chartCanvas(canvasId);
   if (!ctx) return null;
+  if (charts[canvasId]) return charts[canvasId];
   charts[canvasId] = new Chart(ctx, {
     type: 'line',
     data: {
       labels: [],
       datasets: [
-        { label: 'Input', data: [], borderColor: '#60a5fa', backgroundColor: 'rgba(96, 165, 250, 0.15)', tension: 0.35, fill: true, yAxisID: 'y', pointRadius: 3, pointHoverRadius: 5, borderWidth: 2 },
-        { label: 'Output', data: [], borderColor: '#c084fc', backgroundColor: 'rgba(192, 132, 252, 0.12)', tension: 0.35, fill: true, yAxisID: 'y', pointRadius: 3, pointHoverRadius: 5, borderWidth: 2 },
-        { label: 'Cache Read', data: [], borderColor: '#4ade80', backgroundColor: 'rgba(74, 222, 128, 0.08)', tension: 0.35, fill: false, yAxisID: 'y', pointRadius: 3, pointHoverRadius: 5, borderWidth: 2, borderDash: [4, 4] },
-        { label: 'Cost (USD)', data: [], borderColor: '#fbbf24', backgroundColor: 'rgba(251, 191, 36, 0.1)', tension: 0.35, fill: false, yAxisID: 'y1', pointRadius: 3, pointHoverRadius: 5, borderWidth: 2 }
+        { label: '输入', data: [], borderColor: chartColors[0], backgroundColor: chartColors[0], tension: 0.35, fill: false, yAxisID: 'y', pointRadius: 3, pointHoverRadius: 5, borderWidth: 2 },
+        { label: '输出', data: [], borderColor: chartColors[1], backgroundColor: chartColors[1], tension: 0.35, fill: false, yAxisID: 'y', pointRadius: 3, pointHoverRadius: 5, borderWidth: 2 },
+        { label: '缓存读取', data: [], borderColor: chartColors[2], backgroundColor: chartColors[2], tension: 0.35, fill: false, yAxisID: 'y', pointRadius: 3, pointHoverRadius: 5, borderWidth: 2, borderDash: [4, 4] },
+        { label: '参考费用 (USD)', data: [], borderColor: chartColors[3], backgroundColor: chartColors[3], tension: 0.35, fill: false, yAxisID: 'y1', pointRadius: 3, pointHoverRadius: 5, borderWidth: 2 }
       ]
     },
     options: {
@@ -835,7 +421,7 @@ function ensureHistoryLine(canvasId) {
       plugins: {
         legend: { position: 'top', labels: { boxWidth: 12, boxHeight: 12, padding: 14, color: cssVar('--text-1'), usePointStyle: true, pointStyle: 'circle' } },
         tooltip: {
-          backgroundColor: cssVar('--tooltip-bg'), borderColor: cssVar('--tooltip-border'), borderWidth: 1, padding: 12, cornerRadius: 8,
+          backgroundColor: cssVar('--tooltip-bg'), titleColor: cssVar('--tooltip-text'), bodyColor: cssVar('--tooltip-text'), borderColor: cssVar('--tooltip-border'), borderWidth: 1, padding: 12, cornerRadius: 8,
           callbacks: { label: (c) => c.dataset.label + ': ' + (c.dataset.yAxisID === 'y1' ? fmtCost(c.parsed.y) : fmt(c.parsed.y)) }
         }
       },
@@ -844,7 +430,7 @@ function ensureHistoryLine(canvasId) {
         y: { type: 'linear', position: 'left', beginAtZero: true, grid: { color: cssVar('--chart-grid') }, ticks: { callback: (v) => fmt(v) }, title: { display: true, text: 'Tokens', color: cssVar('--text-2'), font: { size: 11 } } },
         y1: { type: 'linear', position: 'right', beginAtZero: true, grid: { display: false }, ticks: { callback: (v) => '$' + v.toFixed(2) }, title: { display: true, text: 'Cost', color: cssVar('--text-2'), font: { size: 11 } } }
       },
-      animation: { duration: 600, easing: 'easeOutCubic' }
+      animation: false
     }
   });
   return charts[canvasId];
@@ -852,33 +438,37 @@ function ensureHistoryLine(canvasId) {
 
 // ---------- KPI cards (diff update) ----------
 const KPI_DEFS = [
-  { key: 'total_requests', label: 'Total Requests', fmt: fmt, cls: 'blue' },
-  { key: 'total_input_tokens', label: 'Input Tokens', fmt: fmt, cls: '' },
-  { key: 'total_output_tokens', label: 'Output Tokens', fmt: fmt, cls: '' },
-  { key: 'total_cache_creation_tokens', label: 'Cache Create', fmt: fmt, cls: '' },
-  { key: 'total_cache_read_tokens', label: 'Cache Read', fmt: fmt, cls: '' },
-  { key: 'total_tokens', label: 'Total Tokens', fmt: fmt, cls: 'amber' },
-  { key: 'avg_response_time_ms', label: 'Avg Latency', fmt: fmtMs, cls: '' },
-  { key: 'requests_per_minute', label: 'RPM', fmt: (v) => (+v).toFixed(2), cls: 'green' },
-  { key: 'estimated_total_cost_usd', label: 'Est. Cost', fmt: fmtCost, cls: 'purple' }
+  { key: 'total_requests', label: '请求数', fmt: fmt, primary: true },
+  { key: 'total_tokens', label: 'Token 合计', fmt: fmt, primary: true },
+  { key: 'estimated_total_cost_usd', label: '估算费用', fmt: fmtCost, primary: true },
+  { key: 'avg_response_time_ms', label: '平均响应耗时', fmt: fmtMs, primary: true },
+  { key: 'total_input_tokens', label: '输入', fmt: fmt },
+  { key: 'total_output_tokens', label: '输出', fmt: fmt },
+  { key: 'total_cache_creation_tokens', label: '缓存写入', fmt: fmt },
+  { key: 'total_cache_read_tokens', label: '缓存读取', fmt: fmt },
+  { key: 'requests_per_minute', label: '平均 RPM 参考', fmt: v => (+v).toFixed(2) }
 ];
-
 function renderKpiGrid(gridId, defs, data, prefix) {
   const grid = document.getElementById(gridId);
   if (!grid.dataset.built) {
-    grid.innerHTML = defs.map(d => '<div class="card"><div class="label">' + d.label + '</div><div class="value ' + d.cls + '" id="' + prefix + '-' + d.key + '">0</div></div>').join('');
+    const card = item => {
+      const note = item.key === 'estimated_total_cost_usd' && prefix === 'kpi-anthropic'
+        ? '今日累计 · 含恢复用量' : item.key === 'avg_response_time_ms' ? '服务端统计值 · 非首 Token 延迟' : prefix === 'kpi-anthropic' ? '累计 · 含启动恢复用量' : '当前进程累计';
+      return '<div class="' + (item.primary ? 'card' : 'metric-inline') + '"><div class="label">' + item.label + '</div><div class="value" id="' + prefix + '-' + item.key + '">—</div>' + (item.primary ? '<div class="card-note">' + note + '</div>' : '') + '</div>';
+    };
+    grid.innerHTML = '<div class="kpi-primary">' + defs.filter(d => d.primary).map(card).join('') + '</div><div class="kpi-secondary">' + defs.filter(d => !d.primary).map(card).join('') + '</div>';
     grid.dataset.built = '1';
-    bindMagicHover(grid);
   }
-  defs.forEach(d => {
-    const el = document.getElementById(prefix + '-' + d.key);
-    if (d.key.startsWith('estimated_') && data[d.key] == null) {
-      cancelAnimationFrame(el._raf || 0);
-      el.textContent = '未知';
-      el.dataset.cur = '0';
-    } else { tickTo(el, data[d.key] || 0, d.fmt); }
+  defs.forEach(item => {
+    const element = document.getElementById(prefix + '-' + item.key);
+    if (item.key === 'estimated_total_cost_usd' && data.pricing_status) element.innerHTML = priceMarkup({...data, estimated_cost_usd: data.estimated_total_cost_usd});
+    else if (item.key === 'estimated_ai_credits' && data.pricing_status) element.textContent = fmtModelCost({...data, estimated_cost_usd: data.estimated_total_cost_usd}, true);
+    else if (item.key.startsWith('estimated_') && data[item.key] == null) element.textContent = '未知';
+    else if (data[item.key] == null) element.textContent = '—';
+    else tickTo(element, data[item.key], item.fmt);
   });
 }
+
 
 // ---------- Endpoint table (diff update) ----------
 function errBarColor(rate) {
@@ -891,18 +481,18 @@ function renderEndpointRow(e, prefix) {
   const rowId = prefix + '-row-' + e.name;
   let tr = document.getElementById(rowId);
   const isAlert = e.circuit_open || (e.error_rate || 0) > 5;
-  const deploymentsHtml = e.deployments ? '<div style="font-size:.7rem;color:var(--text-3);margin-top:3px">' + (e.deployments || []).map(d => '<span class="deployments-tag">' + d + '</span>').join('') + '</div>' : '';
+  const deploymentsHtml = e.deployments ? '<div style="font-size:.7rem;color:var(--text-3);margin-top:3px">' + (e.deployments || []).map(d => '<span class="deployments-tag">' + escapeHtml(d) + '</span>').join('') + '</div>' : '';
   const barColor = errBarColor(+e.error_rate || 0);
-  const barWidth = Math.min(100, (+e.error_rate || 0) * 10);
+  const barWidth = Math.max(0, Math.min(100, +e.error_rate || 0));
   const html =
-    '<td data-label="Name"><strong>' + e.name + '</strong>' + deploymentsHtml + '</td>' +
-    '<td data-label="Status"><span class="badge ' + (e.circuit_open ? 'open' : 'ok') + '">' + (e.circuit_open ? 'OPEN' : 'OK') + '</span></td>' +
-    '<td data-label="Active" class="mono">' + e.active_requests + '</td>' +
+    '<td data-label="Name"><strong>' + escapeHtml(e.name) + '</strong>' + deploymentsHtml + '</td>' +
+    '<td data-label="Status">' + circuitBadge(e) + '</td>' +
+    '<td data-label="Active" class="mono">' + fmt(e.active_requests) + '</td>' +
     '<td data-label="Total" class="mono">' + fmt(e.total_requests) + '</td>' +
     '<td data-label="Error Rate"><span class="err-rate"><span class="bar"><span style="width:' + barWidth + '%;background:' + barColor + '"></span></span><span class="mono">' + fmtPct(e.error_rate) + '</span></span></td>' +
     '<td data-label="Avg Latency" class="mono">' + fmtMs(e.avg_response_time_ms) + '</td>' +
-    '<td data-label="Total Tokens" class="mono">' + fmt(e.total_tokens) + '</td>' +
-    '<td data-label="Est. Cost" class="mono">' + (e.estimated_cost_usd != null ? fmtCost(e.estimated_cost_usd) : '-') + '</td>';
+    '<td data-label="Token 合计" class="mono">' + fmt(e.total_tokens) + '</td>' +
+    '<td data-label="Est. Cost" class="mono">' + fmtModelCost(e) + '</td>';
   if (!tr) {
     tr = document.createElement('tr');
     tr.id = rowId;
@@ -918,6 +508,7 @@ function diffEndpoints(bodyId, endpoints, prefix) {
   endpoints = endpoints || [];
   const tbody = document.getElementById(bodyId);
   const seen = new Set();
+  if (!endpoints.length) { tbody.innerHTML = '<tr><td colspan="8">此渠道尚未配置端点。</td></tr>'; return; }
   endpoints.forEach(e => {
     seen.add(prefix + '-row-' + e.name);
     const { tr, isAlert, isNew } = renderEndpointRow(e, prefix);
@@ -929,7 +520,7 @@ function diffEndpoints(bodyId, endpoints, prefix) {
 
 // ---------- Model tables ----------
 function aggregateModels(endpoints) {
-  const models = {};
+  const models = Object.create(null);
   (endpoints || []).forEach(e => {
     Object.entries(e.model_stats || {}).forEach(([m, s]) => {
       if (!models[m]) models[m] = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, requests: 0, estimated_cost_usd: 0, known_cost_subtotal_usd: 0, priced_requests: 0, unpriced_requests: 0 };
@@ -955,12 +546,12 @@ function renderModelTable(bodyId, models, withCost, withCredits = false) {
   const tbody = document.getElementById(bodyId);
   const entries = Object.entries(models);
   if (entries.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="' + (7 + (withCost ? 1 : 0) + (withCredits ? 1 : 0)) + '" style="text-align:center;color:var(--text-3);padding:24px">No data yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="' + (7 + (withCost ? 1 : 0) + (withCredits ? 1 : 0)) + '" style="text-align:center;color:var(--text-3);padding:24px">暂无用量记录</td></tr>';
     return;
   }
   tbody.innerHTML = entries.map(([m, s]) =>
     '<tr class="row">' +
-    '<td data-label="Model"><strong>' + m + '</strong></td>' +
+    '<td data-label="Model"><strong>' + escapeHtml(m) + '</strong></td>' +
     '<td data-label="Requests" class="mono">' + fmt(s.requests) + '</td>' +
     '<td data-label="Input" class="mono">' + fmt(s.input_tokens) + '</td>' +
     '<td data-label="Output" class="mono">' + fmt(s.output_tokens) + '</td>' +
@@ -974,58 +565,66 @@ function renderModelTable(bodyId, models, withCost, withCredits = false) {
 }
 
 // ---------- History ----------
-async function loadHistory(days) {
-  days = days || 7;
+let historySequence = 0;
+async function loadHistory(days = 7) {
   const hc = document.getElementById('historyContent');
-  hc.innerHTML = '<div class="info-box">Loading...</div>';
+  const status = document.getElementById('historyStatus');
+  status.hidden = false;
+  if (!Number.isInteger(days) || days < 1 || days > 365) {
+    status.dataset.state = 'error'; status.textContent = '查询天数须为 1–365 的整数。'; return;
+  }
+  const sequence = ++historySequence;
+  status.dataset.state = 'pending'; status.textContent = '正在读取历史用量…';
   try {
-    const r = await fetch('/stats/history?days=' + days);
-    const d = await r.json();
-    if (d.error) { hc.innerHTML = '<div class="info-box">' + d.error + '</div>'; return; }
-    let totalCost = 0, totalTokens = 0, totalReq = 0;
+    const d = await fetchJSON('/stats/history?days=' + days);
+    if (sequence !== historySequence) return;
+    if (d.error) throw new Error('持久化用量尚未配置或暂不可用。');
+    if (!Array.isArray(d.history)) throw new Error('历史响应格式异常。');
+    const allModels = aggregateModels(d.history.map(day => ({model_stats: day.models || {}})));
+    const totalPricing = pricingSummary(allModels);
+    let totalTokens = 0, totalReq = 0;
     d.history.forEach(h => {
-      totalCost += h.estimated_total_cost_usd || 0;
       const t = h.totals || {};
       totalTokens += (t.input_tokens || 0) + (t.output_tokens || 0);
       totalReq += t.requests || 0;
     });
-    const avgCost = d.history.length ? totalCost / d.history.length : 0;
+    const divisor = d.history.length || 1;
+    const dailyPricing = {...totalPricing, estimated_cost_usd: totalPricing.estimated_cost_usd == null ? null : totalPricing.estimated_cost_usd / divisor, known_cost_subtotal_usd: totalPricing.known_cost_subtotal_usd / divisor};
     hc.innerHTML =
-      '<div class="global-grid">' +
-      '<div class="card"><div class="label">Period</div><div class="value blue">' + days + ' Days</div></div>' +
-      '<div class="card"><div class="label">Total Requests</div><div class="value">' + fmt(totalReq) + '</div></div>' +
-      '<div class="card"><div class="label">Total Tokens</div><div class="value amber">' + fmt(totalTokens) + '</div></div>' +
-      '<div class="card"><div class="label">Total Cost</div><div class="value purple">' + fmtCost(totalCost) + '</div></div>' +
-      '<div class="card"><div class="label">Avg Daily Cost</div><div class="value">' + fmtCost(avgCost) + '</div></div>' +
+      '<div class="global-grid history-summary">' +
+      '<div class="card"><div class="label">时间范围</div><div class="value">' + days + ' 天</div></div>' +
+      '<div class="card"><div class="label">累计请求</div><div class="value">' + fmt(totalReq) + '</div></div>' +
+      '<div class="card"><div class="label">Token 合计</div><div class="value">' + fmt(totalTokens) + '</div></div>' +
+      '<div class="card"><div class="label">参考费用合计</div><div class="value">' + priceMarkup(totalPricing) + '</div></div>' +
+      '<div class="card"><div class="label">日均参考费用</div><div class="value">' + priceMarkup(dailyPricing) + '</div></div>' +
       '</div>' +
       '<div class="grid-2">' +
-      '<div class="chart-card" style="min-height:320px"><h3>Daily Tokens &amp; Cost</h3><div class="canvas-wrap" style="height:280px"><canvas id="historyLineChart"></canvas></div></div>' +
-      '<div class="chart-card" style="min-height:320px"><h3>Model Breakdown (' + days + 'd)</h3><div class="canvas-wrap" style="height:280px"><canvas id="historyModelChart"></canvas></div></div>' +
+      '<div class="chart-card" style="min-height:320px"><h3>每日 Token 与参考费用</h3><div class="canvas-wrap" style="height:280px"><canvas id="historyLineChart"></canvas></div></div>' +
+      '<div class="chart-card" style="min-height:320px"><h3>模型汇总 (' + days + 'd)</h3><div class="canvas-wrap" style="height:280px"><canvas id="historyModelChart"></canvas></div></div>' +
       '</div>' +
-      '<h2 class="section-title">Daily Usage</h2>' +
+      '<h2 class="section-title">每日用量</h2>' +
       '<div class="table-wrap"><div class="table-scroll"><table>' +
-      '<thead><tr><th>Date</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache Create</th><th>Cache Read</th><th>Total</th><th>Est. Cost</th></tr></thead>' +
+      '<thead><tr><th>日期</th><th>请求数</th><th>输入</th><th>输出</th><th>缓存写入</th><th>缓存读取</th><th>Token 合计</th><th>估算费用</th></tr></thead>' +
       '<tbody>' +
       d.history.slice().reverse().map(h => {
         const t = h.totals || {};
         return '<tr class="row">' +
-          '<td data-label="Date" class="mono">' + h.date + '</td>' +
+          '<td data-label="Date" class="mono">' + escapeHtml(h.date) + '</td>' +
           '<td data-label="Requests" class="mono">' + fmt(t.requests) + '</td>' +
           '<td data-label="Input" class="mono">' + fmt(t.input_tokens) + '</td>' +
           '<td data-label="Output" class="mono">' + fmt(t.output_tokens) + '</td>' +
           '<td data-label="Cache Create" class="mono">' + fmt(t.cache_creation_tokens) + '</td>' +
           '<td data-label="Cache Read" class="mono">' + fmt(t.cache_read_tokens) + '</td>' +
           '<td data-label="Total" class="mono">' + fmt((t.input_tokens || 0) + (t.output_tokens || 0)) + '</td>' +
-          '<td data-label="Est. Cost" class="mono">' + fmtCost(h.estimated_total_cost_usd) + '</td>' +
+          '<td data-label="Est. Cost" class="mono">' + fmtModelCost(pricingSummary(h.models)) + '</td>' +
           '</tr>';
       }).join('') +
       '</tbody></table></div></div>' +
-      '<h2 class="section-title">Model Breakdown</h2>' +
+      '<h2 class="section-title">模型汇总</h2>' +
       '<div class="table-wrap"><div class="table-scroll"><table id="historyModelTable">' +
-      '<thead><tr><th>Model</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache Create</th><th>Cache Read</th><th>Total</th><th>Est. Cost</th></tr></thead>' +
+      '<thead><tr><th>模型</th><th>请求数</th><th>输入</th><th>输出</th><th>缓存写入</th><th>缓存读取</th><th>Token 合计</th><th>估算费用</th></tr></thead>' +
       '<tbody id="historyModelBody"></tbody>' +
       '</table></div></div>';
-    bindMagicHover(hc);
 
     // Populate charts
     const lineChart = ensureHistoryLine('historyLineChart');
@@ -1034,7 +633,7 @@ async function loadHistory(days) {
       const input = d.history.map(h => (h.totals || {}).input_tokens || 0);
       const output = d.history.map(h => (h.totals || {}).output_tokens || 0);
       const cacheRead = d.history.map(h => (h.totals || {}).cache_read_tokens || 0);
-      const cost = d.history.map(h => h.estimated_total_cost_usd || 0);
+      const cost = d.history.map(h => pricingSummary(h.models).estimated_cost_usd);
       lineChart.data.labels = labels;
       lineChart.data.datasets[0].data = input;
       lineChart.data.datasets[1].data = output;
@@ -1043,19 +642,6 @@ async function loadHistory(days) {
       lineChart.update();
     }
 
-    // Aggregate model stats
-    const allModels = {};
-    d.history.forEach(h => {
-      Object.entries(h.models || {}).forEach(([m, s]) => {
-        if (!allModels[m]) allModels[m] = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, requests: 0, estimated_cost_usd: 0 };
-        allModels[m].input_tokens += s.input_tokens || 0;
-        allModels[m].output_tokens += s.output_tokens || 0;
-        allModels[m].cache_creation_tokens += s.cache_creation_tokens || 0;
-        allModels[m].cache_read_tokens += s.cache_read_tokens || 0;
-        allModels[m].requests += s.requests || 0;
-        allModels[m].estimated_cost_usd += s.estimated_cost_usd || 0;
-      });
-    });
     renderModelTable('historyModelBody', allModels, true);
     const modelChart = ensureDoughnut('historyModelChart');
     if (modelChart) {
@@ -1065,44 +651,121 @@ async function loadHistory(days) {
       modelChart.update();
     }
     historyLoaded = true;
+    status.dataset.state = 'success';
+    status.textContent = '已读取最近 ' + days + ' 天的持久化用量 · 更新于 ' + new Date().toLocaleTimeString('zh-CN', {hour12: false}) + '。历史数据按需刷新。';
   } catch (err) {
-    hc.innerHTML = '<div class="info-box">Failed to load history: ' + err.message + '</div>';
+    if (sequence !== historySequence) return;
+    status.dataset.state = 'error';
+    status.textContent = '历史更新失败。' + err.message + (historyLoaded ? ' 已保留上次结果。' : '');
   }
 }
 
-async function cleanupHistory() {
-  const days = +document.getElementById('cleanDays').value;
-  if (!confirm('Confirm: delete all usage data older than ' + days + ' days?')) return;
+// ---------- Release identity and safe operations ----------
+let releaseLastRead = 0;
+let releaseInFlight = false;
+let cleanupInFlight = false;
+async function fetchJSON(url, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
   try {
-    const r = await fetch('/stats/history?keep_days=' + days, { method: 'DELETE' });
-    const d = await r.json();
-    alert('Deleted ' + d.deleted + ' records');
+    const response = await fetch(url, {...options, signal: controller.signal, cache: 'no-store', redirect: 'error'});
+    if (!response.ok) {
+      const error = new Error(response.status === 401 ? '鉴权失败（401），请检查 API Key。' : '服务返回 HTTP ' + response.status + '。');
+      error.status = response.status; throw error;
+    }
+    return await response.json();
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('请求超时，请检查连接。');
+    throw error;
+  } finally { clearTimeout(timeout); }
+}
+function renderRelease(data) {
+  const revision = typeof data.source_revision === 'string' && /^[a-f0-9]{40}$/.test(data.source_revision) ? data.source_revision : null;
+  const state = revision && ['matched','modified'].includes(data.verification) ? data.verification : 'unknown';
+  document.getElementById('releaseMenu').dataset.state = state;
+  document.getElementById('releaseVersion').textContent = revision ? revision.slice(0,7) : '未标注';
+  const status = document.getElementById('releaseState'); status.dataset.state = state;
+  status.textContent = !revision ? '版本未标注' : state === 'matched' ? '构建文件一致' : state === 'modified' ? '运行文件有变化' : '构建来源尚未核验';
+  document.getElementById('releaseRevision').textContent = revision || '本地运行或未提供构建标识';
+  const repository = 'https://github.com/ZenoRewn/databricks-claude-lb';
+  for (const [id, suffix] of [['releaseCommit', '/commit/' + revision], ['releaseCompare', '/compare/' + revision + '...main']]) {
+    const link = document.getElementById(id);
+    if (revision) { link.href = repository + suffix; link.removeAttribute('aria-disabled'); }
+    else { link.removeAttribute('href'); link.setAttribute('aria-disabled', 'true'); }
+  }
+}
+async function refreshRelease(force = false) {
+  if (releaseInFlight || (!force && Date.now() - releaseLastRead < 60000)) return;
+  releaseInFlight = true;
+  try {
+    renderRelease(await fetchJSON('/version'));
+    releaseLastRead = Date.now();
+    document.getElementById('releaseUpdated').textContent = '读取于 ' + new Date().toLocaleTimeString('zh-CN', {hour12: false});
+  } catch (error) {
+    document.getElementById('releaseMenu').dataset.state = 'stale';
+    if (!releaseLastRead) document.getElementById('releaseVersion').textContent = '待核对';
+    document.getElementById('releaseState').dataset.state = 'stale';
+    document.getElementById('releaseState').textContent = '版本信息待刷新';
+    document.getElementById('releaseUpdated').textContent = error.status === 404 ? '当前服务未提供版本接口，请以部署回执核对。' : '版本读取失败，已保留上次标识；可点击立即刷新重试。';
+  } finally { releaseInFlight = false; }
+}
+async function cleanupHistory() {
+  if (cleanupInFlight) return;
+  const status = document.getElementById('cleanupStatus');
+  const field = document.getElementById('managementKey');
+  const days = Number(document.getElementById('cleanDays').value);
+  status.dataset.state = 'error';
+  if (!Number.isInteger(days) || days < 1 || days > 3650) { status.textContent = '保留天数须为 1–3650 的整数。'; return; }
+  const key = field.value.trim();
+  if (!key) { status.textContent = '请输入本次清理所需的 API Key。'; field.focus?.(); return; }
+  if (!confirm('将永久清理 ' + days + ' 天前的持久化用量，无法通过 Dashboard 撤销。确认继续？')) { field.value = ''; return; }
+  cleanupInFlight = true;
+  document.getElementById('cleanupButton').disabled = true;
+  status.textContent = '正在提交清理请求…'; status.dataset.state = 'pending';
+  try {
+    const result = await fetchJSON('/stats/history?keep_days=' + days, {method: 'DELETE', headers: {'x-api-key': key}});
+    if (result.error || !Number.isInteger(result.deleted) || result.deleted < 0) throw new Error('服务未返回有效的清理结果。');
+    status.textContent = '已删除 ' + result.deleted + ' 条历史记录，保留最近 ' + days + ' 天。';
+    status.dataset.state = 'success';
     historyLoaded = false;
-    loadHistory(+document.getElementById('histDays').value);
-  } catch (err) { alert('Cleanup failed: ' + err.message); }
+    await loadHistory(Number(document.getElementById('histDays').value));
+  } catch (error) {
+    status.dataset.state = 'error';
+    status.textContent = error.status === 401 ? error.message : '未能确认清理结果，请先核对历史记录再操作。' + error.message;
+  } finally {
+    field.value = ''; cleanupInFlight = false;
+    document.getElementById('cleanupButton').disabled = false;
+  }
 }
 
 // ---------- Refresh ----------
 const REFRESH_MS = 5000;
 let refreshDeadline = Date.now() + REFRESH_MS;
 
-async function refresh() {
+let refreshInFlight = false;
+let refreshPaused = false;
+let previousUptime = null;
+async function refresh(force = false) {
+  if (refreshInFlight || (!force && (refreshPaused || document.hidden))) return;
+  refreshInFlight = true;
+  document.getElementById('refreshNow').disabled = true;
+  refreshRelease(force);
   try {
-    const r = await fetch('/stats');
-    const d = await r.json();
+    const d = await fetchJSON('/stats');
+    if (!d.global || !Array.isArray(d.endpoints)) throw new Error('统计响应格式异常');
+    if (previousUptime != null && d.global.uptime_seconds < previousUptime) refreshRelease(true);
+    previousUptime = d.global.uptime_seconds;
     const g = d.global;
     document.getElementById('errorBanner').classList.remove('show');
-    document.getElementById('uptimeTag').textContent = 'uptime ' + fmtTime(g.uptime_seconds);
-    document.getElementById('refreshLabel').textContent = new Date().toLocaleTimeString();
 
     // Attach cost to each endpoint by summing its model cost
     (d.endpoints || []).forEach(e => {
-      let c = 0;
-      Object.values(e.model_stats || {}).forEach(s => { c += +s.estimated_cost_usd || 0; });
-      e.estimated_cost_usd = c;
+      Object.assign(e, pricingSummary(e.model_stats));
     });
 
-    renderKpiGrid('globalGrid', KPI_DEFS, g, 'kpi-anthropic');
+    const todayPricing = pricingSummary(d.today_model_stats);
+    const displayGlobal = Object.keys(d.today_model_stats || {}).length ? {...g, ...todayPricing, estimated_total_cost_usd: todayPricing.estimated_cost_usd} : g;
+    renderKpiGrid('globalGrid', KPI_DEFS, displayGlobal, 'kpi-anthropic');
     diffEndpoints('endpointBody', d.endpoints, 'anthropic');
 
     // Anthropic Models 表格以“当天(含重启前)累计”为准，与 KPI Est. Cost 保持一致
@@ -1133,17 +796,17 @@ async function refresh() {
         azContent.innerHTML =
           '<div class="global-grid" id="azureGlobalGrid"></div>' +
           '<div class="grid-2">' +
-          '<div class="chart-card"><h3>Model Usage Share</h3><div class="canvas-wrap"><canvas id="azureModelChart"></canvas></div></div>' +
-          '<div class="chart-card"><h3>Endpoint Latency (ms)</h3><div class="canvas-wrap"><canvas id="azureLatencyChart"></canvas></div></div>' +
+          '<div class="chart-card"><h3>模型 Token 分布</h3><div class="canvas-wrap"><canvas id="azureModelChart"></canvas></div></div>' +
+          '<div class="chart-card"><h3>端点平均响应耗时 · ms</h3><div class="canvas-wrap"><canvas id="azureLatencyChart"></canvas></div></div>' +
           '</div>' +
-          '<h2 class="section-title">Azure OpenAI Endpoints</h2>' +
+          '<h2 class="section-title">Azure OpenAI 端点</h2>' +
           '<div class="table-wrap"><div class="table-scroll"><table>' +
-          '<thead><tr><th>Name</th><th>Status</th><th>Active</th><th>Total</th><th>Error Rate</th><th>Avg Latency</th><th>Total Tokens</th><th>Deployments</th></tr></thead>' +
+          '<thead><tr><th>端点</th><th>熔断状态</th><th>进行中</th><th>请求数</th><th>错误率</th><th>平均耗时</th><th>Token 合计</th><th>部署</th></tr></thead>' +
           '<tbody id="azureEndpointBody"></tbody>' +
           '</table></div></div>' +
-          '<h2 class="section-title">Model Stats</h2>' +
+          '<h2 class="section-title">模型用量</h2>' +
           '<div class="table-wrap"><div class="table-scroll"><table>' +
-          '<thead><tr><th>Model</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache Create</th><th>Cache Read</th><th>Total</th></tr></thead>' +
+          '<thead><tr><th>模型</th><th>请求数</th><th>输入</th><th>输出</th><th>缓存写入</th><th>缓存读取</th><th>Token 合计</th></tr></thead>' +
           '<tbody id="azureModelBody"></tbody>' +
           '</table></div></div>';
         azContent.dataset.built = '1';
@@ -1159,16 +822,16 @@ async function refresh() {
         let tr = document.getElementById(rowId);
         const isAlert = e.circuit_open || (e.error_rate || 0) > 5;
         const barColor = errBarColor(+e.error_rate || 0);
-        const barWidth = Math.min(100, (+e.error_rate || 0) * 10);
+        const barWidth = Math.max(0, Math.min(100, +e.error_rate || 0));
         const html =
-          '<td data-label="Name"><strong>' + e.name + '</strong></td>' +
-          '<td data-label="Status"><span class="badge ' + (e.circuit_open ? 'open' : 'ok') + '">' + (e.circuit_open ? 'OPEN' : 'OK') + '</span></td>' +
-          '<td data-label="Active" class="mono">' + e.active_requests + '</td>' +
+          '<td data-label="Name"><strong>' + escapeHtml(e.name) + '</strong></td>' +
+          '<td data-label="Status">' + circuitBadge(e) + '</td>' +
+          '<td data-label="Active" class="mono">' + fmt(e.active_requests) + '</td>' +
           '<td data-label="Total" class="mono">' + fmt(e.total_requests) + '</td>' +
           '<td data-label="Error Rate"><span class="err-rate"><span class="bar"><span style="width:' + barWidth + '%;background:' + barColor + '"></span></span><span class="mono">' + fmtPct(e.error_rate) + '</span></span></td>' +
           '<td data-label="Avg Latency" class="mono">' + fmtMs(e.avg_response_time_ms) + '</td>' +
-          '<td data-label="Total Tokens" class="mono">' + fmt(e.total_tokens) + '</td>' +
-          '<td data-label="Deployments">' + (e.deployments || []).map(x => '<span class="deployments-tag">' + x + '</span>').join('') + '</td>';
+          '<td data-label="Token 合计" class="mono">' + fmt(e.total_tokens) + '</td>' +
+          '<td data-label="Deployments">' + (e.deployments || []).map(x => '<span class="deployments-tag">' + escapeHtml(x) + '</span>').join('') + '</td>';
         if (!tr) {
           tr = document.createElement('tr');
           tr.id = rowId;
@@ -1196,7 +859,7 @@ async function refresh() {
         azLatencyChart.update('none');
       }
     } else {
-      azContent.innerHTML = '<div class="info-box">Azure OpenAI is not configured. Add <code>azure_openai</code> section to your config.yaml to enable this tab.</div>';
+      azContent.innerHTML = '<div class="info-box">未配置 Azure OpenAI 渠道。配置完成并重启服务后，此页将显示对应端点。</div>';
       azContent.dataset.built = '';
     }
 
@@ -1206,26 +869,26 @@ async function refresh() {
       if (!cpContent.dataset.built) {
         cpContent.innerHTML =
           '<div class="global-grid" id="copilotGlobalGrid"></div>' +
-          '<h2 class="section-title">Connection Pool <small style="opacity:.6">(httpx client shared across Copilot endpoints)</small></h2>' +
+          '<h2 class="section-title">请求与连接池 <small style="color:var(--text-tertiary)">（所有 Copilot 端点共享）</small></h2>' +
           '<div class="table-wrap" id="copilotPoolCard" style="padding:14px 18px;margin-bottom:18px"></div>' +
           '<div class="grid-2">' +
-          '<div class="chart-card"><h3>Model Usage Share</h3><div class="canvas-wrap"><canvas id="copilotModelChart"></canvas></div></div>' +
-          '<div class="chart-card"><h3>Endpoint Latency (ms)</h3><div class="canvas-wrap"><canvas id="copilotLatencyChart"></canvas></div></div>' +
+          '<div class="chart-card"><h3>模型 Token 分布</h3><div class="canvas-wrap"><canvas id="copilotModelChart"></canvas></div></div>' +
+          '<div class="chart-card"><h3>端点平均响应耗时 · ms</h3><div class="canvas-wrap"><canvas id="copilotLatencyChart"></canvas></div></div>' +
           '</div>' +
-          '<h2 class="section-title">GitHub Copilot Endpoints</h2>' +
+          '<h2 class="section-title">Copilot 账户端点</h2>' +
           '<div class="table-wrap"><div class="table-scroll"><table>' +
-          '<thead><tr><th>Name</th><th>Status</th><th>Active</th><th>Total</th><th>Error Rate</th><th>Avg Latency</th><th>Total Tokens</th><th>Models</th><th>Token Expires</th></tr></thead>' +
+          '<thead><tr><th>端点</th><th>熔断状态</th><th>进行中</th><th>请求数</th><th>错误率</th><th>平均耗时</th><th>Token 合计</th><th>模型范围</th><th>凭据剩余时间</th></tr></thead>' +
           '<tbody id="copilotEndpointBody"></tbody>' +
           '</table></div></div>' +
-          '<h2 class="section-title">Model Stats <small style="opacity:.6">(<a href="https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing" target="_blank" rel="noopener noreferrer">GHCP 官方 token 价</a> · 1 AI credit = $0.01)</small></h2>' +
+          '<h2 class="section-title">模型用量 <small style="color:var(--text-tertiary)">(<a href="https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing" target="_blank" rel="noopener noreferrer">GHCP 官方 token 价</a> · 1 AI credit = $0.01)</small></h2>' +
           '<p id="copilotPricingCoverage" class="info-box"></p>' +
           '<div class="table-wrap"><div class="table-scroll"><table>' +
-          '<thead><tr><th>Model</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache Create</th><th>Cache Read</th><th>Total</th><th>Est. Cost</th><th>Est. AI Credits</th></tr></thead>' +
+          '<thead><tr><th>模型</th><th>请求数</th><th>输入</th><th>输出</th><th>缓存写入</th><th>缓存读取</th><th>Token 合计</th><th>估算费用</th><th>估算 Credits</th></tr></thead>' +
           '<tbody id="copilotModelBody"></tbody>' +
           '</table></div></div>';
         cpContent.dataset.built = '1';
       }
-      const COPILOT_KPIS = [...KPI_DEFS, {key: 'estimated_ai_credits', label: 'Est. AI Credits', fmt: fmtCredits, cls: 'purple'}];
+      const COPILOT_KPIS = [...KPI_DEFS, {key: 'estimated_ai_credits', label: '估算 AI Credits', fmt: fmtCredits}];
       renderKpiGrid('copilotGlobalGrid', COPILOT_KPIS, d.github_copilot.global, 'kpi-copilot');
       document.getElementById('copilotPricingCoverage').textContent =
         '本次运行期间已定价 ' + (d.github_copilot.global.priced_requests || 0) + ' 条用量记录，未定价 ' +
@@ -1242,34 +905,34 @@ async function refresh() {
         const hwm = +pool.stream_high_watermark || 0;
         // 颜色：<50% ok，50-80% warn，>=80% err
         const utilColor = util >= 80 ? 'var(--err)' : util >= 50 ? 'var(--warn)' : 'var(--ok)';
-        const utilBg = util >= 80 ? 'rgba(248,113,113,.15)' : util >= 50 ? 'rgba(251,191,36,.15)' : 'rgba(74,222,128,.15)';
+        const utilBg = util >= 80 ? 'var(--err-soft)' : util >= 50 ? 'var(--warn-soft)' : 'var(--ok-soft)';
         poolCard.innerHTML =
           '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px">' +
-            '<div><div style="opacity:.6;font-size:12px;text-transform:uppercase;letter-spacing:.5px">Active / Max Connections</div>' +
-              '<div style="font-size:22px;font-weight:600;font-family:JetBrains Mono,monospace">' +
+            '<div><div style="color:var(--text-tertiary);font-size:12px;text-transform:uppercase;letter-spacing:.5px">活动业务请求 / 连接上限</div>' +
+              '<div style="font-size:22px;font-weight:600;font-family:ui-monospace,monospace">' +
                 '<span style="color:' + utilColor + '">' + active + '</span>' +
-                ' <span style="opacity:.4">/</span> ' + maxConn +
+                ' <span style="color:var(--text-tertiary)">/</span> ' + maxConn +
               '</div>' +
               '<div style="margin-top:6px;height:6px;background:' + utilBg + ';border-radius:3px;overflow:hidden">' +
                 '<div style="height:100%;width:' + Math.min(100, util) + '%;background:' + utilColor + ';transition:width .3s"></div>' +
               '</div>' +
-              '<div style="opacity:.6;font-size:11px;margin-top:4px">' + util.toFixed(1) + '% utilized</div>' +
+              '<div style="color:var(--text-tertiary);font-size:11px;margin-top:4px">' + util.toFixed(1) + '% 业务压力参考值</div>' +
             '</div>' +
-            '<div><div style="opacity:.6;font-size:12px;text-transform:uppercase;letter-spacing:.5px">Pool Timeouts</div>' +
-              '<div style="font-size:22px;font-weight:600;font-family:JetBrains Mono,monospace;color:' + (timeouts > 0 ? 'var(--warn)' : 'var(--text-0)') + '">' + fmt(timeouts) + '</div>' +
-              '<div style="opacity:.6;font-size:11px;margin-top:4px">cumulative since pod start</div>' +
+            '<div><div style="color:var(--text-tertiary);font-size:12px;text-transform:uppercase;letter-spacing:.5px">连接池等待超时</div>' +
+              '<div style="font-size:22px;font-weight:600;font-family:ui-monospace,monospace;color:' + (timeouts > 0 ? 'var(--warn)' : 'var(--text-0)') + '">' + fmt(timeouts) + '</div>' +
+              '<div style="color:var(--text-tertiary);font-size:11px;margin-top:4px">当前进程累计</div>' +
             '</div>' +
-            '<div><div style="opacity:.6;font-size:12px;text-transform:uppercase;letter-spacing:.5px">Streaming / Watermark</div>' +
-              '<div style="font-size:22px;font-weight:600;font-family:JetBrains Mono,monospace">' + streams + ' <span style="opacity:.4">/</span> ' + hwm + '</div>' +
-              '<div style="opacity:.6;font-size:11px;margin-top:4px">registered SSE streams</div>' +
+            '<div><div style="color:var(--text-tertiary);font-size:12px;text-transform:uppercase;letter-spacing:.5px">活动流 / 水位参考</div>' +
+              '<div style="font-size:22px;font-weight:600;font-family:ui-monospace,monospace">' + streams + ' <span style="color:var(--text-tertiary)">/</span> ' + hwm + '</div>' +
+              '<div style="color:var(--text-tertiary);font-size:11px;margin-top:4px">已登记的 SSE 流</div>' +
             '</div>' +
-            '<div><div style="opacity:.6;font-size:12px;text-transform:uppercase;letter-spacing:.5px">Keepalive Cap</div>' +
-              '<div style="font-size:22px;font-weight:600;font-family:JetBrains Mono,monospace">' + (pool.max_keepalive_connections || '-') + '</div>' +
-              '<div style="opacity:.6;font-size:11px;margin-top:4px">idle connections retained</div>' +
+            '<div><div style="color:var(--text-tertiary);font-size:12px;text-transform:uppercase;letter-spacing:.5px">Keepalive 上限</div>' +
+              '<div style="font-size:22px;font-weight:600;font-family:ui-monospace,monospace">' + (pool.max_keepalive_connections || '-') + '</div>' +
+              '<div style="color:var(--text-tertiary);font-size:11px;margin-top:4px">最多保留的空闲连接</div>' +
             '</div>' +
-            '<div><div style="opacity:.6;font-size:12px;text-transform:uppercase;letter-spacing:.5px">Read Timeout</div>' +
-              '<div style="font-size:22px;font-weight:600;font-family:JetBrains Mono,monospace">' + (pool.read_timeout_seconds || '-') + 's</div>' +
-              '<div style="opacity:.6;font-size:11px;margin-top:4px">acquire=' + (pool.acquire_timeout_seconds || '-') + 's</div>' +
+            '<div><div style="color:var(--text-tertiary);font-size:12px;text-transform:uppercase;letter-spacing:.5px">读取超时配置</div>' +
+              '<div style="font-size:22px;font-weight:600;font-family:ui-monospace,monospace">' + (pool.read_timeout_seconds == null ? '未设空闲时限' : escapeHtml(pool.read_timeout_seconds) + 's') + '</div>' +
+              '<div style="color:var(--text-tertiary);font-size:11px;margin-top:4px">连接池等待=' + (pool.acquire_timeout_seconds == null ? '未知' : escapeHtml(pool.acquire_timeout_seconds) + 's') + '</div>' +
             '</div>' +
           '</div>';
       }
@@ -1283,23 +946,23 @@ async function refresh() {
         let tr = document.getElementById(rowId);
         const isAlert = e.circuit_open || (e.error_rate || 0) > 5;
         const barColor = errBarColor(+e.error_rate || 0);
-        const barWidth = Math.min(100, (+e.error_rate || 0) * 10);
+        const barWidth = Math.max(0, Math.min(100, +e.error_rate || 0));
         const exp = +e.session_token_expires_at || 0;
         const expRel = exp > 0 ? (exp - nowSec) : 0;
         const expText = exp > 0
-          ? (expRel > 0 ? Math.round(expRel / 60) + 'm' : 'expired')
+          ? (expRel > 0 ? fmtTime(expRel) : '已过期')
           : '-';
         const modelsTags = (e.models && e.models.length)
-          ? e.models.map(x => '<span class="deployments-tag">' + x + '</span>').join('')
-          : '<span style="opacity:.5">all</span>';
+          ? e.models.map(x => '<span class="deployments-tag">' + escapeHtml(x) + '</span>').join('')
+          : '<span style="color:var(--text-tertiary)">通配范围</span>';
         const html =
-          '<td data-label="Name"><strong>' + e.name + '</strong></td>' +
-          '<td data-label="Status"><span class="badge ' + (e.circuit_open ? 'open' : 'ok') + '">' + (e.circuit_open ? 'OPEN' : 'OK') + '</span></td>' +
-          '<td data-label="Active" class="mono">' + e.active_requests + '</td>' +
+          '<td data-label="Name"><strong>' + escapeHtml(e.name) + '</strong></td>' +
+          '<td data-label="Status">' + circuitBadge(e) + '</td>' +
+          '<td data-label="Active" class="mono">' + fmt(e.active_requests) + '</td>' +
           '<td data-label="Total" class="mono">' + fmt(e.total_requests) + '</td>' +
           '<td data-label="Error Rate"><span class="err-rate"><span class="bar"><span style="width:' + barWidth + '%;background:' + barColor + '"></span></span><span class="mono">' + fmtPct(e.error_rate) + '</span></span></td>' +
           '<td data-label="Avg Latency" class="mono">' + fmtMs(e.avg_response_time_ms) + '</td>' +
-          '<td data-label="Total Tokens" class="mono">' + fmt(e.total_tokens) + '</td>' +
+          '<td data-label="Token 合计" class="mono">' + fmt(e.total_tokens) + '</td>' +
           '<td data-label="Models">' + modelsTags + '</td>' +
           '<td data-label="Token Expires" class="mono">' + expText + '</td>';
         if (!tr) {
@@ -1329,39 +992,52 @@ async function refresh() {
         cpLatencyChart.update('none');
       }
     } else {
-      cpContent.innerHTML = '<div class="info-box">GitHub Copilot is not configured. Add <code>github_copilot</code> section to your config.yaml and run <code>python main.py --copilot-login --endpoint &lt;name&gt;</code> to enable this tab.</div>';
+      cpContent.innerHTML = '<div class="info-box">未配置可用的 GitHub Copilot 渠道。请完成账户登录与端点配置后再查看。</div>';
       cpContent.dataset.built = '';
     }
+    document.getElementById('uptimeTag').textContent = '进程已运行 ' + fmtTime(g.uptime_seconds);
+    document.getElementById('refreshLabel').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', {hour12: false});
   } catch (err) {
     const b = document.getElementById('errorBanner');
-    b.textContent = 'Failed to fetch stats: ' + err.message;
+    b.textContent = '统计暂未完成更新，请勿将旧值或空白视为实时结果。' + err.message;
     b.classList.add('show');
+    if (!document.getElementById('globalGrid').dataset.built) {
+      const unavailable = '<div class="info-box">暂时无法读取统计，请稍后点击立即刷新。</div>';
+      for (const id of ['globalGrid', 'azureContent', 'copilotContent']) document.getElementById(id).innerHTML = unavailable;
+      document.getElementById('endpointBody').innerHTML = '<tr><td colspan="8">暂时无法读取端点状态。</td></tr>';
+      document.getElementById('refreshLabel').textContent = '尚无可用统计快照';
+    }
   } finally {
+    refreshInFlight = false; document.getElementById('refreshNow').disabled = false;
     refreshDeadline = Date.now() + REFRESH_MS;
   }
 }
 
-// Refresh ring countdown
-function updateRing() {
-  const ring = document.getElementById('refreshRing');
-  if (!ring) return;
-  const remain = Math.max(0, Math.min(REFRESH_MS, refreshDeadline - Date.now()));
-  const p = remain / REFRESH_MS;
-  const circumference = 2 * Math.PI * 15;
-  ring.setAttribute('stroke-dasharray', circumference);
-  ring.setAttribute('stroke-dashoffset', circumference * (1 - p));
-  requestAnimationFrame(updateRing);
+// ---------- Refresh controls ----------
+function updateRefreshState() {
+  const label = document.getElementById('refreshCountdown');
+  label.textContent = refreshPaused ? '自动刷新已暂停' : document.hidden ? '后台暂停刷新' : refreshInFlight ? '更新中…' : Math.max(0, Math.ceil((refreshDeadline - Date.now()) / 1000)) + ' 秒后刷新';
 }
 
 // ---------- Bootstrap ----------
 initTheme();
 document.getElementById('themeToggle').addEventListener('click', () => {
-  const cur = document.documentElement.getAttribute('data-theme') || 'dark';
-  setTheme(cur === 'light' ? 'dark' : 'light');
+  setTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light');
 });
-requestAnimationFrame(() => { updateTabIndicator(); updateRing(); });
+document.getElementById('refreshNow').addEventListener('click', () => refresh(true));
+document.getElementById('pauseRefresh').addEventListener('click', event => {
+  refreshPaused = !refreshPaused;
+  event.currentTarget.textContent = refreshPaused ? '恢复自动刷新' : '暂停自动刷新';
+  event.currentTarget.setAttribute('aria-pressed', String(refreshPaused));
+  if (!refreshPaused) refresh(true);
+  updateRefreshState();
+});
+document.getElementById('refreshHistory').addEventListener('click', () => loadHistory(Number(document.getElementById('histDays').value)));
+document.getElementById('cleanupForm').addEventListener('submit', event => { event.preventDefault(); cleanupHistory(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !refreshPaused) refresh(true); });
 refresh();
 setInterval(refresh, REFRESH_MS);
+setInterval(updateRefreshState, 1000);
 </script>
 </body>
 </html>

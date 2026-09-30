@@ -1,0 +1,24 @@
+{
+  "author": "Zeno Ren",
+  "environment": "loopback synthetic fixture; no model or database calls",
+  "viewport": "1280x960 desktop override",
+  "checks": {
+    "providers": "Databricks, Azure, Copilot and History inspected",
+    "themes": "light and dark rendered",
+    "history": "7 to 3 days; partial cost remains unknown; update time is on demand",
+    "first_load_error": "503 replaces initial loading placeholders with unavailable state",
+    "release": "matched, unknown, modified and read-failure inspected",
+    "empty": "missing endpoints and unconfigured channels explained",
+    "no_charts": "fallback message shown; tables remain available"
+  },
+  "screenshots": {
+    "pictures/dashboard.jpg": "b896719cdf2d40d7b736ba97937768d64aca09ed5d02872977e0a2cb19dcc48a",
+    "pictures/dashboard-release.jpg": "ba6d2c8e9d054988a4951e7b2f18fc3fd23f31d0c03c9e87908ba3785da64489"
+  },
+  "limitations": [
+    "Synthetic data only",
+    "No new AKS deployment",
+    "No real provider calls",
+    "No mobile acceptance requested"
+  ]
+}

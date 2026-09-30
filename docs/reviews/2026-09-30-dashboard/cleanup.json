@@ -1,0 +1,60 @@
+{
+  "author": "Zeno Ren",
+  "removed_regenerable_caches": [
+    {
+      "path": ".pytest_cache",
+      "files": 5,
+      "bytes": 85970
+    },
+    {
+      "path": "__pycache__",
+      "files": 18,
+      "bytes": 830533
+    },
+    {
+      "path": "tests/__pycache__",
+      "files": 53,
+      "bytes": 1221004
+    },
+    {
+      "path": "tests/integration/__pycache__",
+      "files": 1,
+      "bytes": 20118
+    },
+    {
+      "path": "tests/release/__pycache__",
+      "files": 9,
+      "bytes": 101570
+    },
+    {
+      "path": "tests/fixtures/revision2/__pycache__",
+      "files": 6,
+      "bytes": 83715
+    },
+    {
+      "path": "operations/__pycache__",
+      "files": 7,
+      "bytes": 81400
+    },
+    {
+      "path": "operations/release/__pycache__",
+      "files": 10,
+      "bytes": 163449
+    }
+  ],
+  "files": 109,
+  "bytes": 2587759,
+  "removed_tracked_assets": [
+    "ANALYSIS.md",
+    "pictures/dashboard.png"
+  ],
+  "recovery_commit": "6037755c0d5686de09fb51275e4057ca1711a5c8",
+  "retained": [
+    "offline wheelhouses",
+    "historical evidence and test fixtures",
+    "legacy release bootstrap fingerprint",
+    "private release recovery data",
+    "user-owned untracked files"
+  ],
+  "verification": true
+}

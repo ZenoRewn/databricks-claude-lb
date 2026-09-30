@@ -1,0 +1,1 @@
+Copilot pricing UI: partial, unknown, credits and zero-cost invariants passed.

@@ -50,7 +50,9 @@ jobs:
       - name: Build image
         run: python3 -m operations.build_identity --build-tag lb-smoke
       - name: Copilot pricing UI invariants
-        run: node tests/test_copilot_pricing_ui.cjs
+        run: |
+          node tests/test_copilot_pricing_ui.cjs
+          node tests/test_dashboard_ui.cjs
       - name: Import smoke — module & runtime assets present
         run: |
           docker run --rm --entrypoint sh lb-smoke -c '

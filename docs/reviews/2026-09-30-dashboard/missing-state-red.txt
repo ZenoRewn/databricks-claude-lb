@@ -1,0 +1,20 @@
+AssertionError [ERR_ASSERTION]: The input did not match the regular expression /未知/. Input:
+
+'<span class="badge ok">Closed</span>'
+
+    at <repository>/tests/test_dashboard_ui.cjs:32:10
+    at Object.<anonymous> (<repository>/tests/test_dashboard_ui.cjs:83:3)
+    at Module._compile (node:internal/modules/cjs/loader:1956:14)
+    at Object..js (node:internal/modules/cjs/loader:2096:10)
+    at Module.load (node:internal/modules/cjs/loader:1678:32)
+    at Module._load (node:internal/modules/cjs/loader:1470:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)
+    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)
+    at node:internal/main/run_main_module:33:47 {
+  generatedMessage: true,
+  code: 'ERR_ASSERTION',
+  actual: '<span class="badge ok">Closed</span>',
+  expected: /未知/,
+  operator: 'match',
+  diff: 'simple'
+}

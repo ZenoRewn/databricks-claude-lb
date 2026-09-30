@@ -1,0 +1,82 @@
+..FF                                                           [100%]
+=================================== FAILURES ===================================
+_ DashboardReleaseTests.test_invalid_revision_is_not_reflected_into_links_or_text (revision='<script>SYNTHETIC_SECRET</script>') _
+tests/test_dashboard_release.py:55: in test_invalid_revision_is_not_reflected_into_links_or_text
+    self.assertIsNone(body['source_revision'])
+                      ^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'source_revision'
+_ DashboardReleaseTests.test_invalid_revision_is_not_reflected_into_links_or_text (revision='../main') _
+tests/test_dashboard_release.py:55: in test_invalid_revision_is_not_reflected_into_links_or_text
+    self.assertIsNone(body['source_revision'])
+                      ^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'source_revision'
+_ DashboardReleaseTests.test_invalid_revision_is_not_reflected_into_links_or_text (revision='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') _
+tests/test_dashboard_release.py:55: in test_invalid_revision_is_not_reflected_into_links_or_text
+    self.assertIsNone(body['source_revision'])
+                      ^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'source_revision'
+_ DashboardReleaseTests.test_invalid_revision_is_not_reflected_into_links_or_text (revision=None) _
+tests/test_dashboard_release.py:55: in test_invalid_revision_is_not_reflected_into_links_or_text
+    self.assertIsNone(body['source_revision'])
+                      ^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'source_revision'
+_ DashboardReleaseTests.test_modified_partial_and_unattested_sources_are_not_marked_matching (changes={'runtime_files_match': False}) _
+tests/test_dashboard_release.py:49: in test_modified_partial_and_unattested_sources_are_not_marked_matching
+    self.assertEqual(self.request(self.identity(**changes)).json()['verification'], expected)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'verification'
+_ DashboardReleaseTests.test_modified_partial_and_unattested_sources_are_not_marked_matching (changes={'source_tree_dirty': True}) _
+tests/test_dashboard_release.py:49: in test_modified_partial_and_unattested_sources_are_not_marked_matching
+    self.assertEqual(self.request(self.identity(**changes)).json()['verification'], expected)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'verification'
+_ DashboardReleaseTests.test_modified_partial_and_unattested_sources_are_not_marked_matching (changes={'out_of_tree': True}) _
+tests/test_dashboard_release.py:49: in test_modified_partial_and_unattested_sources_are_not_marked_matching
+    self.assertEqual(self.request(self.identity(**changes)).json()['verification'], expected)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'verification'
+_ DashboardReleaseTests.test_modified_partial_and_unattested_sources_are_not_marked_matching (changes={'manifest_covers_current_runtime': False}) _
+tests/test_dashboard_release.py:49: in test_modified_partial_and_unattested_sources_are_not_marked_matching
+    self.assertEqual(self.request(self.identity(**changes)).json()['verification'], expected)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'verification'
+_ DashboardReleaseTests.test_modified_partial_and_unattested_sources_are_not_marked_matching (changes={'source_attested': False}) _
+tests/test_dashboard_release.py:49: in test_modified_partial_and_unattested_sources_are_not_marked_matching
+    self.assertEqual(self.request(self.identity(**changes)).json()['verification'], expected)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'verification'
+_ DashboardReleaseTests.test_modified_partial_and_unattested_sources_are_not_marked_matching (changes={'source_tree_dirty': None}) _
+tests/test_dashboard_release.py:49: in test_modified_partial_and_unattested_sources_are_not_marked_matching
+    self.assertEqual(self.request(self.identity(**changes)).json()['verification'], expected)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'verification'
+_ DashboardReleaseTests.test_public_identity_matches_commit_without_exposing_build_internals _
+tests/test_dashboard_release.py:24: in test_public_identity_matches_commit_without_exposing_build_internals
+    self.assertEqual(result.status_code, 200)
+E   AssertionError: 404 != 200
+----------------------------- Captured stderr call -----------------------------
+{"ts": "2026-09-30T13:35:13.590Z", "level": "INFO", "logger": "httpx2", "message": "HTTP Request: GET http://testserver/version \"HTTP/1.1 404 Not Found\""}
+------------------------------ Captured log call -------------------------------
+INFO     httpx2:_client.py:1085 HTTP Request: GET http://testserver/version "HTTP/1.1 404 Not Found"
+_ DashboardReleaseTests.test_unknown_local_build_has_no_invented_version_or_link _
+tests/test_dashboard_release.py:36: in test_unknown_local_build_has_no_invented_version_or_link
+    self.assertEqual(result.status_code, 200)
+E   AssertionError: 404 != 200
+----------------------------- Captured stderr call -----------------------------
+{"ts": "2026-09-30T13:35:13.593Z", "level": "INFO", "logger": "httpx2", "message": "HTTP Request: GET http://testserver/version \"HTTP/1.1 404 Not Found\""}
+------------------------------ Captured log call -------------------------------
+INFO     httpx2:_client.py:1085 HTTP Request: GET http://testserver/version "HTTP/1.1 404 Not Found"
+=========================== short test summary info ============================
+SUBFAILED(revision='<script>SYNTHETIC_SECRET</script>') tests/test_dashboard_release.py::DashboardReleaseTests::test_invalid_revision_is_not_reflected_into_links_or_text
+SUBFAILED(revision='../main') tests/test_dashboard_release.py::DashboardReleaseTests::test_invalid_revision_is_not_reflected_into_links_or_text
+SUBFAILED(revision='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') tests/test_dashboard_release.py::DashboardReleaseTests::test_invalid_revision_is_not_reflected_into_links_or_text
+SUBFAILED(revision=None) tests/test_dashboard_release.py::DashboardReleaseTests::test_invalid_revision_is_not_reflected_into_links_or_text
+SUBFAILED(changes={'runtime_files_match': False}) tests/test_dashboard_release.py::DashboardReleaseTests::test_modified_partial_and_unattested_sources_are_not_marked_matching
+SUBFAILED(changes={'source_tree_dirty': True}) tests/test_dashboard_release.py::DashboardReleaseTests::test_modified_partial_and_unattested_sources_are_not_marked_matching
+SUBFAILED(changes={'out_of_tree': True}) tests/test_dashboard_release.py::DashboardReleaseTests::test_modified_partial_and_unattested_sources_are_not_marked_matching
+SUBFAILED(changes={'manifest_covers_current_runtime': False}) tests/test_dashboard_release.py::DashboardReleaseTests::test_modified_partial_and_unattested_sources_are_not_marked_matching
+SUBFAILED(changes={'source_attested': False}) tests/test_dashboard_release.py::DashboardReleaseTests::test_modified_partial_and_unattested_sources_are_not_marked_matching
+SUBFAILED(changes={'source_tree_dirty': None}) tests/test_dashboard_release.py::DashboardReleaseTests::test_modified_partial_and_unattested_sources_are_not_marked_matching
+FAILED tests/test_dashboard_release.py::DashboardReleaseTests::test_public_identity_matches_commit_without_exposing_build_internals
+FAILED tests/test_dashboard_release.py::DashboardReleaseTests::test_unknown_local_build_has_no_invented_version_or_link
+12 failed, 2 passed in 0.64s
