@@ -1,6 +1,6 @@
 {
   "author": "Zeno Ren",
-  "recorded_at": "2026-09-30T19:20:47.667839+08:00",
+  "recorded_at": "2026-09-30T19:25:37.131382+08:00",
   "base_revision": "16de51d29d1fbb3e81c65434ce55fadc3573da61",
   "application_revision": "1d75685655f672177374cf3327cd16c4bcffe2db",
   "scope": "Local implementation and GitHub delivery; no production deployment",
@@ -88,9 +88,12 @@
     }
   },
   "github": {
-    "status": "local_gates_passed_pending_publication",
+    "status": "published_pull_request",
     "branch": "codex/lb-contracts-20260930",
-    "ci_and_merge_authority": "Linked GitHub pull request Checks and merge record, separately verified before final delivery"
+    "pull_request": "https://github.com/ZenoRewn/databricks-claude-lb/pull/8",
+    "number": 8,
+    "ci_and_merge_authority": "GitHub pull request head, Checks, merged_at and merge_commit_sha; verified separately before final delivery",
+    "no_production_deployment": true
   },
   "production": {
     "aks_deployed": false,

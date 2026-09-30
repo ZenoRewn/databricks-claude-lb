@@ -15,7 +15,7 @@ Author: Zeno Ren
 | SDK 协议 | OpenAI Python SDK 读取合成文本、工具索引/ID、usage、finish_reason；现有 OpenAI/Anthropic 不安全重试回归保留 | 不是真实账号、真实客户端应用或上游模型 E2E |
 | 微基准 | `microbenchmark-r5.json`：160/160 完成、160 次发送、结束 active=0、无诊断丢弃 | 最终候选的 context observe/off 比较，4 并发、MockTransport/ASGI、内存诊断 sink；不是生产容量或默认 stderr I/O 成本测试 |
 | 独立 QA | 7 项 findings 修复后，在最终 1d75685 上获只读独立复核通过，见 [QA 回执](QA.md) | 代码及本地合成验证范围；生产与真实供应商未验证 |
-| GitHub | 分支 codex/lb-contracts-20260930 已完成本地发布门禁，等待上传及 Checks | 后续 GitHub 状态以关联 PR 的 head、Checks 和合并记录为准 |
+| GitHub | [PR #8](https://github.com/ZenoRewn/databricks-claude-lb/pull/8) 发布本轮代码、文档与证据 | GitHub CI 和合并状态以该 PR 的实时 head、Checks 及 merge 记录为准；本地回执不预先宣告远程验收 |
 | AKS / OpenClaw | 未操作 | 未部署、未发付费推理、未改 scheduler、baseline、历史或生产数据库 |
 
 ## 可复现入口
