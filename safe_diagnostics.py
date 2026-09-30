@@ -26,12 +26,15 @@ NUMBERS = set('schema_version upstream_status upstream_http_status http_status d
 BOOLEANS = set('retry retry_allowed retryable retry_after_present downstream_headers_sent downstream_content_started '
                'downstream_body_completed draining_at_finish saw_completion terminal_seen terminal_valid has_image '
                'sent_any_chunk account_neutral read_timeout probe_ok httpx_pool_observed_full upstream_headers_received '
-               'stream estimate_complete enforcement_allowed'.split())
+               'stream upstream_stream estimate_complete enforcement_allowed'.split())
 LIST_FIELDS = {'parameters', 'dropped_parameters', 'rejected_parameters', 'removed_params', 'unknown_components'}
 POOL_KEYS = {'total', 'active', 'idle', 'closing', 'requests_waiting', 'max_connections', 'max_keepalive_connections'}
 PROBE_KEYS = {'ok', 'cached', 'dns_ms', 'tcp_ms'}
 DROP_REASONS = ('queue_full', 'sink_error', 'event_error', 'closed')
 DIAGNOSTIC_DROPS = Counter()
+QUEUE_CAPACITY = int(os.getenv('LB_DIAGNOSTIC_QUEUE_CAPACITY', '4096'))
+if not 1 <= QUEUE_CAPACITY <= 65536:
+    raise ValueError('LB_DIAGNOSTIC_QUEUE_CAPACITY must be between 1 and 65536')
 REASON_VALUES = set('none unknown context_window_exceeded invalid_input rate_limited authentication '
     'upstream_unavailable invalid_protocol upstream_failure output_limit transport_protocol_error startup_timeout '
     'read_timeout write_timeout connection_error pool_timeout upstream_truncated request_deadline_exceeded '
@@ -208,7 +211,7 @@ class DiagnosticStreamHandler(logging.StreamHandler):
 
 
 def default_handler(sink):
-    return BoundedLogHandler(sink, capacity=int(os.getenv('LB_DIAGNOSTIC_QUEUE_CAPACITY', '4096')),
+    return BoundedLogHandler(sink, capacity=QUEUE_CAPACITY,
                              drops=DIAGNOSTIC_DROPS)
 
 

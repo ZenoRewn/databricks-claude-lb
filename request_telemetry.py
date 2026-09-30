@@ -14,7 +14,8 @@ import re
 import time
 import uuid
 from fastapi import HTTPException
-from request_budget import startup_budget, UpstreamStartupTimeout, remaining_seconds
+from request_budget import startup_budget, startup_seconds, UpstreamStartupTimeout, remaining_seconds
+from request_timing import CURRENT as CURRENT_TIMING, Timeline, PhaseMetrics, observe_event
 from response_semantics import REASONS, assess_json, exception_reason, failure_reason
 from safe_diagnostics import safe_fields, safe_identifier, DIAGNOSTIC_DROPS
 
@@ -22,6 +23,8 @@ logger = logging.getLogger('main')
 ROUTES = {'/v1/messages':'messages', '/v1/responses':'responses', '/v1/chat/completions':'chat'}
 APIS = ('messages','responses','chat')
 PROVIDERS = ('databricks','azure_openai','copilot')
+SEND_RESULTS = ('http_1xx', 'http_2xx', 'http_3xx', 'http_4xx', 'http_5xx',
+                'transport_error', 'startup_timeout', 'cancelled', 'unknown')
 OUTCOMES = ('completed','failed','incomplete','unknown','http_error','rejected',
             'overloaded','cancelled','client_disconnected','internal_error','deadline_exceeded')
 BUCKETS = (.1,.5,1,2,5,10,30,60,120,300,600,1800)
@@ -57,6 +60,7 @@ class RequestTelemetry:
         self.reasons = Counter()
         self.latency_sum = Counter()
         self.latency_buckets = Counter()
+        self.phases = PhaseMetrics()
 
     def render(self):
         lines = []
@@ -77,8 +81,8 @@ class RequestTelemetry:
                [f'lb_upstream_send_started_total{{provider="{provider}",api_type="{api}"}} {self.sends[(provider,api)]}'
                 for provider in PROVIDERS for api in APIS])
         metric('lb_upstream_send_finished_total','Send result; response means headers or buffered body received, not generation success','counter',
-               [f'lb_upstream_send_finished_total{{provider="{provider}",api_type="{api}",result="{result}"}} {count}'
-                for (provider,api,result),count in sorted(self.send_results.items())])
+               [f'lb_upstream_send_finished_total{{provider="{provider}",api_type="{api}",result="{result}"}} {self.send_results[(provider,api,result)]}'
+                for provider in PROVIDERS for api in APIS for result in SEND_RESULTS])
         metric('lb_retry_decisions_total','HTTP retry decisions under existing replay policy','counter',
                [f'lb_retry_decisions_total{{reason="{reason}"}} {self.retry_decisions[reason]}'
                 for reason in ('retry_429','upstream_cooldown','attempt_budget_exhausted','status_not_retryable')])
@@ -141,6 +145,14 @@ def note_request_context(model, *, stream=False):
     if record:
         record.requested_model = safe_identifier(model)
         record.stream = bool(stream)
+
+
+def note_content_offered(has_content):
+    if has_content:
+        observe_event(content=True)
+        record = CURRENT.get()
+        if record is not None:
+            record.downstream_content_started = True
 
 
 def note_failure(reason, *, origin='unknown', status=None, exception=None):
@@ -274,7 +286,7 @@ def note_json_result(payload, api_type):
     return
 
 
-async def inference_call(awaitable, provider, api_type, *, model=None, endpoint=None):
+async def inference_call(awaitable, provider, api_type, *, model=None, endpoint=None, stream=False):
     record = CURRENT.get()
     metrics = record.metrics if record else TELEMETRY
     metrics.sends[(provider,api_type)] += 1
@@ -283,15 +295,18 @@ async def inference_call(awaitable, provider, api_type, *, model=None, endpoint=
         record.sends += 1
         record.active_attempt = {'upstream_attempt_id': attempt_id, 'provider': provider,
                                  'forwarded_model': safe_identifier(model), 'resolved_model': 'unknown',
-                                 'endpoint_alias': safe_identifier(endpoint)}
+                                 'endpoint_alias': safe_identifier(endpoint), 'upstream_stream': bool(stream)}
         record.last_error_key = None
     context = log_context()
     log_event({'kind': 'lb_upstream_send_start', **context})
     started = time.monotonic()
     result = 'transport_error'
     status = None
+    budget = startup_seconds(provider, api_type, model)
+    timeline = CURRENT_TIMING.get()
+    timing = timeline.begin_attempt(budget) if timeline is not None else None
     try:
-        async with startup_budget():
+        async with startup_budget(budget):
             response = await awaitable
         status = getattr(response,'status_code',None)
         result = f'http_{status//100}xx' if type(status) is int and 100 <= status < 600 else 'unknown'
@@ -307,11 +322,17 @@ async def inference_call(awaitable, provider, api_type, *, model=None, endpoint=
         note_exception(exc)
         raise
     finally:
+        if timing is not None:
+            timeline.end_send(timing)
         metrics.send_results[(provider,api_type,result)] += 1
         fields={**context,'kind':'lb_upstream_send_end','lb_request_id':record.request_id if record else None,
                 'upstream_attempt_id':attempt_id,'provider':provider,'api_type':api_type,
                 'result':result,'upstream_status':status if type(status) is int else None,
                 'duration_seconds':round(time.monotonic()-started,6)}
+        fields.update(startup_budget_seconds=budget,
+                      upstream_headers_received=timing.header_seconds is not None if timing else None,
+                      phase_seconds={'send_to_headers': timing.header_seconds if timing else None,
+                                     'send_call': timing.send_seconds if timing else None})
         log_event(fields)
 
 
@@ -324,6 +345,8 @@ class RequestTelemetryMiddleware:
         if scope['type'] != 'http' or scope.get('method') != 'POST' or not api_type:
             return await self.app(scope,receive,send)
         record=RequestRecord(api_type,self.metrics)
+        timeline = Timeline()
+        timing_token = CURRENT_TIMING.set(timeline)
         operation_id=safe_id(dict(scope.get('headers',[])).get(b'x-lb-operation-id',b'').decode('ascii',errors='replace'))
         token=CURRENT.set(record)
         self.metrics.started[api_type] += 1
@@ -404,7 +427,10 @@ class RequestTelemetryMiddleware:
                     self.metrics.latency_buckets[(api_type,outcome,upper)] += 1
             self.metrics.active[api_type] -= 1
             context = log_context()
+            context.update(timeline.snapshot())
+            self.metrics.phases.record(api_type, timeline)
             CURRENT.reset(token)
+            CURRENT_TIMING.reset(timing_token)
             fields={**context,'kind':'lb_request_end','lb_request_id':record.request_id,'api_type':api_type,
                     'request_id':safe_id(scope.get('state',{}).get('request_id')),
                     'operation_id':operation_id,

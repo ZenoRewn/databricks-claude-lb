@@ -6,8 +6,11 @@ from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_
                                current_request_id as telemetry_request_id,
                                set_parameter_policy, note_parameter_drops,
                                log_context, note_request_context, note_exception,
-                               note_local_terminal, note_failure, log_event)
-from safe_diagnostics import DiagnosticFilter, DiagnosticStreamHandler, default_handler
+                               note_local_terminal, note_failure, log_event, note_content_offered)
+from safe_diagnostics import (DiagnosticFilter, DiagnosticStreamHandler, default_handler,
+                              render_metrics as diagnostic_metrics, EVENT_NAMES)
+from request_timing import (observed_phase, begin_stream as timing_begin_stream,
+                            end_stream as timing_end_stream, observe_event)
 from upstream_body import (read_error_body, render_metrics as error_body_metrics,
                            MAX_BYTES as UPSTREAM_ERROR_BODY_MAX_BYTES,
                            TIMEOUT as UPSTREAM_ERROR_BODY_TIMEOUT_SECONDS)
@@ -240,7 +243,12 @@ class LBSettings:
     def as_dict(self) -> dict:
         """给 /config/effective 端点用；scalar 值可直接 JSON 序列化。"""
         from dataclasses import asdict
-        return asdict(self)
+        from safe_diagnostics import QUEUE_CAPACITY
+        from request_budget import STARTUP_OVERRIDES
+        return {**asdict(self), 'diagnostic_queue_capacity': QUEUE_CAPACITY,
+                'startup_budget_overrides': [dict(provider=provider, api_type=api, model=model, seconds=seconds)
+                                            for (provider, api, model), seconds in sorted(STARTUP_OVERRIDES.items())],
+                'metrics_default_schema': 'lb-metrics-v2', 'metrics_extended_schema': 'lb-metrics-v3'}
 
 
 # 单例，模块导入时创建。旧的散点式 os.getenv() 也继续存在（作为 backing store），
@@ -360,6 +368,7 @@ def _is_anthropic_model(model_name: str) -> bool:
     return not (m.startswith(("gpt-", "o1", "o3", "o4", "gemini")) or m in OPENAI_CHAT_TO_RESPONSES_MODELS_LOWER)
 
 
+@observed_phase('cleanup')
 async def _join_cleanup_task(task):
     """Join an owned task despite level cancellation or repeated Task.cancel()."""
     CLEANUP.watch(task)
@@ -1120,6 +1129,8 @@ class _SSEObservation:
     """Keep terminal validity, generation outcome and account attribution separate."""
     def __init__(self, api_type):
         self.api_type = api_type
+        self.frame_has_content = False
+        timing_begin_stream()
         self.first = True
         self.first_event = None
         self.last_event = None
@@ -1149,6 +1160,7 @@ class _SSEObservation:
         return self.terminal if self.terminal in ('incomplete','failed') else 'failed'
 
     def _observe(self, frame):
+        self.frame_has_content = False
         text = frame.decode("utf-8-sig" if self.first else "utf-8", errors="replace")
         self.first = False
         header, data, done = _parse_sse_event_block(text, responses=self.api_type == "responses")
@@ -1156,6 +1168,21 @@ class _SSEObservation:
         if not isinstance(kind, str):
             kind = None
         name = kind or header
+        if data and (name in EVENT_NAMES or self.api_type == 'chat' and isinstance(data.get('choices'), list)):
+            observe_event()
+            if self.api_type == 'responses':
+                self.frame_has_content = kind in ('response.output_text.delta', 'response.function_call_arguments.delta') and isinstance(data.get('delta'), str) and bool(data['delta'])
+            elif self.api_type == 'messages':
+                delta = data.get('delta')
+                self.frame_has_content = kind == 'content_block_delta' and isinstance(delta, dict) and any(
+                    isinstance(delta.get(key), str) and bool(delta[key]) for key in ('text', 'partial_json', 'thinking'))
+            else:
+                choices = data.get('choices')
+                self.frame_has_content = isinstance(choices, list) and any(
+                    isinstance(choice, dict) and isinstance(choice.get('delta'), dict) and (
+                        isinstance(choice['delta'].get('content'), str) and bool(choice['delta']['content'])
+                        or isinstance(choice['delta'].get('tool_calls'), list) and bool(choice['delta']['tool_calls']))
+                    for choice in choices)
         if name:
             self.first_event = self.first_event or name
             self.last_event = name
@@ -2941,7 +2968,7 @@ class ClaudeProxy:
                 try:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
                     async with aclosing(_await_with_heartbeat(
-                        inference_call(proxy_self.client.send(req, stream=True), 'databricks', 'messages', model=model, endpoint=current_endpoint.name), HEARTBEAT
+                        inference_call(proxy_self.client.send(req, stream=True), 'databricks', 'messages', model=model, endpoint=current_endpoint.name, stream=True), HEARTBEAT
                     )) as pending_headers:
                         async for kind, payload in pending_headers:
                             if kind == "heartbeat":
@@ -3015,8 +3042,10 @@ class ClaudeProxy:
                                 success = observation.outcome == "completed"
                                 await end_current_request(success=success, is_client_error=observation.neutral or observation.outcome == "incomplete")
                                 _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
+                                note_content_offered(observation.frame_has_content)
                                 yield wire_output.frame(frame)
                                 return
+                            note_content_offered(observation.frame_has_content)
                             yield wire_output.frame(frame)
                     await end_current_request(success=False)
                     # P1.4: 透传 request_id 到 truncated error
@@ -3076,6 +3105,7 @@ class ClaudeProxy:
                     return
 
                 finally:
+                    timing_end_stream()
                     _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                     await _finish_cleanup(_close_stream_resources(pump_task, response))
 
@@ -3357,7 +3387,7 @@ class AzureOpenAIProxy:
                 try:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
                     async with aclosing(_await_with_heartbeat(
-                        inference_call(proxy_self.client.send(req, stream=True), 'azure_openai', api_type, model=model, endpoint=current_endpoint.name), HEARTBEAT
+                        inference_call(proxy_self.client.send(req, stream=True), 'azure_openai', api_type, model=model, endpoint=current_endpoint.name, stream=True), HEARTBEAT
                     )) as pending_headers:
                         async for kind, payload in pending_headers:
                             if kind == "heartbeat":
@@ -3424,8 +3454,10 @@ class AzureOpenAIProxy:
                                 success = observation.outcome == "completed"
                                 await end_current_request(success=success, is_client_error=observation.neutral or observation.outcome == "incomplete")
                                 _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
+                                note_content_offered(observation.frame_has_content)
                                 yield wire_output.frame(frame)
                                 return
+                            note_content_offered(observation.frame_has_content)
                             yield wire_output.frame(frame)
                     await end_current_request(success=False)
                     yield _sse_terminal_error(api_type, "upstream_truncated", "Upstream ended without a valid terminal; cause undetermined")
@@ -3472,6 +3504,7 @@ class AzureOpenAIProxy:
                     return
 
                 finally:
+                    timing_end_stream()
                     _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                     await _finish_cleanup(_close_stream_resources(pump_task, response))
 
@@ -4419,6 +4452,7 @@ class CopilotProxy:
         logger.info(f"[Copilot] session token cached for {endpoint.name}: base={endpoint.session_base_url}, expires in {expires_in}s")
         return endpoint.session_token
 
+    @observed_phase('auth_prepare')
     async def get_session_token(self, endpoint: CopilotEndpoint, force: bool = False) -> str:
         """获取 short-lived Copilot session token。带自愈链：
 
@@ -5029,6 +5063,7 @@ class CopilotProxy:
         """累加 pinning 计数（换 endpoint 因 stateful 保护被拒绝时调）。"""
         self.stateful_pinned_events[reason] = self.stateful_pinned_events.get(reason, 0) + 1
 
+    @observed_phase('auth_prepare')
     async def _build_headers(self, endpoint: CopilotEndpoint, has_image: bool,
                               stream: bool = False) -> dict:
         token = await self.get_session_token(endpoint)
@@ -5558,6 +5593,7 @@ class CopilotProxy:
                     "chunks": stream_state["chunks_yielded"],
                     "first_event": stream_state["first_event"] or "-",
                     "last_event": stream_state["last_event"] or "-",
+                    "terminal_seen": stream_state["saw_completion"],
                     "saw_completion": stream_state["saw_completion"],
                     "sent_any_chunk": stream_state["sent_any_chunk"],
                     "attempt": stream_state["attempt"],
@@ -5624,6 +5660,7 @@ class CopilotProxy:
                     "chunks": chunks_yielded_count,
                     "first_event": first_event_name or "-",
                     "last_event": last_event_name or "-",
+                    "terminal_seen": saw_completion,
                     "saw_completion": saw_completion,
                     "sent_any_chunk": sent_any_chunk,
                     "attempt": attempt,
@@ -5649,7 +5686,7 @@ class CopilotProxy:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
                     body_bytes_size = len(req.content)
                     async with aclosing(_await_with_heartbeat(
-                        inference_call(proxy_self.client.send(req, stream=True), 'copilot', api_type, model=model, endpoint=current_endpoint.name), HEARTBEAT
+                        inference_call(proxy_self.client.send(req, stream=True), 'copilot', api_type, model=model, endpoint=current_endpoint.name, stream=True), HEARTBEAT
                     )) as pending_headers:
                         async for kind, payload in pending_headers:
                             if kind == "heartbeat":
@@ -5866,8 +5903,10 @@ class CopilotProxy:
                                 _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                                 _emit_stream_end(observation.terminal, logging.INFO if success else logging.WARNING,
                                                  terminal_valid=True, account_neutral=observation.neutral)
+                                note_content_offered(observation.frame_has_content)
                                 yield wire_output.frame(frame)
                                 return
+                            note_content_offered(observation.frame_has_content)
                             yield wire_output.frame(frame)
                     proxy_self.stream_truncated_no_completion_total += 1
                     proxy_self._record_truncation(model, api_type)
@@ -6043,6 +6082,7 @@ class CopilotProxy:
                     return
 
                 finally:
+                    timing_end_stream()
                     _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                     await _finish_cleanup(_close_stream_resources(pump_task, response))
 
@@ -6577,6 +6617,7 @@ MAX_REQUEST_SIZE = 4 * 1024 * 1024  # Databricks 4MB 上游硬限制（压缩后
 MAX_RAW_REQUEST_SIZE = 64 * 1024 * 1024  # LB 入口宽容上限：压缩前最大 64MB，避免 OOM
 
 
+@observed_phase('body_read')
 async def _read_bounded_request_body(request: Request):
     """Keep Request.body caching semantics while checking size before retention."""
     def too_large():
@@ -7723,8 +7764,10 @@ async def health_accepting():
 
 
 @app.get("/metrics")
-async def metrics():
+async def metrics(schema: str = 'lb-metrics-v2'):
     """Prometheus 文本格式 metrics，供 AKS / Azure Monitor / Prometheus 抓取"""
+    if schema not in ('lb-metrics-v2', 'lb-metrics-v3'):
+        raise HTTPException(status_code=400, detail='Unsupported metrics schema')
     lines = []
     now = int(time.time())
 
@@ -8047,10 +8090,13 @@ async def metrics():
     lines.append(CLEANUP.render().rstrip())
     lines.append(error_body_metrics().rstrip())
     lines.append(INFERENCE_ADMISSION.render_metrics().rstrip())
+    if schema == 'lb-metrics-v3':
+        lines.append(TELEMETRY.phases.render().rstrip())
+        lines.append(diagnostic_metrics().rstrip())
     if usage_store:
         lines.append(usage_store.render_metrics().rstrip())
     body = "\n".join(lines) + "\n" if lines else "# no providers configured\n"
-    return Response(content=body, media_type="text/plain; version=0.0.4")
+    return Response(content=body, media_type="text/plain; version=0.0.4", headers={'X-LB-Metrics-Schema': schema})
 
 
 @app.post("/admin/copilot/reset-pool")

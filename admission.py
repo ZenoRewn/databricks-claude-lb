@@ -2,6 +2,7 @@
 import asyncio
 from collections import Counter, deque
 from contextvars import ContextVar
+from request_timing import observed_phase
 from dataclasses import dataclass
 import json
 import math
@@ -120,6 +121,7 @@ class AdmissionController:
                 self.rejections[reason] += 1
                 waiter.future.set_exception(AdmissionError(reason))
 
+    @observed_phase('admission_wait')
     async def acquire(self, tenant):
         if self.draining:
             reason = 'draining' if self.permanent_draining else 'maintenance'

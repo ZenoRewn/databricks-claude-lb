@@ -1,0 +1,207 @@
+{
+  "author": "Zeno Ren",
+  "families": {
+    "lb_admission_active": {
+      "labels": [],
+      "type": "gauge",
+      "unit": "requests"
+    },
+    "lb_admission_body_bytes": {
+      "labels": [],
+      "type": "gauge",
+      "unit": "bytes"
+    },
+    "lb_admission_draining": {
+      "labels": [],
+      "type": "gauge",
+      "unit": "boolean"
+    },
+    "lb_admission_queue_wait_seconds": {
+      "labels": [],
+      "type": "summary",
+      "unit": "seconds"
+    },
+    "lb_admission_queued": {
+      "labels": [],
+      "type": "gauge",
+      "unit": "requests"
+    },
+    "lb_admission_rejected_total": {
+      "labels": [
+        "reason"
+      ],
+      "type": "counter",
+      "unit": "requests"
+    },
+    "lb_cleanup_active": {
+      "labels": [],
+      "type": "gauge",
+      "unit": "owners"
+    },
+    "lb_cleanup_duration_seconds": {
+      "labels": [],
+      "type": "summary",
+      "unit": "seconds"
+    },
+    "lb_cleanup_finished_total": {
+      "labels": [
+        "result"
+      ],
+      "type": "counter",
+      "unit": "owners"
+    },
+    "lb_cleanup_oldest_age_seconds": {
+      "labels": [],
+      "type": "gauge",
+      "unit": "seconds"
+    },
+    "lb_diagnostic_dropped_events_total": {
+      "labels": [
+        "reason"
+      ],
+      "type": "counter",
+      "unit": "events"
+    },
+    "lb_endpoint_admissions_total": {
+      "labels": [
+        "api_type"
+      ],
+      "type": "counter",
+      "unit": "admissions"
+    },
+    "lb_parameter_policy_requests_total": {
+      "labels": [
+        "action",
+        "parameter"
+      ],
+      "type": "counter",
+      "unit": "requests"
+    },
+    "lb_request_duration_seconds": {
+      "labels": [
+        "api_type",
+        "outcome"
+      ],
+      "type": "histogram",
+      "unit": "seconds"
+    },
+    "lb_request_phase_duration_seconds": {
+      "labels": [
+        "api_type",
+        "phase"
+      ],
+      "type": "histogram",
+      "unit": "seconds"
+    },
+    "lb_request_reasons_total": {
+      "labels": [
+        "api_type",
+        "reason"
+      ],
+      "type": "counter",
+      "unit": "requests"
+    },
+    "lb_requests_active": {
+      "labels": [
+        "api_type"
+      ],
+      "type": "gauge",
+      "unit": "requests"
+    },
+    "lb_requests_finished_total": {
+      "labels": [
+        "api_type",
+        "outcome"
+      ],
+      "type": "counter",
+      "unit": "requests"
+    },
+    "lb_requests_started_total": {
+      "labels": [
+        "api_type"
+      ],
+      "type": "counter",
+      "unit": "requests"
+    },
+    "lb_retry_decisions_total": {
+      "labels": [
+        "reason"
+      ],
+      "type": "counter",
+      "unit": "decisions"
+    },
+    "lb_upstream_error_body_reads_total": {
+      "labels": [
+        "result"
+      ],
+      "type": "counter",
+      "unit": "reads"
+    },
+    "lb_upstream_send_finished_total": {
+      "labels": [
+        "provider",
+        "api_type",
+        "result"
+      ],
+      "type": "counter",
+      "unit": "sends"
+    },
+    "lb_upstream_send_started_total": {
+      "labels": [
+        "provider",
+        "api_type"
+      ],
+      "type": "counter",
+      "unit": "sends"
+    },
+    "lb_usage_backend_ready": {
+      "labels": [],
+      "type": "gauge",
+      "unit": "boolean"
+    },
+    "lb_usage_flush_failures_total": {
+      "labels": [],
+      "type": "counter",
+      "unit": "batches"
+    },
+    "lb_usage_flush_successes_total": {
+      "labels": [],
+      "type": "counter",
+      "unit": "batches"
+    },
+    "lb_usage_inflight_batch": {
+      "labels": [],
+      "type": "gauge",
+      "unit": "batches"
+    },
+    "lb_usage_last_success_timestamp_seconds": {
+      "labels": [],
+      "type": "gauge",
+      "unit": "unix_seconds"
+    },
+    "lb_usage_pending_events": {
+      "labels": [],
+      "type": "gauge",
+      "unit": "events"
+    },
+    "lb_usage_pending_groups": {
+      "labels": [],
+      "type": "gauge",
+      "unit": "groups"
+    },
+    "lb_usage_rejected_events_total": {
+      "labels": [],
+      "type": "counter",
+      "unit": "events"
+    }
+  },
+  "identifiers_in_labels": false,
+  "legacy_default": "lb-metrics-v2",
+  "replica_identity": [
+    "pod_uid",
+    "container_start_time"
+  ],
+  "request_path": "/metrics?schema=lb-metrics-v3",
+  "schema_version": "lb-metrics-v3",
+  "unknown_or_missing": "unknown, never zero"
+}
