@@ -1,0 +1,13 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_ DiagnosticLifecycleTests.test_end_record_has_start_time_size_bucket_and_only_reported_model _
+tests/test_diagnostic_contract.py:39: in test_end_record_has_start_time_size_bucket_and_only_reported_model
+    await telemetry.RequestTelemetryMiddleware(app, telemetry.RequestTelemetry())(
+request_telemetry.py:442: in __call__
+    await self.app(scope,observed_receive,observed_send)
+tests/test_diagnostic_contract.py:33: in app
+    telemetry.note_request_context('synthetic-alias', body_size=2_000_000)
+E   TypeError: note_request_context() got an unexpected keyword argument 'body_size'
+=========================== short test summary info ============================
+FAILED tests/test_diagnostic_contract.py::DiagnosticLifecycleTests::test_end_record_has_start_time_size_bucket_and_only_reported_model
+1 failed in 0.27s

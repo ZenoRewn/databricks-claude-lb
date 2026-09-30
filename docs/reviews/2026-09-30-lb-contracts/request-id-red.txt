@@ -1,0 +1,30 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_____ DiagnosticLifecycleTests.test_upstream_error_body_never_reaches_logs _____
+tests/test_diagnostic_contract.py:139: in test_upstream_error_body_never_reaches_logs
+    self.assertEqual(result.json()['detail']['error']['lb_request_id'], result.headers['x-lb-request-id'])
+E   AssertionError: 'client-auxiliary-id' != '4efc51a3-1492-4262-93c6-63e74c7d207a'
+E   - client-auxiliary-id
+E   + 4efc51a3-1492-4262-93c6-63e74c7d207a
+----------------------------- Captured stderr call -----------------------------
+{"ts": "2026-09-30T09:54:37.400Z", "level": "INFO", "logger": "httpx", "message": "lb_legacy_diagnostic", "resolved_model": "unknown", "body_size_bucket": "small", "lb_request_id": "4efc51a3-1492-4262-93c6-63e74c7d207a", "api_type": "messages", "upstream_attempt_id": "2bf47b35-dc9d-4de6-bf7c-219fb0006d09", "requested_model": "claude-opus-5", "provider": "databricks", "forwarded_model": "databricks-claude-opus-5", "endpoint_alias": "synthetic", "started_at_unix": 1790762077.388824, "downstream_headers_sent": false, "upstream_stream": false, "downstream_content_started": false, "stream": false, "kind": "lb_legacy_diagnostic", "source": "_send_single_request", "source_line": 1740, "schema_version": 1}
+{"ts": "2026-09-30T09:54:37.402Z", "level": "INFO", "logger": "httpx", "message": "HTTP Request: POST http://local/v1/messages \"HTTP/1.1 400 Bad Request\""}
+------------------------------ Captured log call -------------------------------
+INFO     httpx:_client.py:1740 lb_legacy_diagnostic
+INFO     httpx:_client.py:1740 HTTP Request: POST http://local/v1/messages "HTTP/1.1 400 Bad Request"
+_ DiagnosticLifecycleTests.test_untrusted_external_id_is_not_echoed_unbounded __
+tests/test_diagnostic_contract.py:156: in test_untrusted_external_id_is_not_echoed_unbounded
+    self.assertLessEqual(len(response.headers['x-request-id']), 128)
+E   AssertionError: 10000 not less than or equal to 128
+----------------------------- Captured stderr call -----------------------------
+{"ts": "2026-09-30T09:54:37.418Z", "level": "INFO", "logger": "main", "message": "lb_request_received", "body_size_bucket": "small", "lb_request_id": "7d5601d4-1ccb-4cdb-ab8a-c798ba2333f4", "api_type": "messages", "requested_model": "claude-opus-5", "kind": "lb_request_received", "request_id": "unknown", "body_size_bytes": 39, "schema_version": 1, "started_at_unix": 1790762077.416534, "downstream_headers_sent": false, "downstream_content_started": false, "stream": false}
+{"ts": "2026-09-30T09:54:37.419Z", "level": "INFO", "logger": "main", "message": "lb_request_end", "error_origin": "unknown", "body_size_bucket": "small", "deadline_phase": null, "lb_request_id": "7d5601d4-1ccb-4cdb-ab8a-c798ba2333f4", "generation_outcome": "unknown", "api_type": "messages", "source_tenant": "default", "parameter_policy": "compat", "requested_model": "claude-opus-5", "kind": "lb_request_end", "image_trim_policy": "reject", "outcome": "unknown", "request_id": null, "admission_reason": null, "failure_reason": "unknown", "operation_id": null, "admissions": 0, "http_status": 200, "schema_version": 1, "started_at_unix": 1790762077.416534, "duration_seconds": 0.002634, "total_budget_seconds": 1800.0, "startup_budget_seconds": null, "upstream_sends": 0, "downstream_headers_sent": true, "downstream_body_completed": true, "stream": false, "draining_at_finish": false, "downstream_content_started": false, "dropped_parameters": [], "rejected_parameters": [], "transformed_parameters": [], "phase_seconds": {"body_read": 0.0015413750006700866, "admission_wait": 5.666999641107395e-06, "auth_prepare": null, "send_to_headers": null, "send_call": null, "first_event_from_ingress": null, "first_content_from_ingress": null, "stream": null, "cleanup": null, "dns": null, "tcp": null, "tls": null, "pool": null}, "phase_offsets_seconds": {"admission_wait_started": 0.00010408300295239314, "admission_wait_finished": 0.000110041000880301, "body_read_started": 0.0004108749999431893, "body_read_finished": 0.001952583003003383}}
+{"ts": "2026-09-30T09:54:37.419Z", "level": "INFO", "logger": "httpx", "message": "HTTP Request: POST http://local/v1/messages \"HTTP/1.1 200 OK\""}
+------------------------------ Captured log call -------------------------------
+INFO     main:request_telemetry.py:52 lb_request_received
+INFO     main:request_telemetry.py:52 lb_request_end
+INFO     httpx:_client.py:1740 HTTP Request: POST http://local/v1/messages "HTTP/1.1 200 OK"
+=========================== short test summary info ============================
+FAILED tests/test_diagnostic_contract.py::DiagnosticLifecycleTests::test_upstream_error_body_never_reaches_logs
+FAILED tests/test_diagnostic_contract.py::DiagnosticLifecycleTests::test_untrusted_external_id_is_not_echoed_unbounded
+2 failed in 0.26s

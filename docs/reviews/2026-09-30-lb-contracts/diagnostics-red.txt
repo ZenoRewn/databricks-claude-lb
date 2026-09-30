@@ -1,0 +1,86 @@
+FFFFFFF                                                                  [100%]
+=================================== FAILURES ===================================
+_______ DiagnosticLifecycleTests.test_exception_text_never_reaches_logs ________
+tests/test_diagnostic_contract.py:106: in test_exception_text_never_reaches_logs
+    self.assertNotIn('SYNTHETIC_PRIVATE_EXCEPTION', main._JsonLogFormatter().format(record))
+E   AssertionError: 'SYNTHETIC_PRIVATE_EXCEPTION' unexpectedly found in '{"ts": "2026-09-30T08:53:23.937Z", "level": "ERROR", "logger": "main", "message": "[Copilot] stream network error on synthetic: RemoteProtocolError: SYNTHETIC_PRIVATE_EXCEPTION (connection_id=13154801f6254106bee98b3df4ad7c48 chunks_yielded=1 first_event=response.output_text.delta last_event=response.output_text.delta probe.ok=True)", "kind": "copilot_stream_network_error", "endpoint": "synthetic", "request_id": "synthetic-client-id", "attempt": 0, "api_type": "responses", "model": "synthetic-model", "connection_id": "13154801f6254106bee98b3df4ad7c48", "decoded_bytes": 65, "decoded_deliveries": 1, "frames": 1, "pending_eof_bytes": 0, "peak_pending_bytes": 65, "exc_type": "RemoteProtocolError", "exc_message": "SYNTHETIC_PRIVATE_EXCEPTION", "chunks_yielded": 1, "first_event": "response.output_text.delta", "last_event": "response.output_text.delta", "sent_any_chunk": true, "httpx_pool": {"total": null, "active": null, "idle": null, "closing": null, "requests_waiting": null, "error": "no _transport._pool (httpx version mismatch?)"}, "upstream_probe": {"ok": true}}'
+----------------------------- Captured stderr call -----------------------------
+{"ts": "2026-09-30T08:53:23.893Z", "level": "INFO", "logger": "main", "message": "[Copilot] HTTP/2 negotiation enabled (h2 pkg 4.4.1). Actual protocol depends on TLS ALPN — see stream_end log field `http_version`."}
+{"ts": "2026-09-30T08:53:23.923Z", "level": "WARNING", "logger": "asyncio", "message": "Executing <Task pending name='Task-2' coro=<DiagnosticLifecycleTests.test_exception_text_never_reaches_logs() running at <repository>/tests/test_diagnostic_contract.py:104> wait_for=<Future pending cb=[Task.task_wakeup()] created at /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/base_events.py:459> cb=[_run_until_complete_cb() at /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/base_events.py:181] created at /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py:109> took 0.118 seconds"}
+{"ts": "2026-09-30T08:53:23.923Z", "level": "INFO", "logger": "httpx", "message": "HTTP Request: POST https://fixture.invalid/responses \"HTTP/1.1 200 OK\""}
+------------------------------ Captured log call -------------------------------
+INFO     main:main.py:3829 [Copilot] HTTP/2 negotiation enabled (h2 pkg 4.4.1). Actual protocol depends on TLS ALPN — see stream_end log field `http_version`.
+WARNING  asyncio:base_events.py:2052 Executing <Task pending name='Task-2' coro=<DiagnosticLifecycleTests.test_exception_text_never_reaches_logs() running at <repository>/tests/test_diagnostic_contract.py:104> wait_for=<Future pending cb=[Task.task_wakeup()] created at /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/base_events.py:459> cb=[_run_until_complete_cb() at /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/base_events.py:181] created at /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py:109> took 0.118 seconds
+INFO     httpx:_client.py:1740 HTTP Request: POST https://fixture.invalid/responses "HTTP/1.1 200 OK"
+_ DiagnosticLifecycleTests.test_protocol_failure_keeps_reason_and_single_send_cleanup _
+tests/test_diagnostic_contract.py:75: in test_protocol_failure_keeps_reason_and_single_send_cleanup
+    self.assertEqual(ends[0].failure_reason, 'transport_protocol_error')
+E   AssertionError: 'none' != 'transport_protocol_error'
+E   - none
+E   + transport_protocol_error
+----------------------------- Captured stderr call -----------------------------
+{"ts": "2026-09-30T08:53:23.966Z", "level": "INFO", "logger": "main", "message": "[Copilot] HTTP/2 negotiation enabled (h2 pkg 4.4.1). Actual protocol depends on TLS ALPN — see stream_end log field `http_version`."}
+{"ts": "2026-09-30T08:53:23.968Z", "level": "INFO", "logger": "httpx", "message": "HTTP Request: POST https://fixture.invalid/responses \"HTTP/1.1 200 OK\""}
+------------------------------ Captured log call -------------------------------
+INFO     main:main.py:3829 [Copilot] HTTP/2 negotiation enabled (h2 pkg 4.4.1). Actual protocol depends on TLS ALPN — see stream_end log field `http_version`.
+INFO     httpx:_client.py:1740 HTTP Request: POST https://fixture.invalid/responses "HTTP/1.1 200 OK"
+_ DiagnosticLifecycleTests.test_stream_and_send_share_server_identity_and_model_context _
+tests/test_diagnostic_contract.py:97: in test_stream_and_send_share_server_identity_and_model_context
+    self.assertEqual(stream_end.lb_request_id, end.lb_request_id)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'LogRecord' object has no attribute 'lb_request_id'
+----------------------------- Captured stderr call -----------------------------
+{"ts": "2026-09-30T08:53:23.986Z", "level": "INFO", "logger": "main", "message": "[Copilot] HTTP/2 negotiation enabled (h2 pkg 4.4.1). Actual protocol depends on TLS ALPN — see stream_end log field `http_version`."}
+{"ts": "2026-09-30T08:53:23.988Z", "level": "INFO", "logger": "httpx", "message": "HTTP Request: POST https://fixture.invalid/responses \"HTTP/1.1 200 OK\""}
+------------------------------ Captured log call -------------------------------
+INFO     main:main.py:3829 [Copilot] HTTP/2 negotiation enabled (h2 pkg 4.4.1). Actual protocol depends on TLS ALPN — see stream_end log field `http_version`.
+INFO     httpx:_client.py:1740 HTTP Request: POST https://fixture.invalid/responses "HTTP/1.1 200 OK"
+_ DiagnosticLifecycleTests.test_successful_auth_repair_clears_final_reason_keeps_attempt_history _
+tests/test_diagnostic_contract.py:84: in test_successful_auth_repair_clears_final_reason_keeps_attempt_history
+    self.assertEqual((end.outcome, end.failure_reason), ('completed', 'none'))
+E   AssertionError: Tuples differ: ('completed', 'authentication') != ('completed', 'none')
+E   
+E   First differing element 1:
+E   'authentication'
+E   'none'
+E   
+E   - ('completed', 'authentication')
+E   ?                ----- ------
+E   
+E   + ('completed', 'none')
+E   ?                   +
+----------------------------- Captured stderr call -----------------------------
+{"ts": "2026-09-30T08:53:24.005Z", "level": "INFO", "logger": "main", "message": "[Copilot] HTTP/2 negotiation enabled (h2 pkg 4.4.1). Actual protocol depends on TLS ALPN — see stream_end log field `http_version`."}
+{"ts": "2026-09-30T08:53:24.006Z", "level": "INFO", "logger": "httpx", "message": "HTTP Request: POST https://fixture.invalid/responses \"HTTP/1.1 401 Unauthorized\""}
+{"ts": "2026-09-30T08:53:24.018Z", "level": "INFO", "logger": "httpx", "message": "HTTP Request: POST https://fixture.invalid/responses \"HTTP/1.1 200 OK\""}
+------------------------------ Captured log call -------------------------------
+INFO     main:main.py:3829 [Copilot] HTTP/2 negotiation enabled (h2 pkg 4.4.1). Actual protocol depends on TLS ALPN — see stream_end log field `http_version`.
+INFO     httpx:_client.py:1740 HTTP Request: POST https://fixture.invalid/responses "HTTP/1.1 401 Unauthorized"
+INFO     httpx:_client.py:1740 HTTP Request: POST https://fixture.invalid/responses "HTTP/1.1 200 OK"
+_____ DiagnosticLifecycleTests.test_upstream_error_body_never_reaches_logs _____
+tests/test_diagnostic_contract.py:124: in test_upstream_error_body_never_reaches_logs
+    self.assertNotIn(marker, record.getMessage())
+E   AssertionError: 'SYNTHETIC_PRIVATE_ERROR_BODY' unexpectedly found in 'Request failed with 400: {"error": {"code": "invalid_request_error", "message": "SYNTHETIC_PRIVATE_ERROR_BODY", "upstream_status": 400, "upstream_endpoint": "synthetic", "upstream_ids": {"lb_request_id": "req_fe58d98e"}, "upstream_code": "invalid_request_error", "reason": "invalid_input", "retryable": false, "execution_certainty": "rejected", "lb_request_id": "req_fe58d98e"}}'
+----------------------------- Captured stderr call -----------------------------
+{"ts": "2026-09-30T08:53:24.086Z", "level": "INFO", "logger": "httpx", "message": "HTTP Request: POST https://fixture.invalid/anthropic/v1/messages \"HTTP/1.1 400 Bad Request\""}
+{"ts": "2026-09-30T08:53:24.088Z", "level": "INFO", "logger": "httpx", "message": "HTTP Request: POST http://local/v1/messages \"HTTP/1.1 400 Bad Request\""}
+------------------------------ Captured log call -------------------------------
+INFO     httpx:_client.py:1740 HTTP Request: POST https://fixture.invalid/anthropic/v1/messages "HTTP/1.1 400 Bad Request"
+INFO     httpx:_client.py:1740 HTTP Request: POST http://local/v1/messages "HTTP/1.1 400 Bad Request"
+_ DiagnosticSinkTests.test_allowlist_removes_raw_and_nested_secrets_and_rejects_injection _
+tests/test_diagnostic_contract.py:132: in test_allowlist_removes_raw_and_nested_secrets_and_rejects_injection
+    from safe_diagnostics import safe_fields
+E   ModuleNotFoundError: No module named 'safe_diagnostics'
+_ DiagnosticSinkTests.test_bounded_queue_does_not_wait_for_slow_or_failed_sink _
+tests/test_diagnostic_contract.py:143: in test_bounded_queue_does_not_wait_for_slow_or_failed_sink
+    from safe_diagnostics import BoundedLogHandler
+E   ModuleNotFoundError: No module named 'safe_diagnostics'
+=========================== short test summary info ============================
+FAILED tests/test_diagnostic_contract.py::DiagnosticLifecycleTests::test_exception_text_never_reaches_logs
+FAILED tests/test_diagnostic_contract.py::DiagnosticLifecycleTests::test_protocol_failure_keeps_reason_and_single_send_cleanup
+FAILED tests/test_diagnostic_contract.py::DiagnosticLifecycleTests::test_stream_and_send_share_server_identity_and_model_context
+FAILED tests/test_diagnostic_contract.py::DiagnosticLifecycleTests::test_successful_auth_repair_clears_final_reason_keeps_attempt_history
+FAILED tests/test_diagnostic_contract.py::DiagnosticLifecycleTests::test_upstream_error_body_never_reaches_logs
+FAILED tests/test_diagnostic_contract.py::DiagnosticSinkTests::test_allowlist_removes_raw_and_nested_secrets_and_rejects_injection
+FAILED tests/test_diagnostic_contract.py::DiagnosticSinkTests::test_bounded_queue_does_not_wait_for_slow_or_failed_sink
+7 failed in 1.38s

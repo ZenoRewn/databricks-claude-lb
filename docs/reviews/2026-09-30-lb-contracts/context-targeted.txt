@@ -1,0 +1,21 @@
+........................................F.................... [100%]
+=================================== FAILURES ===================================
+__________ TableCompletenessTests.test_every_real_route_is_documented __________
+tests/test_api_surface_contract.py:95: in test_every_real_route_is_documented
+    self.assertEqual(
+E   AssertionError: Lists differ: [('/admin/model-capabilities', 'GET')] != []
+E   
+E   First list contains 1 additional elements.
+E   First extra element 0:
+E   ('/admin/model-capabilities', 'GET')
+E   
+E   - [('/admin/model-capabilities', 'GET')]
+E   + [] : 这些真实路由不在 CLAUDE.md 的 API 端点表里 —— 表自称完整，漏了就会让人在做接入或安全复核时看不见它们
+_ AuthBehaviourMatchesTheTableTests.test_auth_column_is_truthful_for_every_row (route='POST /v1/messages/count_tokens', need='不需要') _
+tests/test_api_surface_contract.py:135: in test_auth_column_is_truthful_for_every_row
+    self.assertNotEqual(wrong.status_code, 401,
+E   AssertionError: 401 == 401 : 标了「不需要」却拒绝了请求
+=========================== short test summary info ============================
+FAILED tests/test_api_surface_contract.py::TableCompletenessTests::test_every_real_route_is_documented
+SUBFAILED(route='POST /v1/messages/count_tokens', need='不需要') tests/test_api_surface_contract.py::AuthBehaviourMatchesTheTableTests::test_auth_column_is_truthful_for_every_row
+2 failed, 60 passed, 88 subtests passed in 1.42s

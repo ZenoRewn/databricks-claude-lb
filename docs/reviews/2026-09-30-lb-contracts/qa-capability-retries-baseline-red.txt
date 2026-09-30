@@ -1,0 +1,65 @@
+Baseline: dc2a2e42df5a995a8e9f37b287978a6785bb4cbe; current regression fixture; no application overrides.
+.                                                            [100%]
+=================================== FAILURES ===================================
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='databricks', api='messages', trigger='429') _
+tests/test_context_capabilities.py:203: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='databricks', api='messages', trigger='connect') _
+tests/test_context_capabilities.py:203: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='azure_openai', api='responses', trigger='429') _
+tests/test_context_capabilities.py:203: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='azure_openai', api='responses', trigger='connect') _
+tests/test_context_capabilities.py:203: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='azure_openai', api='chat', trigger='429') _
+tests/test_context_capabilities.py:203: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='azure_openai', api='chat', trigger='connect') _
+tests/test_context_capabilities.py:203: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='copilot', api='responses', trigger='429') _
+tests/test_context_capabilities.py:203: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='copilot', api='responses', trigger='connect') _
+tests/test_context_capabilities.py:203: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='copilot', api='responses', trigger='pool') _
+tests/test_context_capabilities.py:203: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='copilot', api='chat', trigger='429') _
+tests/test_context_capabilities.py:203: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='copilot', api='chat', trigger='connect') _
+tests/test_context_capabilities.py:203: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='copilot', api='chat', trigger='pool') _
+tests/test_context_capabilities.py:203: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+=========================== short test summary info ============================
+SUBFAILED(provider='databricks', api='messages', trigger='429') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='databricks', api='messages', trigger='connect') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='azure_openai', api='responses', trigger='429') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='azure_openai', api='responses', trigger='connect') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='azure_openai', api='chat', trigger='429') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='azure_openai', api='chat', trigger='connect') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='copilot', api='responses', trigger='429') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='copilot', api='responses', trigger='connect') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='copilot', api='responses', trigger='pool') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='copilot', api='chat', trigger='429') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='copilot', api='chat', trigger='connect') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='copilot', api='chat', trigger='pool') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+12 failed, 1 passed, 12 deselected in 0.51s

@@ -1,0 +1,17 @@
+{
+  "author": "Zeno Ren",
+  "version": "8.4.11",
+  "image_id": "sha256:1bd43bad43e0de5959b98c4404e987046de21cd85b9e725849208db6539d3c2d",
+  "repo_digests": [
+    "mysql@sha256:6ea90827b1100f8f2ae306a539f86d2c264a26ed435a2a9f75551dd5c3aeb242"
+  ],
+  "architecture": "arm64",
+  "network": "none",
+  "host_ports": [],
+  "passed": 6,
+  "result": "mysql84-tests-r2.txt",
+  "app_image": "claude-lb:contracts-20260930-r2",
+  "usage_store_sha256": "fea36b5b6ad69a42b6aaae197101ee7bc904aa153776714faf12e9677d127efa",
+  "latest_image_has_same_usage_store": true,
+  "production_database_accessed": false
+}

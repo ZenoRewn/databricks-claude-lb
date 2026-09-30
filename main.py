@@ -4,7 +4,18 @@ from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_
                                note_admission, note_admission_end, note_generation,
                                note_json_result, note_candidate_selection, note_retry_decision,
                                current_request_id as telemetry_request_id,
-                               set_parameter_policy, note_parameter_drops)
+                               set_parameter_policy, note_parameter_drops,
+                               log_context, note_request_context, note_exception,
+                               note_local_terminal, note_failure, log_event, note_content_offered)
+from request_telemetry import note_parameter_transforms, require_image_trim_consent, note_reported_model, safe_id, note_stream_end
+from chat_adapter import build_payload as build_chat_payload, messages_to_items, tools_to_items, content as chat_content
+import model_capabilities
+from model_capabilities import observe_route_budget, estimate_payload
+from build_metadata import runtime_identity
+from safe_diagnostics import (DiagnosticFilter, DiagnosticStreamHandler, DiagnosticTextFormatter, default_handler,
+                              render_metrics as diagnostic_metrics, EVENT_NAMES)
+from request_timing import (observed_phase, begin_stream as timing_begin_stream,
+                            end_stream as timing_end_stream, observe_event)
 from upstream_body import (read_error_body, render_metrics as error_body_metrics,
                            MAX_BYTES as UPSTREAM_ERROR_BODY_MAX_BYTES,
                            TIMEOUT as UPSTREAM_ERROR_BODY_TIMEOUT_SECONDS)
@@ -237,7 +248,19 @@ class LBSettings:
     def as_dict(self) -> dict:
         """给 /config/effective 端点用；scalar 值可直接 JSON 序列化。"""
         from dataclasses import asdict
-        return asdict(self)
+        from safe_diagnostics import QUEUE_CAPACITY
+        from request_budget import STARTUP_OVERRIDES
+        from request_telemetry import IMAGE_TRIM_POLICY
+        from chat_adapter import MODE, PRESERVE_MODELS
+        return {**asdict(self), 'diagnostic_queue_capacity': QUEUE_CAPACITY,
+                'startup_budget_overrides': [dict(provider=provider, api_type=api, model=model, seconds=seconds)
+                                            for (provider, api, model), seconds in sorted(STARTUP_OVERRIDES.items())],
+                'metrics_default_schema': 'lb-metrics-v2', 'metrics_extended_schema': 'lb-metrics-v3',
+                'image_trim_policy': IMAGE_TRIM_POLICY, 'chat_adapter_contract': MODE,
+                'chat_adapter_preserve_models': sorted(PRESERVE_MODELS) if PRESERVE_MODELS is not None else None,
+                'context_budget_mode': model_capabilities.MODE,
+                'capability_catalog_sha256': model_capabilities.CATALOG.sha256,
+                'capability_catalog_entries': len(model_capabilities.CATALOG.entries)}
 
 
 # 单例，模块导入时创建。旧的散点式 os.getenv() 也继续存在（作为 backing store），
@@ -251,7 +274,7 @@ class _JsonLogFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload = {
             # Python 3.12+ 弃用 utcnow()；用 timezone-aware datetime 输出保持 "...Z" wire 格式
-            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "ts": datetime.fromtimestamp(record.created, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -278,19 +301,25 @@ def _setup_logging():
     level_name = os.getenv("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
     fmt = os.getenv("LOG_FORMAT", "text").lower()
-    handler = logging.StreamHandler()
+    handler = DiagnosticStreamHandler()
     if fmt == "json":
         handler.setFormatter(_JsonLogFormatter())
     else:
-        handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+        handler.setFormatter(DiagnosticTextFormatter("%(levelname)s:%(name)s:%(message)s"))
     # 用 force=True 接管 uvicorn 默认配置
-    logging.basicConfig(level=level, handlers=[handler], force=True)
+    logging.basicConfig(level=level, handlers=[default_handler(handler)], force=True)
+    for name in {'main', __name__}:
+        current = logging.getLogger(name)
+        if not any(isinstance(f, DiagnosticFilter) for f in current.filters):
+            current.addFilter(DiagnosticFilter(log_context))
     # uvicorn / httpx 的 logger 也走同一 handler
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "httpx"):
         lg = logging.getLogger(name)
         lg.handlers = []
         lg.propagate = True
         lg.setLevel(level)
+        if not any(isinstance(f, DiagnosticFilter) for f in lg.filters):
+            lg.addFilter(DiagnosticFilter(log_context))
 
 
 _setup_logging()
@@ -351,6 +380,7 @@ def _is_anthropic_model(model_name: str) -> bool:
     return not (m.startswith(("gpt-", "o1", "o3", "o4", "gemini")) or m in OPENAI_CHAT_TO_RESPONSES_MODELS_LOWER)
 
 
+@observed_phase('cleanup')
 async def _join_cleanup_task(task):
     """Join an owned task despite level cancellation or repeated Task.cancel()."""
     CLEANUP.watch(task)
@@ -639,9 +669,12 @@ def _sse_terminal_error(api_type: str, code: str, message: str,
     ``error.metadata`` as structured backup for clients that DO read it (curl,
     OpenAI Python SDK, some enterprise wrappers).
     """
+    note_local_terminal(code)
     message = _apply_request_id_prefix(message, metadata)
     error_body: dict = {"code": code, "message": message,
                         "retryable": False, "execution_certainty": "unknown"}
+    if telemetry_request_id():
+        error_body['lb_request_id'] = telemetry_request_id()
     if metadata:
         error_body["metadata"] = metadata
     if api_type == "responses":
@@ -667,6 +700,8 @@ def _sse_terminal_from_upstream_detail(api_type: str, upstream_detail: dict,
     """
     upstream_detail = upstream_detail or {}
     error = dict(upstream_detail.get("error") or {"message": "upstream error"})
+    if telemetry_request_id():
+        error['lb_request_id'] = telemetry_request_id()
     if metadata:
         merged = dict(error.get("metadata") or {})
         merged.update(metadata)
@@ -680,6 +715,16 @@ def _sse_terminal_from_upstream_detail(api_type: str, upstream_detail: dict,
         return f"event: error\ndata: {json.dumps({'type':'error','error':error},ensure_ascii=False)}\n\n".encode()
     payload_dict = {"error": error}
     return f"data: {json.dumps(payload_dict, ensure_ascii=False)}\n\ndata: [DONE]\n\n".encode()
+
+
+def _stream_capability_error(provider, api_type, model, body, endpoint_alias, *, metadata=None):
+    """Recheck a retry target before admission; an active SSE needs a terminal."""
+    try:
+        observe_route_budget(provider, api_type, model, body, endpoint_alias)
+    except model_capabilities.CapabilityRejection as exc:
+        note_generation('failed')
+        return _sse_terminal_from_upstream_detail(api_type, exc.detail, metadata=metadata)
+    return None
 
 
 def _request_id_response_headers(request_id: Optional[str]) -> dict:
@@ -1110,6 +1155,8 @@ class _SSEObservation:
     """Keep terminal validity, generation outcome and account attribution separate."""
     def __init__(self, api_type):
         self.api_type = api_type
+        self.frame_has_content = False
+        timing_begin_stream()
         self.first = True
         self.first_event = None
         self.last_event = None
@@ -1139,6 +1186,7 @@ class _SSEObservation:
         return self.terminal if self.terminal in ('incomplete','failed') else 'failed'
 
     def _observe(self, frame):
+        self.frame_has_content = False
         text = frame.decode("utf-8-sig" if self.first else "utf-8", errors="replace")
         self.first = False
         header, data, done = _parse_sse_event_block(text, responses=self.api_type == "responses")
@@ -1146,12 +1194,34 @@ class _SSEObservation:
         if not isinstance(kind, str):
             kind = None
         name = kind or header
+        if data and (name in EVENT_NAMES or self.api_type == 'chat' and isinstance(data.get('choices'), list)):
+            observe_event()
+            if self.api_type == 'responses':
+                self.frame_has_content = kind in ('response.output_text.delta', 'response.function_call_arguments.delta', 'response.refusal.delta') and isinstance(data.get('delta'), str) and bool(data['delta'])
+            elif self.api_type == 'messages':
+                delta = data.get('delta')
+                self.frame_has_content = kind == 'content_block_delta' and isinstance(delta, dict) and any(
+                    isinstance(delta.get(key), str) and bool(delta[key]) for key in ('text', 'partial_json', 'thinking'))
+            else:
+                choices = data.get('choices')
+                self.frame_has_content = isinstance(choices, list) and any(
+                    isinstance(choice, dict) and isinstance(choice.get('delta'), dict) and (
+                        isinstance(choice['delta'].get('content'), str) and bool(choice['delta']['content'])
+                        or isinstance(choice['delta'].get('refusal'), str) and bool(choice['delta']['refusal'])
+                        or isinstance(choice['delta'].get('tool_calls'), list) and bool(choice['delta']['tool_calls']))
+                    for choice in choices)
         if name:
             self.first_event = self.first_event or name
             self.last_event = name
         if self.terminal:
             return
         response = data.get("response") if data else None
+        if isinstance(response, dict):
+            note_reported_model(response.get('model'))
+        elif data and self.api_type == 'chat':
+            note_reported_model(data.get('model'))
+        elif data and kind == 'message_start' and isinstance(data.get('message'), dict):
+            note_reported_model(data['message'].get('model'))
         if self.api_type == "responses" and data:
             # Fields in pinned ResponsesStreamEvent are typed even on terminals.
             for key in ("item_id", "call_id", "delta", "text"):
@@ -1198,7 +1268,7 @@ class _SSEObservation:
             error = data.get("error", data)
         if isinstance(error, dict):
             reason = failure_reason({'error':error})
-            note_reason(reason)
+            note_failure(reason, origin='upstream_stream')
             # Narrow request-local evidence only. Auth/quota/overload/server and
             # unknown EOF/errors remain conservative endpoint failures.
             self.neutral = self.neutral or reason in ('context_window_exceeded','invalid_input','output_limit')
@@ -1631,9 +1701,12 @@ def check_image_admission(payload) -> None:
     visit(payload)
 
 
-def trim_excess_images(payload, max_count: int = _IMG_MAX_COUNT) -> int:
+def trim_excess_images(payload, max_count: Optional[int] = None) -> int:
     """Walk payload and remove oldest images beyond max_count, keeping the most recent ones.
     Returns number of images removed. Images are replaced with a text placeholder."""
+    max_count = _IMG_MAX_COUNT if max_count is None else max_count
+    if type(max_count) is not int or max_count < 1:
+        raise ValueError('Image retention count must be positive')
     # Collect all image node locations: (parent_list, index) in traversal order
     image_locations: list = []
 
@@ -1669,6 +1742,7 @@ def trim_excess_images(payload, max_count: int = _IMG_MAX_COUNT) -> int:
 
     if len(image_locations) <= max_count:
         return 0
+    require_image_trim_consent()
 
     # Remove oldest (earliest in traversal), keep the last max_count
     to_remove = image_locations[:-max_count]
@@ -2361,20 +2435,34 @@ class LoadBalancer:
                              detail={"error": {"code": "endpoint_unavailable",
                                                "message": "Configured upstream temporarily unavailable; retry after cooldown."}})
 
-    def _open(self, ep):
+    def _circuit_event(self, ep, previous, reason):
+        provider = 'copilot' if isinstance(ep, CopilotEndpoint) else 'azure_openai' if isinstance(ep, AzureOpenAIEndpoint) else 'databricks'
+        fields = {'kind': 'lb_circuit_transition', 'provider': provider, 'endpoint_alias': ep.name,
+                  'previous_state': previous, 'circuit_state': self.circuit_state(ep),
+                  'transition_reason': reason, 'circuit_generation': ep.circuit_generation,
+                  'consecutive_errors': ep.consecutive_errors}
+        if reason in ('trial_admitted', 'administrative_reset'):
+            fields['upstream_attempt_id'] = None
+        log_event(fields)
+
+    def _open(self, ep, *, reason='failure_threshold'):
+        previous = self.circuit_state(ep)
         ep.circuit_open = True
         ep.circuit_generation += 1
         ep.circuit_retry_at = time.monotonic() + self.circuit_breaker_timeout
         ep.half_open_in_flight = False
+        self._circuit_event(ep, previous, reason)
         logger.warning("Circuit breaker opened for %s", ep.name)
 
     def reset_circuit(self, ep):
         # Administrative reset invalidates old admission generations, not their ownership.
+        previous = self.circuit_state(ep)
         ep.circuit_open = False
         ep.consecutive_errors = 0
         ep.circuit_generation += 1
         ep.half_open_in_flight = False
         ep.circuit_retry_at = 0.0
+        self._circuit_event(ep, previous, 'administrative_reset')
 
     def current_attempt(self, ep):
         # Compatibility for direct low-level callers with one outstanding admission.
@@ -2487,6 +2575,7 @@ class LoadBalancer:
         probe = endpoint.circuit_open
         if probe:
             endpoint.half_open_in_flight = True
+            self._circuit_event(endpoint, 'OPEN', 'trial_admitted')
         lease = RequestAttempt(endpoint, endpoint.circuit_generation, probe)
         self._attempts.setdefault(id(endpoint), {})[id(lease)] = lease
         endpoint.active_requests += 1
@@ -2524,13 +2613,14 @@ class LoadBalancer:
                 endpoint.circuit_open = False
                 endpoint.consecutive_errors = 0
                 endpoint.circuit_generation += 1
+                self._circuit_event(endpoint, 'HALF_OPEN', 'trial_succeeded')
                 logger.info("Circuit breaker recovered for %s", endpoint.name)
             else:
                 # A cancelled/client-rejected trial is inconclusive, not recovery.
                 # Delay the next real trial to prevent repeated cancellation storms.
                 if failed:
                     endpoint.consecutive_errors += 1
-                self._open(endpoint)
+                self._open(endpoint, reason='trial_failed' if failed else 'trial_inconclusive')
         elif success:
             endpoint.consecutive_errors = 0
         elif failed:
@@ -2782,6 +2872,7 @@ class ClaudeProxy:
                 raise self.load_balancer.unavailable()
             tried.add(endpoint.name)
 
+            observe_route_budget('databricks', 'messages', model, body, endpoint.name)
             attempt_lease = await self.load_balancer.on_request_start(endpoint)
 
             # 使用原生 Anthropic 端点
@@ -2838,7 +2929,7 @@ class ClaudeProxy:
                         ids = error_body["error"].get("upstream_ids") or {}
                         _note_upstream_html(self, endpoint, "Databricks", "messages",
                                             e.response.status_code, upstream_ids=ids)
-                    logger.error(f"Request failed with {e.response.status_code}: {json.dumps(error_body, ensure_ascii=False)[:500]}")
+                    logger.error("Upstream HTTP request rejected (%s)", e.response.status_code)
                     _account_terminal_http_error(self,endpoint,model,start_time,'messages',e.response)
                     raise HTTPException(status_code=e.response.status_code, detail=error_body,
                                         headers=_http_error_headers(e.response))
@@ -2879,7 +2970,7 @@ class ClaudeProxy:
     async def _normal_request(self, endpoint, url, body, headers, model: str = "unknown", start_time: float = 0,
                                 request_id: Optional[str] = None) -> JSONResponse:
         """非流式请求 - 直接透传"""
-        response = await inference_call(self.client.post(url, json=body, headers=headers), 'databricks', 'messages')
+        response = await inference_call(self.client.post(url, json=body, headers=headers), 'databricks', 'messages', model=model, endpoint=endpoint.name)
         response.raise_for_status()
 
         return _buffered_result(self,endpoint,response,model,'messages',start_time,effort_response_headers(body))
@@ -2906,6 +2997,10 @@ class ClaudeProxy:
         async def start_current_request(current):
             if request_lease["active"]:
                 raise RuntimeError("Databricks stream request lease already active")
+            rejection = _stream_capability_error('databricks', 'messages', model, body, current.name,
+                metadata={'request_id': request_id} if request_id else None)
+            if rejection is not None:
+                return rejection
             request_lease["endpoint"] = current
             tried.add(current.name)
             request_lease["lease"] = await proxy_self.load_balancer.on_request_start(current)
@@ -2931,7 +3026,7 @@ class ClaudeProxy:
                 try:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
                     async with aclosing(_await_with_heartbeat(
-                        inference_call(proxy_self.client.send(req, stream=True), 'databricks', 'messages'), HEARTBEAT
+                        inference_call(proxy_self.client.send(req, stream=True), 'databricks', 'messages', model=model, endpoint=current_endpoint.name, stream=True), HEARTBEAT
                     )) as pending_headers:
                         async for kind, payload in pending_headers:
                             if kind == "heartbeat":
@@ -2948,10 +3043,10 @@ class ClaudeProxy:
                         try:
                             error_json = json.loads(error_body)
                             error_msg = error_json.get('message', 'Request failed')
-                            logger.error(f"Stream request failed ({response.status_code}): {error_json}")
+                            logger.error("Upstream stream request rejected (%s)", response.status_code)
                         except Exception:
                             error_msg = error_body.decode('utf-8') if isinstance(error_body, bytes) else str(error_body)
-                            logger.error(f"Stream request failed ({response.status_code}): {error_msg}")
+                            logger.error("Upstream stream request rejected (%s)", response.status_code)
 
                         # P1.3: 用 _build_upstream_error_detail 复用 HTML 识别通道，然后
                         # 只把 upstream_html_error 触发软熔断（不改 event: error 帧的 shape）
@@ -2979,7 +3074,10 @@ class ClaudeProxy:
                                     "Authorization": f"Bearer {current_endpoint.token}",
                                     "Content-Type": "application/json",
                                 }
-                                await start_current_request(current_endpoint)
+                                rejection = await start_current_request(current_endpoint)
+                                if rejection is not None:
+                                    yield rejection
+                                    return
                                 logger.info(f"[{body.get('model')}] -> {current_endpoint.name} (stream attempt {attempt + 2})")
                                 continue
 
@@ -3005,8 +3103,10 @@ class ClaudeProxy:
                                 success = observation.outcome == "completed"
                                 await end_current_request(success=success, is_client_error=observation.neutral or observation.outcome == "incomplete")
                                 _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
+                                note_content_offered(observation.frame_has_content)
                                 yield wire_output.frame(frame)
                                 return
+                            note_content_offered(observation.frame_has_content)
                             yield wire_output.frame(frame)
                     await end_current_request(success=False)
                     # P1.4: 透传 request_id 到 truncated error
@@ -3018,6 +3118,7 @@ class ClaudeProxy:
                     return
 
                 except (_LocalStreamLimit, _LocalObserverError) as e:
+                    note_local_terminal(e.code)
                     await end_current_request(success=False, is_client_error=True)
                     _msg = _apply_request_id_prefix(str(e), {"request_id": request_id} if request_id else None)
                     payload = {"type": "error", "error": {"code": e.code, "type": "local_resource_limit" if isinstance(e, _LocalStreamLimit) else "local_observer_error", "message": _msg,
@@ -3028,8 +3129,10 @@ class ClaudeProxy:
                 except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
                         httpx.ConnectError, httpx.RemoteProtocolError,
                         httpx.ReadError, httpx.WriteError) as e:
+                    note_exception(e)
                     # 网络超时/连接错误/上游中断 - 触发熔断, 可重试
-                    error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
+                    note_exception(e)
+                    error_detail = f"{type(e).__name__}: Upstream request could not complete; execution may have occurred."
                     logger.error(f"Stream network error on {current_endpoint.name}: {error_detail}")
                     await end_current_request(success=False, is_client_error=False)
 
@@ -3043,7 +3146,10 @@ class ClaudeProxy:
                                 "Authorization": f"Bearer {current_endpoint.token}",
                                 "Content-Type": "application/json",
                             }
-                            await start_current_request(current_endpoint)
+                            rejection = await start_current_request(current_endpoint)
+                            if rejection is not None:
+                                yield rejection
+                                return
                             logger.info(f"[{body.get('model')}] -> {current_endpoint.name} (stream retry {attempt + 2})")
                             continue
 
@@ -3054,14 +3160,17 @@ class ClaudeProxy:
 
                 except Exception as e:
                     import traceback
-                    error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
-                    logger.error(f"Stream error: {error_detail}\n{traceback.format_exc()}")
+                    note_exception(e)
+                    error_detail = f"{type(e).__name__}: Upstream request could not complete; execution may have occurred."
+                    logger.error("Stream failed (%s)", type(e).__name__)
                     await end_current_request(success=False, is_client_error=isinstance(e, httpx.PoolTimeout))
                     _detail = _apply_request_id_prefix(error_detail, {"request_id": request_id} if request_id else None)
                     yield _sse_terminal_error('messages','upstream_stream_error',_detail)
                     return
 
                 finally:
+                    timing_end_stream()
+                    note_stream_end(observation)
                     _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                     await _finish_cleanup(_close_stream_resources(pump_task, response))
 
@@ -3186,6 +3295,7 @@ class AzureOpenAIProxy:
                     detail={"error": {"message": f"No endpoint available for model '{model}'"}},
                 )
 
+            observe_route_budget('azure_openai', api_type, model, body, endpoint.name)
             attempt_lease = await self.load_balancer.on_request_start(endpoint)
             tried.add(endpoint.name)
             attempt_ended = False
@@ -3292,7 +3402,7 @@ class AzureOpenAIProxy:
 
     async def _normal_request(self, endpoint, url, body, headers, model: str, api_type: str, start_time: float) -> JSONResponse:
         """非流式请求；request lease 由调用方 exactly-once 结算。"""
-        response = await inference_call(self.client.post(url, json=body, headers=headers), 'azure_openai', api_type)
+        response = await inference_call(self.client.post(url, json=body, headers=headers), 'azure_openai', api_type, model=model, endpoint=endpoint.name)
         response.raise_for_status()
 
         return _buffered_result(self,endpoint,response,model,api_type,start_time)
@@ -3319,6 +3429,9 @@ class AzureOpenAIProxy:
         async def start_current_request(current):
             if request_lease["active"]:
                 raise RuntimeError("Azure stream request lease already active")
+            rejection = _stream_capability_error('azure_openai', api_type, model, body, current.name)
+            if rejection is not None:
+                return rejection
             request_lease["endpoint"] = current
             tried.add(current.name)
             request_lease["lease"] = await proxy_self.load_balancer.on_request_start(current)
@@ -3343,7 +3456,7 @@ class AzureOpenAIProxy:
                 try:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
                     async with aclosing(_await_with_heartbeat(
-                        inference_call(proxy_self.client.send(req, stream=True), 'azure_openai', api_type), HEARTBEAT
+                        inference_call(proxy_self.client.send(req, stream=True), 'azure_openai', api_type, model=model, endpoint=current_endpoint.name, stream=True), HEARTBEAT
                     )) as pending_headers:
                         async for kind, payload in pending_headers:
                             if kind == "heartbeat":
@@ -3372,8 +3485,7 @@ class AzureOpenAIProxy:
                             _note_upstream_html(proxy_self, current_endpoint, "Azure", api_type,
                                                 response.status_code, upstream_ids=ids)
                         logger.error(
-                            f"Azure stream failed ({response.status_code}, "
-                            f"{'HTML error page' if is_html else 'JSON/text'}): {log_snippet}"
+                            "Azure stream request rejected (%s)", response.status_code
                         )
                         await end_current_request(success=False, is_client_error=is_client_error)
 
@@ -3388,7 +3500,10 @@ class AzureOpenAIProxy:
                                 else:
                                     current_url = f"{current_endpoint.endpoint}/openai/deployments/{model}/chat/completions?api-version=2024-10-21"
                                 current_headers = {"api-key": current_endpoint.api_key, "Content-Type": "application/json"}
-                                await start_current_request(current_endpoint)
+                                rejection = await start_current_request(current_endpoint)
+                                if rejection is not None:
+                                    yield rejection
+                                    return
                                 continue
 
                         _account_terminal_http_error(proxy_self,current_endpoint,model,start_time,api_type,response)
@@ -3411,14 +3526,17 @@ class AzureOpenAIProxy:
                                 success = observation.outcome == "completed"
                                 await end_current_request(success=success, is_client_error=observation.neutral or observation.outcome == "incomplete")
                                 _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
+                                note_content_offered(observation.frame_has_content)
                                 yield wire_output.frame(frame)
                                 return
+                            note_content_offered(observation.frame_has_content)
                             yield wire_output.frame(frame)
                     await end_current_request(success=False)
                     yield _sse_terminal_error(api_type, "upstream_truncated", "Upstream ended without a valid terminal; cause undetermined")
                     return
 
                 except (_LocalStreamLimit, _LocalObserverError) as e:
+                    note_local_terminal(e.code)
                     await end_current_request(success=False, is_client_error=True)
                     yield _sse_terminal_error(api_type, e.code, str(e))
                     return
@@ -3426,7 +3544,9 @@ class AzureOpenAIProxy:
                 except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
                         httpx.ConnectError, httpx.RemoteProtocolError,
                         httpx.ReadError, httpx.WriteError) as e:
-                    error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
+                    note_exception(e)
+                    note_exception(e)
+                    error_detail = f"{type(e).__name__}: Upstream request could not complete; execution may have occurred."
                     logger.error(f"Azure stream network error on {current_endpoint.name}: {error_detail}")
                     await end_current_request(success=False)
 
@@ -3441,20 +3561,26 @@ class AzureOpenAIProxy:
                             else:
                                 current_url = f"{current_endpoint.endpoint}/openai/deployments/{model}/chat/completions?api-version=2024-10-21"
                             current_headers = {"api-key": current_endpoint.api_key, "Content-Type": "application/json"}
-                            await start_current_request(current_endpoint)
+                            rejection = await start_current_request(current_endpoint)
+                            if rejection is not None:
+                                yield rejection
+                                return
                             continue
 
                     yield _sse_terminal_error(api_type, "upstream_network_error", error_detail)
                     return
 
                 except Exception as e:
-                    error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
+                    note_exception(e)
+                    error_detail = f"{type(e).__name__}: Upstream request could not complete; execution may have occurred."
                     logger.error(f"Azure stream error: {error_detail}")
                     await end_current_request(success=False, is_client_error=isinstance(e, httpx.PoolTimeout))
                     yield _sse_terminal_error(api_type, "upstream_error", error_detail)
                     return
 
                 finally:
+                    timing_end_stream()
+                    note_stream_end(observation)
                     _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                     await _finish_cleanup(_close_stream_resources(pump_task, response))
 
@@ -3627,6 +3753,7 @@ def _format_upstream_ids_suffix(ids: dict) -> str:
 
 def _build_upstream_error_detail(status, body_text, provider, endpoint_name, content_type=None,
                                  upstream_headers=None, lb_request_id=None):
+    lb_request_id = telemetry_request_id() or safe_id(lb_request_id)
     detail = _build_legacy_upstream_error_detail(status,body_text,provider,endpoint_name,
                                                 content_type,upstream_headers,lb_request_id)
     try:
@@ -3635,7 +3762,7 @@ def _build_upstream_error_detail(status, body_text, provider, endpoint_name, con
         payload = None
     detail = enrich_error(detail,status=status,payload=payload,headers=upstream_headers,
                           request_id=lb_request_id or telemetry_request_id())
-    note_reason(detail['error']['reason'])
+    note_failure(detail['error']['reason'], origin='upstream_http', status=status)
     return detail
 
 
@@ -4402,6 +4529,7 @@ class CopilotProxy:
         logger.info(f"[Copilot] session token cached for {endpoint.name}: base={endpoint.session_base_url}, expires in {expires_in}s")
         return endpoint.session_token
 
+    @observed_phase('auth_prepare')
     async def get_session_token(self, endpoint: CopilotEndpoint, force: bool = False) -> str:
         """获取 short-lived Copilot session token。带自愈链：
 
@@ -4435,7 +4563,7 @@ class CopilotProxy:
 
     def _mark_endpoint_unhealthy(self, endpoint: CopilotEndpoint, reason: str):
         endpoint.auth_unhealthy = True
-        self.load_balancer._open(endpoint)
+        self.load_balancer._open(endpoint, reason='authentication')
         endpoint.last_error_time = time.time()
         endpoint.total_errors += 1
         logger.error(f"[Copilot] endpoint '{endpoint.name}' marked unhealthy: {reason}")
@@ -5012,6 +5140,7 @@ class CopilotProxy:
         """累加 pinning 计数（换 endpoint 因 stateful 保护被拒绝时调）。"""
         self.stateful_pinned_events[reason] = self.stateful_pinned_events.get(reason, 0) + 1
 
+    @observed_phase('auth_prepare')
     async def _build_headers(self, endpoint: CopilotEndpoint, has_image: bool,
                               stream: bool = False) -> dict:
         token = await self.get_session_token(endpoint)
@@ -5162,6 +5291,7 @@ class CopilotProxy:
                 pinned_endpoint = endpoint
             tried.add(endpoint.name)
 
+            observe_route_budget('copilot', api_type, model, body, endpoint.name)
             attempt_lease = await self.load_balancer.on_request_start(endpoint)
             attempt_ended = False
             attempt_transferred = False
@@ -5301,6 +5431,7 @@ class CopilotProxy:
                     raise HTTPException(status_code=status, detail=error_body,
                                         headers=_http_error_headers(e.response))
                 except httpx.PoolTimeout as e:
+                    note_exception(e)
                     # Local client saturation is not an upstream endpoint failure.
                     last_error = e
                     self.global_stats.total_errors += 1
@@ -5364,7 +5495,7 @@ class CopilotProxy:
                                recovery: Optional["_OpaqueStateRecovery"] = None) -> JSONResponse:
         if recovery is None:  # 直接调用（测试 / 低层调用者）也要有预算
             recovery = _OpaqueStateRecovery(self, api_type)
-        response = await inference_call(self.client.post(url, json=body, headers=headers), 'copilot', api_type)
+        response = await inference_call(self.client.post(url, json=body, headers=headers), 'copilot', api_type, model=model, endpoint=endpoint.name)
         try:
             self.last_negotiated_http_version = response.http_version
         except Exception:  # noqa: BLE001
@@ -5433,8 +5564,7 @@ class CopilotProxy:
                 ids = upstream_detail.get("error", {}).get("upstream_ids") or {}
                 self._apply_html_cooldown(endpoint, api_type, response.status_code, upstream_ids=ids)
                 logger.error(
-                    f"[Copilot] non-stream HTML error page ({response.status_code}, "
-                    f"content-type={content_type}): {(body_text or '')[:300].replace(chr(10), ' ')}"
+                    "Copilot buffered response is an HTML error (%s)", response.status_code
                 )
                 # HTML challenge / 上游软故障统一按 502 抛，让客户端不误信 200 body。
                 # 保留 upstream_detail 的 error 结构 + upstream_ids 便于 debug。
@@ -5515,6 +5645,10 @@ class CopilotProxy:
         async def start_current_request(current):
             if request_lease["active"]:
                 raise RuntimeError("Copilot stream request lease already active")
+            rejection = _stream_capability_error('copilot', api_type, model, body, current.name,
+                metadata={'endpoint': current.name, **({'request_id': request_id} if request_id else {})})
+            if rejection is not None:
+                return rejection
             request_lease["endpoint"] = current
             tried.add(current.name)
             request_lease["lease"] = await proxy_self.load_balancer.on_request_start(current)
@@ -5541,6 +5675,7 @@ class CopilotProxy:
                     "chunks": stream_state["chunks_yielded"],
                     "first_event": stream_state["first_event"] or "-",
                     "last_event": stream_state["last_event"] or "-",
+                    "terminal_seen": stream_state["saw_completion"],
                     "saw_completion": stream_state["saw_completion"],
                     "sent_any_chunk": stream_state["sent_any_chunk"],
                     "attempt": stream_state["attempt"],
@@ -5607,6 +5742,7 @@ class CopilotProxy:
                     "chunks": chunks_yielded_count,
                     "first_event": first_event_name or "-",
                     "last_event": last_event_name or "-",
+                    "terminal_seen": saw_completion,
                     "saw_completion": saw_completion,
                     "sent_any_chunk": sent_any_chunk,
                     "attempt": attempt,
@@ -5632,7 +5768,7 @@ class CopilotProxy:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
                     body_bytes_size = len(req.content)
                     async with aclosing(_await_with_heartbeat(
-                        inference_call(proxy_self.client.send(req, stream=True), 'copilot', api_type), HEARTBEAT
+                        inference_call(proxy_self.client.send(req, stream=True), 'copilot', api_type, model=model, endpoint=current_endpoint.name, stream=True), HEARTBEAT
                     )) as pending_headers:
                         async for kind, payload in pending_headers:
                             if kind == "heartbeat":
@@ -5689,8 +5825,7 @@ class CopilotProxy:
                             ids = upstream_detail["error"].get("upstream_ids") or {}
                             proxy_self._apply_html_cooldown(current_endpoint, api_type, response.status_code, upstream_ids=ids)
                         logger.error(
-                            f"[Copilot] stream failed ({response.status_code}, ct={upstream_ct}, "
-                            f"{'HTML error page' if is_html else 'JSON/text'}): {log_snippet}"
+                            "Copilot stream request rejected (%s)", response.status_code
                         )
                         # 上游拒绝本请求携带的 opaque state。两类：item id 归属对不上，
                         # 或 encrypted_content blob 解不开（实测是两级独立校验，见
@@ -5792,7 +5927,12 @@ class CopilotProxy:
                                     yield _sse_terminal_error(api_type, "upstream_header_build_failed", str(he))
                                     return
                                 current_url = f"{current_endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
-                                await start_current_request(current_endpoint)
+                                rejection = await start_current_request(current_endpoint)
+                                if rejection is not None:
+                                    _emit_stream_end('capability_rejected', logging.WARNING,
+                                                     account_neutral=True, terminal_valid=False)
+                                    yield rejection
+                                    return
                                 continue
 
                         _account_terminal_http_error(proxy_self,current_endpoint,model,start_time,api_type,response)
@@ -5850,8 +5990,10 @@ class CopilotProxy:
                                 _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                                 _emit_stream_end(observation.terminal, logging.INFO if success else logging.WARNING,
                                                  terminal_valid=True, account_neutral=observation.neutral)
+                                note_content_offered(observation.frame_has_content)
                                 yield wire_output.frame(frame)
                                 return
+                            note_content_offered(observation.frame_has_content)
                             yield wire_output.frame(frame)
                     proxy_self.stream_truncated_no_completion_total += 1
                     proxy_self._record_truncation(model, api_type)
@@ -5863,6 +6005,7 @@ class CopilotProxy:
                     return
 
                 except (_LocalStreamLimit, _LocalObserverError) as e:
+                    note_local_terminal(e.code)
                     await end_current_request(success=False, is_client_error=True)
                     yield _sse_terminal_error(api_type, e.code, str(e), metadata=_sse_error_metadata())
                     _emit_stream_end("local_resource_limit" if isinstance(e, _LocalStreamLimit) else "local_observer_error",
@@ -5879,6 +6022,7 @@ class CopilotProxy:
                                       reason=str(e)[:200])
                     return
                 except httpx.PoolTimeout as e:
+                    note_exception(e)
                     proxy_self.pool_timeout_total += 1
                     log_msg, sse_msg, pt_fields = await proxy_self._describe_pool_timeout(
                         current_endpoint.name, e,
@@ -5920,7 +6064,12 @@ class CopilotProxy:
                                                   reason=str(he)[:200])
                                 return
                             current_url = f"{current_endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
-                            await start_current_request(current_endpoint)
+                            rejection = await start_current_request(current_endpoint)
+                            if rejection is not None:
+                                _emit_stream_end('capability_rejected', logging.WARNING,
+                                                 account_neutral=True, terminal_valid=False)
+                                yield rejection
+                                return
                             continue
 
                     yield _sse_terminal_error(api_type, "pool_acquire_timeout", error_detail,
@@ -5936,6 +6085,7 @@ class CopilotProxy:
                 except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
                         httpx.ConnectError, httpx.RemoteProtocolError,
                         httpx.ReadError, httpx.WriteError) as e:
+                    note_exception(e)
                     is_read_timeout = isinstance(e, httpx.ReadTimeout)
                     if is_read_timeout:
                         # Independent counter so `read=None` regressions become
@@ -5950,7 +6100,7 @@ class CopilotProxy:
                     probe_snapshot = await proxy_self._probe_upstream_connect(current_endpoint)
                     probe_str = proxy_self._format_probe(probe_snapshot)
                     error_detail = (
-                        f"{type(e).__name__}: {str(e) or 'Unknown error'} "
+                        f"{type(e).__name__}: Upstream request could not complete; execution may have occurred. "
                         f"(connection_id={connection_id} chunks_yielded={chunks_yielded_count} "
                         f"first_event={first_event_name} last_event={last_event_name} "
                         f"{probe_str})"
@@ -5967,7 +6117,7 @@ class CopilotProxy:
                             "connection_id": connection_id,
                     **protocol_metrics,
                             "exc_type": type(e).__name__,
-                            "exc_message": str(e),
+                            "error_origin": "transport",
                             "chunks_yielded": chunks_yielded_count,
                             "first_event": first_event_name,
                             "last_event": last_event_name,
@@ -6002,7 +6152,12 @@ class CopilotProxy:
                                                   reason=str(he)[:200])
                                 return
                             current_url = f"{current_endpoint.session_base_url}/{'responses' if api_type == 'responses' else 'chat/completions'}"
-                            await start_current_request(current_endpoint)
+                            rejection = await start_current_request(current_endpoint)
+                            if rejection is not None:
+                                _emit_stream_end('capability_rejected', logging.WARNING,
+                                                 account_neutral=True, terminal_valid=False)
+                                yield rejection
+                                return
                             continue
 
                     yield _sse_terminal_error(api_type, "upstream_network_error", error_detail,
@@ -6013,7 +6168,8 @@ class CopilotProxy:
                     return
 
                 except Exception as e:
-                    error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
+                    note_exception(e)
+                    error_detail = f"{type(e).__name__}: Upstream request could not complete; execution may have occurred."
                     logger.error(f"[Copilot] stream error: {error_detail}")
                     await end_current_request(success=False)
                     yield _sse_terminal_error(api_type, "upstream_error", error_detail,
@@ -6023,6 +6179,8 @@ class CopilotProxy:
                     return
 
                 finally:
+                    timing_end_stream()
+                    note_stream_end(observation)
                     _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                     await _finish_cleanup(_close_stream_resources(pump_task, response))
 
@@ -6529,7 +6687,7 @@ async def _inject_request_id_middleware(request: Request, call_next):
     an upstream proxy/ingress already assigned one) or synthesise a fresh id
     so every response gets a traceable value.
     """
-    inbound = request.headers.get("x-request-id") or request.headers.get("openai-request-id")
+    inbound = safe_id(request.headers.get("x-request-id")) or safe_id(request.headers.get("openai-request-id"))
     if inbound:
         request.state.request_id = inbound
     response = await call_next(request)
@@ -6557,9 +6715,11 @@ MAX_REQUEST_SIZE = 4 * 1024 * 1024  # Databricks 4MB 上游硬限制（压缩后
 MAX_RAW_REQUEST_SIZE = 64 * 1024 * 1024  # LB 入口宽容上限：压缩前最大 64MB，避免 OOM
 
 
+@observed_phase('body_read')
 async def _read_bounded_request_body(request: Request):
     """Keep Request.body caching semantics while checking size before retention."""
     def too_large():
+        note_failure('invalid_input', origin='local')
         return HTTPException(status_code=413, detail={'error':{
             'type':'request_too_large','message':'Request exceeds LB raw body limit.'}})
     try:
@@ -6585,6 +6745,7 @@ async def _read_bounded_request_body(request: Request):
         raise HTTPException(status_code=503, headers={'Retry-After':'1'}, detail={'error':{
             'code':'lb_overloaded','reason':exc.reason,'message':'Local request body memory budget exhausted.'}}) from None
     except TimeoutError:
+        note_failure('request_body_timeout', origin='client')
         raise HTTPException(status_code=408, detail={'error':{
             'code':'request_body_timeout','message':'Request upload did not finish within the body read budget.'}}) from None
     request._body = b''.join(parts)
@@ -6595,8 +6756,8 @@ async def _read_bounded_request_body(request: Request):
 async def messages(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
     # P1.4: generate/honour request_id so error SSE frames + upstream logs correlate.
     request_id = (
-        request.headers.get("x-request-id")
-        or request.headers.get("openai-request-id")
+        safe_id(request.headers.get("x-request-id"))
+        or safe_id(request.headers.get("openai-request-id"))
         or f"req_{uuid.uuid4().hex[:8]}"
     )
     request.state.request_id = request_id
@@ -6609,7 +6770,7 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
     # P3.2: 记录租户名到 request.state，供 metrics / structured log 打 label
     request.state.tenant = _lookup_tenant(actual_key) or "default"
     _CURRENT_TENANT.set(request.state.tenant)
-    set_parameter_policy(request.headers.get('x-lb-strict-parameters'))
+    set_parameter_policy(request.headers.get('x-lb-strict-parameters'), image_trim=request.headers.get('x-lb-image-trim'))
 
     # 读取原始请求体，先做粗暴上限保护避免 OOM，然后尝试压图
     body_bytes = await _read_bounded_request_body(request)
@@ -6633,6 +6794,7 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
 
+    note_request_context(body.get("model"), stream=body.get("stream", False), body_size=body_size)
     # 大请求先尝试压缩图片（小请求跳过节省 CPU）
     if body_size > _IMG_COMPRESS_THRESHOLD:
         try:
@@ -6657,6 +6819,7 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
                 raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
         stats = await compress_images_async(body)
         if stats["count"] > 0:
+            note_parameter_transforms({'images.compressed'})
             saved_kb = (stats["before"] - stats["after"]) / 1024
             logger.info(
                 f"[image-compress] /v1/messages: {stats['count']} imgs "
@@ -6679,17 +6842,47 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
         )
 
     stream = body.get("stream", False)
-    logger.info(f"[Databricks][{request_id}] Request: model={body.get('model')}, stream={stream}, thinking={body.get('thinking')}, size={body_size/1024:.1f}KB")
+    log_event({'kind': 'lb_request_received', 'request_id': request_id, 'body_size_bytes': body_size, 'stream': stream})
 
     return await proxy.proxy_request(body, stream=stream, request_id=request_id)
 
 
 @app.post("/v1/messages/count_tokens")
 async def count_tokens(request: Request):
-    body = await request.json()
-    content = json.dumps(body.get("messages", []))
-    estimated_tokens = len(content) // 4
-    return {"input_tokens": estimated_tokens}
+    key = _extract_api_key(request)
+    if not _verify_lb_api_key(key):
+        raise HTTPException(status_code=401, detail={'error': {'message': 'Invalid API key'}})
+    sync_drain(INFERENCE_ADMISSION)
+    try:
+        lease = await INFERENCE_ADMISSION.acquire(_lookup_tenant(key) or 'default')
+    except AdmissionError as exc:
+        raise HTTPException(status_code=503, headers={'Retry-After': '1'}, detail={'error': {
+            'code': 'lb_overloaded', 'reason': exc.reason, 'message': 'Local estimation admission unavailable.'}}) from None
+    token = CURRENT_LEASE.set(lease)
+    try:
+        raw = await _read_bounded_request_body(request)
+        try:
+            body = json.loads(raw)
+            if not isinstance(body, dict):
+                raise ValueError('Expected an object')
+        except (ValueError, UnicodeError):
+            raise HTTPException(status_code=400, detail={'error': {'message': 'Invalid token count request'}}) from None
+        estimate = estimate_payload(body)
+        return JSONResponse({'input_tokens': estimate['estimated_input_tokens']}, headers={
+            'X-LB-Token-Count-Method': estimate['estimate_method'],
+            'X-LB-Token-Count-Confidence': estimate['estimate_confidence'],
+            'X-LB-Token-Count-Complete': str(estimate['estimate_complete']).lower(),
+            'X-LB-Unknown-Components': ','.join(estimate['unknown_components'])})
+    finally:
+        CURRENT_LEASE.reset(token)
+        lease.release()
+
+
+@app.get('/admin/model-capabilities')
+async def model_capability_catalog(request: Request):
+    if not _verify_lb_api_key(_extract_api_key(request)):
+        raise HTTPException(status_code=401, detail={'error': {'message': 'Invalid API key'}})
+    return {**model_capabilities.CATALOG.public_view(), 'mode': model_capabilities.MODE}
 
 
 def _extract_api_key(request: Request, x_api_key: Optional[str] = None) -> str:
@@ -6848,13 +7041,17 @@ def _drop_nonpositive_token_limits(body: dict) -> list:
         if field_name not in body:
             continue
         value = body.get(field_name)
-        if isinstance(value, bool):
-            numeric = int(value)
-        else:
+        if type(value) is int:
+            numeric = value
+        elif isinstance(value, str) and re.fullmatch(r'[+-]?[0-9]+', value):
             try:
                 numeric = int(value)
             except (TypeError, ValueError):
                 continue
+        else:
+            # Preserve invalid types for adapter/upstream validation. Coercing
+            # False or 0.5 to zero would silently remove the caller's budget.
+            continue
         if numeric <= 0:
             body.pop(field_name, None)
             removed.append(field_name)
@@ -6872,63 +7069,11 @@ def _positive_int(value) -> Optional[int]:
 
 
 def _chat_content_for_responses(content):
-    if content is None:
-        return ""
-    if isinstance(content, (str, list)):
-        return content
-    try:
-        return json.dumps(content, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(content)
-
-
-def _chat_content_as_text(content) -> str:
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    try:
-        return json.dumps(content, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(content)
+    return chat_content(content)
 
 
 def _messages_to_responses_input(messages) -> list:
-    converted = []
-    for message in messages or []:
-        if not isinstance(message, dict):
-            continue
-        role = str(message.get("role") or "user")
-        content = message.get("content", "")
-
-        if role == "tool":
-            tool_call_id = str(message.get("tool_call_id") or "")
-            prefix = "Tool result"
-            if tool_call_id:
-                prefix = f"{prefix} for {tool_call_id}"
-            converted.append({"role": "user", "content": f"{prefix}: {_chat_content_as_text(content)}"})
-            continue
-
-        if role == "assistant" and message.get("tool_calls"):
-            names = []
-            for tool_call in message.get("tool_calls") or []:
-                if not isinstance(tool_call, dict):
-                    continue
-                fn = tool_call.get("function") or {}
-                name = fn.get("name") if isinstance(fn, dict) else None
-                if name:
-                    names.append(str(name))
-            if names:
-                converted.append({"role": "assistant", "content": "Requested tool call: " + ", ".join(names)})
-                continue
-
-        if role not in ("system", "user", "assistant"):
-            role = "user"
-        converted.append({"role": role, "content": _chat_content_for_responses(content)})
-
-    if not converted:
-        converted.append({"role": "user", "content": "Please complete the task as requested."})
-    return converted
+    return messages_to_items(messages)
 
 
 def _has_tool_result(messages) -> bool:
@@ -6936,23 +7081,7 @@ def _has_tool_result(messages) -> bool:
 
 
 def _tools_to_responses_tools(tools) -> Optional[list]:
-    converted = []
-    for tool in tools or []:
-        if not isinstance(tool, dict) or tool.get("type") != "function":
-            continue
-        fn = tool.get("function") or {}
-        if not isinstance(fn, dict):
-            continue
-        item = {
-            "type": "function",
-            "name": str(fn.get("name") or ""),
-            "description": str(fn.get("description") or ""),
-            "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
-        }
-        if "strict" in fn:
-            item["strict"] = fn["strict"]
-        converted.append(item)
-    return converted or None
+    return tools_to_items(tools)
 
 
 def _responses_adapter_removed_sampling_fields(chat_body: dict) -> list:
@@ -6973,33 +7102,7 @@ def _strip_unsupported_responses_sampling_fields(body: dict) -> list:
 
 
 def _build_responses_payload_from_chat(chat_body: dict) -> dict:
-    messages = chat_body.get("messages") or []
-    payload = {
-        "model": chat_body.get("model", "unknown"),
-        "input": _messages_to_responses_input(messages),
-        "stream": False,
-    }
-
-    token_limit = _positive_int(chat_body.get("max_tokens"))
-    if token_limit is None:
-        token_limit = _positive_int(chat_body.get("max_completion_tokens"))
-    if token_limit is not None:
-        payload["max_output_tokens"] = token_limit
-
-    removed_sampling_fields = set(_responses_adapter_removed_sampling_fields(chat_body))
-    for field_name in ("temperature", "top_p"):
-        if field_name in removed_sampling_fields:
-            continue
-        if field_name in chat_body and chat_body[field_name] is not None:
-            payload[field_name] = chat_body[field_name]
-
-    tools = _tools_to_responses_tools(chat_body.get("tools"))
-    if tools and not _has_tool_result(messages):
-        payload["tools"] = tools
-        if "tool_choice" in chat_body:
-            payload["tool_choice"] = chat_body["tool_choice"]
-
-    return payload
+    return build_chat_payload(chat_body, removed_sampling=_responses_adapter_removed_sampling_fields(chat_body))
 
 
 def _responses_text(response_json: dict) -> str:
@@ -7022,13 +7125,18 @@ def _responses_tool_calls(response_json: dict) -> Optional[list]:
     for item in response_json.get("output") or []:
         if not isinstance(item, dict) or item.get("type") != "function_call":
             continue
-        call_id = str(item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:12]}")
+        call_id = item.get('call_id')
+        if (not isinstance(call_id, str) or not call_id or not isinstance(item.get('name'), str)
+                or not item['name'] or not isinstance(item.get('arguments'), str)):
+            note_failure('invalid_protocol', origin='local')
+            raise _SemanticResponseError({'error': {'code': 'invalid_upstream_response',
+                'message': 'The upstream tool call is missing its call ID, name or arguments.', 'retryable': False}})
         calls.append({
             "id": call_id,
             "type": "function",
             "function": {
-                "name": str(item.get("name") or ""),
-                "arguments": str(item.get("arguments") or "{}"),
+                "name": item['name'],
+                "arguments": item['arguments'],
             },
         })
     return calls or None
@@ -7057,11 +7165,27 @@ def _responses_usage_to_chat_usage(usage: Optional[dict]) -> Optional[dict]:
 def _responses_json_to_chat_completion(response_json: dict, model: str) -> dict:
     tool_calls = _responses_tool_calls(response_json)
     if tool_calls:
-        message = {"role": "assistant", "content": None, "tool_calls": tool_calls}
+        message = {"role": "assistant", "content": _responses_text(response_json) or None, "tool_calls": tool_calls}
         finish_reason = "tool_calls"
     else:
         message = {"role": "assistant", "content": _responses_text(response_json)}
         finish_reason = "stop"
+    refusals = [part['refusal'] for item in response_json.get('output', []) if isinstance(item, dict)
+                for part in (item.get('content') if isinstance(item.get('content'), list) else [])
+                if isinstance(part, dict) and part.get('type') == 'refusal' and isinstance(part.get('refusal'), str)]
+    if refusals:
+        message['refusal'] = ''.join(refusals)
+    if response_json.get('status') == 'incomplete':
+        details = response_json.get('incomplete_details')
+        reason = details.get('reason') if isinstance(details, dict) else None
+        if reason not in ('max_output_tokens', 'content_filter'):
+            raise _SemanticResponseError({'error': {'code': 'upstream_incomplete',
+                'message': 'The upstream response is incomplete and cannot be represented as a completed Chat response.',
+                'retryable': False}})
+        finish_reason = 'length' if reason == 'max_output_tokens' else 'content_filter'
+    if response_json.get('status') == 'failed' or response_json.get('error'):
+        raise _SemanticResponseError({'error': {'code': 'upstream_failed',
+            'message': 'The upstream response failed.', 'retryable': False}})
 
     payload = {
         "id": f"chatcmpl-lb-{uuid.uuid4().hex}",
@@ -7084,7 +7208,7 @@ def _should_adapt_chat_to_responses(model: str) -> bool:
     return (model or "").strip().lower() in OPENAI_CHAT_TO_RESPONSES_MODELS_LOWER
 
 
-async def _chat_completion_sse_from_payload(chat_payload: dict):
+async def _chat_completion_sse_from_payload(chat_payload: dict, *, include_usage=False):
     chat_id = chat_payload.get("id") or f"chatcmpl-lb-{uuid.uuid4().hex}"
     created = chat_payload.get("created") or int(time.time())
     model = chat_payload.get("model") or "unknown"
@@ -7092,7 +7216,12 @@ async def _chat_completion_sse_from_payload(chat_payload: dict):
     message = choice.get("message") or {}
 
     if message.get("tool_calls"):
-        delta = {"tool_calls": message["tool_calls"]}
+        if message.get('content'):
+            text_chunk = {'id': chat_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model,
+                          'choices': [{'index': 0, 'delta': {'content': message['content']}, 'finish_reason': None}]}
+            note_content_offered(True)
+            yield ('data: ' + json.dumps(text_chunk, ensure_ascii=False) + '\n\n').encode()
+        delta = {"tool_calls": [dict(call, index=index) for index, call in enumerate(message["tool_calls"])]}
         chunk = {
             "id": chat_id,
             "object": "chat.completion.chunk",
@@ -7100,6 +7229,7 @@ async def _chat_completion_sse_from_payload(chat_payload: dict):
             "model": model,
             "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
         }
+        note_content_offered(True)
         yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode()
         finish_reason = "tool_calls"
     else:
@@ -7117,9 +7247,16 @@ async def _chat_completion_sse_from_payload(chat_payload: dict):
                 "model": model,
                 "choices": [{"index": 0, "delta": {"content": part}, "finish_reason": None}],
             }
+            note_content_offered(bool(part))
             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode()
         finish_reason = "stop"
 
+    if message.get('refusal'):
+        refusal_chunk = {'id': chat_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model,
+                         'choices': [{'index': 0, 'delta': {'refusal': message['refusal']}, 'finish_reason': None}]}
+        note_content_offered(True)
+        yield ('data: ' + json.dumps(refusal_chunk, ensure_ascii=False) + '\n\n').encode()
+    finish_reason = choice.get('finish_reason') or finish_reason
     final_chunk = {
         "id": chat_id,
         "object": "chat.completion.chunk",
@@ -7128,11 +7265,15 @@ async def _chat_completion_sse_from_payload(chat_payload: dict):
         "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
     }
     yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n".encode()
+    if include_usage and isinstance(chat_payload.get('usage'), dict):
+        yield ('data: ' + json.dumps({'id': chat_id, 'object': 'chat.completion.chunk',
+               'created': created, 'model': model, 'choices': [], 'usage': chat_payload['usage']}) + '\n\n').encode()
     yield b"data: [DONE]\n\n"
 
 
 async def _route_chat_via_responses(body: dict, stream: bool, request_id: Optional[str] = None,
                                     disconnect_checker=None):
+    note_parameter_drops(_responses_adapter_removed_sampling_fields(body))
     responses_body = _build_responses_payload_from_chat(body)
     model = responses_body.get("model", body.get("model", "unknown"))
     rid = request_id or "-"
@@ -7166,17 +7307,21 @@ async def _route_chat_via_responses(body: dict, stream: bool, request_id: Option
         raise HTTPException(status_code=502, detail={"error": {"message": f"Responses adapter failed to parse upstream JSON: {e}"}}) from e
 
     chat_payload = _responses_json_to_chat_completion(response_json, str(model))
+    note_reported_model(response_json.get('model'))
+    note_json_result(chat_payload, 'chat', observe_model=False)
     if stream:
+        note_parameter_transforms({'stream.buffered'})
         return StreamingResponse(
-            _chat_completion_sse_from_payload(chat_payload),
+            _chat_completion_sse_from_payload(chat_payload, include_usage=bool((body.get('stream_options') or {}).get('include_usage'))),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
+                "X-LB-Stream-Mode": "buffered-adapter",
             },
         )
-    return JSONResponse(content=chat_payload, status_code=response.status_code)
+    return JSONResponse(content=chat_payload, status_code=response.status_code, headers={'X-LB-Stream-Mode': 'buffered-adapter'})
 
 
 def _copilot_endpoint_diagnostics(model: str, api_type: Optional[str] = None) -> list:
@@ -7228,24 +7373,11 @@ def _request_auth_header_names(request: Request) -> list:
 
 
 def _log_openai_request(request_id: str, route: str, request: Request, body: dict, body_size: int, stream: bool):
-    auth_headers = _request_auth_header_names(request)
-    user_agent = (request.headers.get("user-agent") or "")[:160]
-    content_type = request.headers.get("content-type") or ""
-    logger.info(
-        f"[OpenAICompat][{request_id}] {route} model={body.get('model')} stream={stream} "
-        f"body_size={body_size} auth_headers={auth_headers} content_type={content_type} "
-        f"user_agent={user_agent}",
-        extra={
-            "request_id": request_id,
-            "route": route,
-            "model": body.get("model"),
-            "stream": stream,
-            "body_size_bytes": body_size,
-            "auth_headers_present": auth_headers,
-            "content_type": content_type,
-            "user_agent": user_agent,
-        },
-    )
+    ua = (request.headers.get('user-agent') or '')[:256].lower()
+    client_class = next((name for name in ('openclaw', 'codex', 'claude', 'openai', 'curl') if name in ua), 'other')
+    # Client class is a hint, never a trusted tenant or authorization claim.
+    log_event({'kind': 'lb_request_received', 'request_id': request_id, 'route': route,
+               'body_size_bytes': body_size, 'stream': stream, 'client_class': client_class})
 
 
 async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Optional[str] = None,
@@ -7506,8 +7638,8 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
     # Honour inbound request id when the upstream proxy / ingress already
     # assigned one so log correlation survives an extra hop.
     request_id = (
-        request.headers.get("x-request-id")
-        or request.headers.get("openai-request-id")
+        safe_id(request.headers.get("x-request-id"))
+        or safe_id(request.headers.get("openai-request-id"))
         or f"req_{uuid.uuid4().hex[:8]}"
     )
     request.state.request_id = request_id
@@ -7522,7 +7654,7 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
     request.state.tenant = _lookup_tenant(actual_key) or "default"  # P3.2
     _CURRENT_TENANT.set(request.state.tenant)
-    set_parameter_policy(request.headers.get('x-lb-strict-parameters'))
+    set_parameter_policy(request.headers.get('x-lb-strict-parameters'), image_trim=request.headers.get('x-lb-image-trim'))
 
     body_bytes = await _read_bounded_request_body(request)
     if len(body_bytes) > MAX_RAW_REQUEST_SIZE:
@@ -7537,6 +7669,7 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
     stream = body.get("stream", False)
+    note_request_context(body.get("model"), stream=stream, body_size=len(body_bytes))
     _log_openai_request(request_id, "/v1/responses", request, body, len(body_bytes), stream)
     if len(body_bytes) > _IMG_COMPRESS_THRESHOLD:
         try:
@@ -7561,6 +7694,7 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
                 raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
         stats = await compress_images_async(body)
         if stats["count"] > 0:
+            note_parameter_transforms({'images.compressed'})
             logger.info(
                 f"[image-compress] /v1/responses: {stats['count']} imgs "
                 f"{stats['before']/1024:.0f}KB -> {stats['after']/1024:.0f}KB"
@@ -7577,8 +7711,8 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
     # Honour inbound request id when the upstream proxy / ingress already
     # assigned one so log correlation survives an extra hop.
     request_id = (
-        request.headers.get("x-request-id")
-        or request.headers.get("openai-request-id")
+        safe_id(request.headers.get("x-request-id"))
+        or safe_id(request.headers.get("openai-request-id"))
         or f"req_{uuid.uuid4().hex[:8]}"
     )
     request.state.request_id = request_id
@@ -7593,7 +7727,7 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
     request.state.tenant = _lookup_tenant(actual_key) or "default"  # P3.2
     _CURRENT_TENANT.set(request.state.tenant)
-    set_parameter_policy(request.headers.get('x-lb-strict-parameters'))
+    set_parameter_policy(request.headers.get('x-lb-strict-parameters'), image_trim=request.headers.get('x-lb-image-trim'))
 
     body_bytes = await _read_bounded_request_body(request)
     if len(body_bytes) > MAX_RAW_REQUEST_SIZE:
@@ -7608,6 +7742,7 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
     stream = body.get("stream", False)
+    note_request_context(body.get("model"), stream=stream, body_size=len(body_bytes))
     _log_openai_request(request_id, "/v1/chat/completions", request, body, len(body_bytes), stream)
     if len(body_bytes) > _IMG_COMPRESS_THRESHOLD:
         try:
@@ -7632,12 +7767,14 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
                 raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
         stats = await compress_images_async(body)
         if stats["count"] > 0:
+            note_parameter_transforms({'images.compressed'})
             logger.info(
                 f"[image-compress] /v1/chat/completions: {stats['count']} imgs "
                 f"{stats['before']/1024:.0f}KB -> {stats['after']/1024:.0f}KB"
             )
     removed_token_fields = _drop_nonpositive_token_limits(body)
     if removed_token_fields:
+        note_parameter_drops(removed_token_fields)
         logger.info(f"[Chat] removed non-positive token fields: {', '.join(removed_token_fields)}")
     logger.info(f"[Chat] model={body.get('model')}, stream={stream}")
     disconnect_checker = _stream_disconnect_checker(request, stream)
@@ -7713,8 +7850,10 @@ async def health_accepting():
 
 
 @app.get("/metrics")
-async def metrics():
+async def metrics(schema: str = 'lb-metrics-v2'):
     """Prometheus 文本格式 metrics，供 AKS / Azure Monitor / Prometheus 抓取"""
+    if schema not in ('lb-metrics-v2', 'lb-metrics-v3'):
+        raise HTTPException(status_code=400, detail='Unsupported metrics schema')
     lines = []
     now = int(time.time())
 
@@ -8037,10 +8176,15 @@ async def metrics():
     lines.append(CLEANUP.render().rstrip())
     lines.append(error_body_metrics().rstrip())
     lines.append(INFERENCE_ADMISSION.render_metrics().rstrip())
+    if schema == 'lb-metrics-v3':
+        lines.append(TELEMETRY.phases.render().rstrip())
+        lines.append(diagnostic_metrics().rstrip())
     if usage_store:
         lines.append(usage_store.render_metrics().rstrip())
+        if schema == 'lb-metrics-v3':
+            lines.append(usage_store.render_extended_metrics().rstrip())
     body = "\n".join(lines) + "\n" if lines else "# no providers configured\n"
-    return Response(content=body, media_type="text/plain; version=0.0.4")
+    return Response(content=body, media_type="text/plain; version=0.0.4", headers={'X-LB-Metrics-Schema': schema})
 
 
 @app.post("/admin/copilot/reset-pool")
@@ -8281,6 +8425,7 @@ async def config_effective(
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
     return {
         "settings": LB_SETTINGS.as_dict(),
+        "build_identity": runtime_identity(),
         "note": "Values are read once at process startup; rolling restart required to pick up env changes.",
     }
 

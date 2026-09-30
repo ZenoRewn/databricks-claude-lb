@@ -1,5 +1,9 @@
 # AKS 部署指南
 
+Author: Zeno Ren
+
+2026-09-30 的候选配置、指标版本与兼容性变化见 [当前契约](OBSERVABILITY_AND_CONTEXT.md)。本轮新增渠道能力 JSON 如需使用，应先审阅来源与有效期，再作为单独只读文件挂载；不从 `config/effective` 或 Git revision 注解单独推断运行文件一致。图片裁剪默认值和 token-count 鉴权变化需要客户端验收。本文历史 live 表格不构成当前现场快照，也不授权整份覆盖生产 manifest。
+
 把 `databricks-claude-lb` 部署到 Azure Kubernetes Service，目标是**单 Pod 长期稳定运行 + GitHub Copilot token 完全自动刷新 + 无需重启 Pod 即可滚动 Secret**。
 
 ---

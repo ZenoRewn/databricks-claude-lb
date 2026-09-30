@@ -11,6 +11,8 @@ usage_data
 .agents
 .codex
 .release-private
+AGENTS.md
+docs/reviews/2026-09-20-service-optimization/deployment-r1/
 *.key
 *.pem
 *.p12

@@ -2,6 +2,10 @@
 
 Author: Zeno Ren
 
+2026-09-30 的请求诊断、阶段计时、参数/图片语义和渠道能力观测见 [当前契约](docs/OBSERVABILITY_AND_CONTEXT.md)；单路由实验工具、熔断证据及易失用量边界见 [运维实验说明](docs/OPERATIONS_EXPERIMENTS.md)。[本轮验收](docs/reviews/2026-09-30-lb-contracts/VALIDATION.md) 分开记录主机、目标镜像、隔离 MySQL、独立复核和 GitHub 状态。
+
+兼容性变化：Token 估算接口需要鉴权；图片裁剪默认拒绝、可显式允许；Chat 适配器保留工具/schema/refusal/incomplete，无法等价转换的关键参数明确拒绝。新指标采用显式 `/metrics?schema=lb-metrics-v3`，默认 `/metrics` 仍为 v2。默认不按低置信度上下文估算拒绝请求，不自动增加 timeout、重试或副本。
+
 可靠性优化的实现范围、指标口径和验证边界见 [服务可靠性说明](docs/SERVICE_RELIABILITY.md)。
 
 后续协议、记账和类型化监控变更见 [升级后加固说明](docs/POST_UPGRADE_HARDENING.md)；集群内发布与恢复工具见 [操作指南](docs/RELEASE_TOOL.md)。本地验证不等于已经更新生产，实际交付状态以对应验证回执为准。
@@ -193,7 +197,7 @@ docker-compose up -d
 | 端点 | 方法 | 认证 | 描述 |
 |------|------|------|------|
 | `/v1/messages` | POST | 需要 | Databricks Claude 消息 API（仅 `claude-*` 模型） |
-| `/v1/messages/count_tokens` | POST | 不需要 | Token 计数估算 |
+| `/v1/messages/count_tokens` | POST | 需要 | 本地输入 Token 估算，包含 system/tools；响应头声明低置信度及未知图片/状态开销，不能作为精确硬阈值 |
 | `/v1/models`、`/models` | GET | 可选 | OpenAI-compatible 模型列表；有鉴权头时必须匹配 `auth.api_key` |
 | `/v1/models/{model}`、`/models/{model}` | GET | 可选 | OpenAI-compatible 单模型信息 |
 | `/v1/responses` | POST | 需要 | OpenAI Responses API（按模型分流：Copilot 优先 → Azure fallback；`claude-*` 拒绝） |
@@ -204,6 +208,7 @@ docker-compose up -d
 | `/metrics` | GET | 不需要 | Prometheus 文本格式 metrics（K8s / Azure Monitor 抓取） |
 | `/admin/copilot/reload` | POST | 需要 | 运维端点：从源重读所有 Copilot endpoint 的 long-lived token + 强制刷新 session（K8s Secret rotation 后立刻生效） |
 | `/admin/copilot/reset-pool` | POST | 需要 | 运维端点：重建共享 httpx.AsyncClient，逐出所有 keepalive/半开连接（怀疑连接池泄漏或 upstream_stall 持续增长时使用） |
+| `/admin/model-capabilities` | GET | 需要 | 渠道/模型/API 能力目录、来源与有效期；未验证或过期能力不自动变成硬限额 |
 | `/stats` | GET | 不需要 | 端点统计（含成本估算、Azure OpenAI、GitHub Copilot） |
 | `/stats/history` | GET | 不需要 | 历史用量数据（`?days=7`） |
 | `/stats/history` | DELETE | 需要 | 清理历史数据（`?keep_days=30`） |

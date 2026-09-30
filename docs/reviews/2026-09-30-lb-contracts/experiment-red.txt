@@ -1,0 +1,110 @@
+.FFFFFFF                                                           [100%]
+=================================== FAILURES ===================================
+_ ExperimentEvidenceTests.test_duplicate_requests_and_missing_started_denominator_are_invalid (mutation='duplicate') _
+tests/test_experiment_evidence.py:70: in test_duplicate_requests_and_missing_started_denominator_are_invalid
+    with self.subTest(mutation=mutation), self.assertRaises(ValueError): self.compare(candidate=candidate)
+                                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_experiment_evidence.py:29: in compare
+    from operations.experiment import compare
+E   ModuleNotFoundError: No module named 'operations.experiment'
+_ ExperimentEvidenceTests.test_duplicate_requests_and_missing_started_denominator_are_invalid (mutation='denominator') _
+tests/test_experiment_evidence.py:70: in test_duplicate_requests_and_missing_started_denominator_are_invalid
+    with self.subTest(mutation=mutation), self.assertRaises(ValueError): self.compare(candidate=candidate)
+                                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_experiment_evidence.py:29: in compare
+    from operations.experiment import compare
+E   ModuleNotFoundError: No module named 'operations.experiment'
+_ ExperimentEvidenceTests.test_extending_failure_delay_without_more_completion_does_not_pass _
+tests/test_experiment_evidence.py:57: in test_extending_failure_delay_without_more_completion_does_not_pass
+    self.assertEqual(self.compare(candidate=candidate)['status'], 'not_supported')
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_experiment_evidence.py:29: in compare
+    from operations.experiment import compare
+E   ModuleNotFoundError: No module named 'operations.experiment'
+_ ExperimentEvidenceTests.test_good_synthetic_evidence_is_only_eligible_for_review_never_deployment _
+tests/test_experiment_evidence.py:33: in test_good_synthetic_evidence_is_only_eligible_for_review_never_deployment
+    result = self.compare()
+             ^^^^^^^^^^^^^^
+tests/test_experiment_evidence.py:29: in compare
+    from operations.experiment import compare
+E   ModuleNotFoundError: No module named 'operations.experiment'
+_ ExperimentEvidenceTests.test_missing_coverage_resources_samples_and_pending_are_inconclusive (key='coverage') _
+tests/test_experiment_evidence.py:45: in test_missing_coverage_resources_samples_and_pending_are_inconclusive
+    self.assertEqual(self.compare(candidate=candidate)['status'], 'inconclusive')
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_experiment_evidence.py:29: in compare
+    from operations.experiment import compare
+E   ModuleNotFoundError: No module named 'operations.experiment'
+_ ExperimentEvidenceTests.test_missing_coverage_resources_samples_and_pending_are_inconclusive (key='resource_peaks') _
+tests/test_experiment_evidence.py:45: in test_missing_coverage_resources_samples_and_pending_are_inconclusive
+    self.assertEqual(self.compare(candidate=candidate)['status'], 'inconclusive')
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_experiment_evidence.py:29: in compare
+    from operations.experiment import compare
+E   ModuleNotFoundError: No module named 'operations.experiment'
+_ ExperimentEvidenceTests.test_missing_coverage_resources_samples_and_pending_are_inconclusive (key='pending_requests') _
+tests/test_experiment_evidence.py:45: in test_missing_coverage_resources_samples_and_pending_are_inconclusive
+    self.assertEqual(self.compare(candidate=candidate)['status'], 'inconclusive')
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_experiment_evidence.py:29: in compare
+    from operations.experiment import compare
+E   ModuleNotFoundError: No module named 'operations.experiment'
+_ ExperimentEvidenceTests.test_missing_coverage_resources_samples_and_pending_are_inconclusive (key='diagnostic_dropped_events') _
+tests/test_experiment_evidence.py:45: in test_missing_coverage_resources_samples_and_pending_are_inconclusive
+    self.assertEqual(self.compare(candidate=candidate)['status'], 'inconclusive')
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_experiment_evidence.py:29: in compare
+    from operations.experiment import compare
+E   ModuleNotFoundError: No module named 'operations.experiment'
+_ ExperimentEvidenceTests.test_missing_coverage_resources_samples_and_pending_are_inconclusive _
+tests/test_experiment_evidence.py:46: in test_missing_coverage_resources_samples_and_pending_are_inconclusive
+    self.assertEqual(self.compare(candidate=dataset('candidate', 2, 2))['status'], 'inconclusive')
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_experiment_evidence.py:29: in compare
+    from operations.experiment import compare
+E   ModuleNotFoundError: No module named 'operations.experiment'
+----------------------------- Captured stdout call -----------------------------
+uuuu
+_ ExperimentEvidenceTests.test_model_mix_and_input_bucket_changes_do_not_fake_matched_improvement _
+tests/test_experiment_evidence.py:51: in test_model_mix_and_input_bucket_changes_do_not_fake_matched_improvement
+    self.assertEqual(self.compare(candidate=candidate)['status'], 'inconclusive')
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_experiment_evidence.py:29: in compare
+    from operations.experiment import compare
+E   ModuleNotFoundError: No module named 'operations.experiment'
+_ ExperimentEvidenceTests.test_rejections_and_client_disconnects_remain_in_denominator _
+tests/test_experiment_evidence.py:63: in test_rejections_and_client_disconnects_remain_in_denominator
+    self.assertEqual(self.compare(candidate=candidate)['status'], 'not_supported')
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_experiment_evidence.py:29: in compare
+    from operations.experiment import compare
+E   ModuleNotFoundError: No module named 'operations.experiment'
+_ ExperimentEvidenceTests.test_safety_failure_blocks_even_with_perfect_completion _
+tests/test_experiment_evidence.py:74: in test_safety_failure_blocks_even_with_perfect_completion
+    self.assertEqual(self.compare(candidate=candidate)['status'], 'stop')
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_experiment_evidence.py:29: in compare
+    from operations.experiment import compare
+E   ModuleNotFoundError: No module named 'operations.experiment'
+_______ ExperimentEvidenceTests.test_unknown_safety_evidence_is_not_zero _______
+tests/test_experiment_evidence.py:78: in test_unknown_safety_evidence_is_not_zero
+    self.assertEqual(self.compare(candidate=candidate)['status'], 'inconclusive')
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_experiment_evidence.py:29: in compare
+    from operations.experiment import compare
+E   ModuleNotFoundError: No module named 'operations.experiment'
+=========================== short test summary info ============================
+SUBFAILED(mutation='duplicate') tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_duplicate_requests_and_missing_started_denominator_are_invalid
+SUBFAILED(mutation='denominator') tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_duplicate_requests_and_missing_started_denominator_are_invalid
+FAILED tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_extending_failure_delay_without_more_completion_does_not_pass
+FAILED tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_good_synthetic_evidence_is_only_eligible_for_review_never_deployment
+SUBFAILED(key='coverage') tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_missing_coverage_resources_samples_and_pending_are_inconclusive
+SUBFAILED(key='resource_peaks') tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_missing_coverage_resources_samples_and_pending_are_inconclusive
+SUBFAILED(key='pending_requests') tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_missing_coverage_resources_samples_and_pending_are_inconclusive
+SUBFAILED(key='diagnostic_dropped_events') tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_missing_coverage_resources_samples_and_pending_are_inconclusive
+FAILED tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_missing_coverage_resources_samples_and_pending_are_inconclusive
+FAILED tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_model_mix_and_input_bucket_changes_do_not_fake_matched_improvement
+FAILED tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_rejections_and_client_disconnects_remain_in_denominator
+FAILED tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_safety_failure_blocks_even_with_perfect_completion
+FAILED tests/test_experiment_evidence.py::ExperimentEvidenceTests::test_unknown_safety_evidence_is_not_zero
+13 failed, 1 passed in 0.03s

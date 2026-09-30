@@ -8,6 +8,7 @@ import os
 import time
 
 import httpx
+from request_timing import CURRENT as CURRENT_TIMING
 
 TOTAL_TIMEOUT = float(os.getenv('INFERENCE_TOTAL_TIMEOUT_SECONDS', '1800'))
 STARTUP_TIMEOUT = float(os.getenv('UPSTREAM_STARTUP_TIMEOUT_SECONDS', '180'))
@@ -17,6 +18,35 @@ if not all(math.isfinite(v) and v > 0 for v in (TOTAL_TIMEOUT, STARTUP_TIMEOUT))
 CURRENT_DEADLINE = ContextVar('inference_deadline', default=None)
 HEADER_TIMER = ContextVar('upstream_header_timer', default=None)
 ROUTES = {'/v1/messages':'messages', '/v1/responses':'responses', '/v1/chat/completions':'chat'}
+
+
+def parse_startup_overrides(value):
+    if not isinstance(value, list) or len(value) > 32:
+        raise ValueError('Startup overrides must be a list with at most 32 exact routes')
+    result = {}
+    for rule in value:
+        if not isinstance(rule, dict) or set(rule) != {'provider', 'api_type', 'model', 'seconds'}:
+            raise ValueError('Each startup override requires provider, api_type, model and seconds')
+        provider, api, model, seconds = (rule[k] for k in ('provider', 'api_type', 'model', 'seconds'))
+        if (provider not in ('databricks', 'azure_openai', 'copilot') or api not in ROUTES.values()
+                or not isinstance(model, str) or not model or len(model) > 128 or '*' in model
+                or type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds <= 0):
+            raise ValueError('Invalid exact route startup budget')
+        key = (provider, api, model)
+        if key in result:
+            raise ValueError('Duplicate startup budget route')
+        result[key] = float(seconds)
+    return result
+
+
+_raw_overrides = os.getenv('LB_STARTUP_BUDGET_OVERRIDES', '[]')
+if len(_raw_overrides) > 16384:
+    raise ValueError('Startup overrides exceed configuration size limit')
+STARTUP_OVERRIDES = parse_startup_overrides(json.loads(_raw_overrides))
+
+
+def startup_seconds(provider, api_type, model):
+    return STARTUP_OVERRIDES.get((provider, api_type, model), STARTUP_TIMEOUT)
 
 
 class UpstreamStartupTimeout(httpx.ReadTimeout):
@@ -29,6 +59,9 @@ def remaining_seconds():
 
 
 def headers_received():
+    timeline = CURRENT_TIMING.get()
+    if timeline is not None:
+        timeline.headers_received()
     timer = HEADER_TIMER.get()
     if timer is not None and not timer.expired():
         timer.reschedule(None)
@@ -78,6 +111,12 @@ class RequestBudgetMiddleware:
                 body_complete = True
 
         token = CURRENT_DEADLINE.set(time.monotonic()+self.timeout)
+        timeline = CURRENT_TIMING.get()
+        deadline_observer = None
+        if timeline is not None:
+            timeline.total_budget = self.timeout
+            loop = asyncio.get_running_loop()
+            deadline_observer = loop.call_at(loop.time() + self.timeout, timeline.capture_deadline)
         timer = asyncio.timeout(self.timeout)
         try:
             async with timer:
@@ -106,4 +145,6 @@ class RequestBudgetMiddleware:
                                 'headers':[(b'content-type',b'application/json'),(b'content-length',str(len(body)).encode())]})
                     await send({'type':'http.response.body','body':body,'more_body':False})
         finally:
+            if deadline_observer is not None:
+                deadline_observer.cancel()
             CURRENT_DEADLINE.reset(token)

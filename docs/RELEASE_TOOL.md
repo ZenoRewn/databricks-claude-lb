@@ -2,6 +2,8 @@
 
 Author: Zeno Ren
 
+2026-09-30：应用文件清单扩展了诊断、时序、adapter、能力和 build metadata 模块。使用 `python -m operations.build_identity --build-tag ... --platform linux/amd64` 可从本地 Git/source hash 生成构建参数；镜像构建时校验 manifest，`/config/effective` 读回运行匹配状态。该 helper 只构建本地镜像，不推送 registry 或部署。最终 registry/platform digest 仍在推送后绑定到发布回执；本地 image ID 不替代它。
+
 本工具将计划、执行、恢复和验收放在同一持久状态机中。本轮实现只在本地和一次性 Kind 集群验证；没有安装到 AKS，没有执行生产发布。测试结果与未验证边界见 [实施与验证记录](reviews/2026-09-20-post-upgrade-hardening/IMPLEMENTATION_PROGRESS.md)。
 
 ## 支持范围

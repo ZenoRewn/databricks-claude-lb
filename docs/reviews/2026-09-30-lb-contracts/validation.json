@@ -1,0 +1,249 @@
+{
+  "author": "Zeno Ren",
+  "recorded_at": "2026-09-30T19:25:37.131382+08:00",
+  "base_revision": "16de51d29d1fbb3e81c65434ce55fadc3573da61",
+  "application_revision": "1d75685655f672177374cf3327cd16c4bcffe2db",
+  "scope": "Local implementation and GitHub delivery; no production deployment",
+  "host_regression": {
+    "python": "3.14.5",
+    "code_revision": "1d75685655f672177374cf3327cd16c4bcffe2db",
+    "passed": 722,
+    "skipped": 6,
+    "subtests_passed": 697,
+    "duration_seconds": 40.89,
+    "evidence": "host-full-r5.txt"
+  },
+  "latest_capability_regression": {
+    "passed": 36,
+    "subtests_passed": 22,
+    "evidence": "capability-shapes-green.txt"
+  },
+  "target_image": {
+    "platform": "linux/amd64",
+    "python": "3.12.14",
+    "passed": 717,
+    "skipped": 7,
+    "subtests_passed": 697,
+    "duration_seconds": 46.4,
+    "not_collected": [
+      "tests/test_build_identity.py (four host Git/build-tool tests; passed on host)"
+    ],
+    "skip_reasons": [
+      "6 disposable MySQL tests, separately passed on isolated MySQL",
+      "1 optional OTel test, absent from the stock image"
+    ],
+    "runtime_dependency_changes": {},
+    "runtime_file_count": 21,
+    "runtime_files_match": true,
+    "evidence": "image-tests-r5.txt",
+    "identity": "application-image-r5.json",
+    "network": "none",
+    "test_uid": 1000,
+    "test_gid": 1000,
+    "dependency_install": "Existing offline wheels with unchanged runtime dependency versions"
+  },
+  "isolated_mysql": {
+    "author": "Zeno Ren",
+    "version": "8.4.11",
+    "image_id": "sha256:1bd43bad43e0de5959b98c4404e987046de21cd85b9e725849208db6539d3c2d",
+    "repo_digests": [
+      "mysql@sha256:6ea90827b1100f8f2ae306a539f86d2c264a26ed435a2a9f75551dd5c3aeb242"
+    ],
+    "architecture": "arm64",
+    "network": "none",
+    "host_ports": [],
+    "passed": 6,
+    "result": "mysql84-tests-r2.txt",
+    "app_image": "claude-lb:contracts-20260930-r2",
+    "usage_store_sha256": "fea36b5b6ad69a42b6aaae197101ee7bc904aa153776714faf12e9677d127efa",
+    "latest_image_has_same_usage_store": true,
+    "production_database_accessed": false
+  },
+  "sdk_scope": "Real Python SDK parsers over synthetic transport only; no live provider/client app claims",
+  "pricing_ui": "node tests/test_copilot_pricing_ui.cjs passed",
+  "microbenchmark": "microbenchmark-r5.json",
+  "experiment_cli": "experiment-synthetic-r5.json",
+  "independent_qa": {
+    "status": "passed",
+    "reviewer": "read-only subagent /root/independent_qa",
+    "code_revision": "1d75685655f672177374cf3327cd16c4bcffe2db",
+    "initial_findings": 7,
+    "closed_findings": 7,
+    "open_findings": 0,
+    "evidence": "QA.md",
+    "scope": "Code and local synthetic evidence; no production acceptance",
+    "contract_recheck": {
+      "passed": 8,
+      "subtests_passed": 35
+    },
+    "final_sink_recheck": {
+      "passed": 8,
+      "subtests_passed": 4
+    },
+    "real_stderr_backpressure": {
+      "collector_read_while_waiting": false,
+      "exit_code": 0,
+      "seconds_after_close_marker": 0.234,
+      "bytes_read_after_exit": 65536
+    }
+  },
+  "github": {
+    "status": "published_pull_request",
+    "branch": "codex/lb-contracts-20260930",
+    "pull_request": "https://github.com/ZenoRewn/databricks-claude-lb/pull/8",
+    "number": 8,
+    "ci_and_merge_authority": "GitHub pull request head, Checks, merged_at and merge_commit_sha; verified separately before final delivery",
+    "no_production_deployment": true
+  },
+  "production": {
+    "aks_deployed": false,
+    "paid_inference_calls": false,
+    "openclaw_modified": false,
+    "live_morning_experiment": false,
+    "durable_outbox_implemented": false,
+    "replicas_changed": false
+  },
+  "cleanup": {
+    "author": "Zeno Ren",
+    "isolated_mysql_fixture_removed": true,
+    "fixture_name": "lb-contracts-mysql84-ab397fbb",
+    "temporary_database_storage": "tmpfs removed with fixture",
+    "production_resources_modified": false
+  },
+  "evidence_sha256": {
+    "adapter-green.txt": "801733b4ff45f04173f2a5584180b8a585e42a9bf4565365817dad9fdb8eea39",
+    "adapter-hardening-green.txt": "f434ad2b1822ad7f39e7ead36eafb3fe559df13d216abb001b9538bb6e0daf0b",
+    "adapter-hardening-red.txt": "8b04a320ecd8cd3d250ed855d029208ce47c92dc4a4e6896e241154df71ac54a",
+    "adapter-red.txt": "0cbf7b810204d6d3043ebbb662c5162b58c96eeeff1d5796969ac1cfa788a220",
+    "adapter-targeted.txt": "f8eb2508a790292de190e951e9de5a433c473a709290d2d7ad850eeeb7073370",
+    "application-image-r3.json": "badd19af0a69d68fb6f7a78c8899a30b2a8993c23072f877e1b31947618e10c1",
+    "capability-shapes-green.txt": "d2f7e460e2fd10b389f853fa06d0244688ef15f5ee64835921c8a96f9ece18c6",
+    "capability-shapes-red.txt": "58c9be7b13a4da19a4a48d6153c5bec0f531d1843635a01f7d44313c681b97a4",
+    "cleanup.json": "04973baab97b55d6efa6a77c8783e38bacd81d212e5d79616415f24cd6f9aedd",
+    "cohort-context-red.txt": "6354fbbcd0ae17cc73be18549b53cb101da34e64bbc5c1571bea70ac644fcfee",
+    "context-green.txt": "ac54baccbd1947084000860384b490817c2322a5f5c6fb7eab09951930c9440c",
+    "context-red.txt": "b0b091351ef4249d49243d7ff67878d0c567957d9defd9aa92406bdeb66541b1",
+    "context-targeted.txt": "f0418a1a7cc87d0f1dcef0733f03594e48c1fe4d9b5b240830f6f64a6c65094d",
+    "diagnostics-green.txt": "fc25cb27499a206caa2cfc5ced1720b730d6b946e96107fa8311976d4dd73688",
+    "diagnostics-red.txt": "79b3d786881f59d0fda9abd6b28dbb27bd8977d938b8e430f942abbbd9b8a926",
+    "diagnostics-targeted.txt": "94a201d66aeeca6295a9fe0f75db38cf333ce02939dbcda8732fdfd9f93f9a1e",
+    "document-contracts-green.txt": "328622d084becc6de7f9442cba22db443a6944c77a75b18d7c82a9e61c2e8dc0",
+    "experiment-context-green.txt": "ec48315de5f3c6212c8a8518c41c5ac8beefecd0397b071dd1c00eb02444dad7",
+    "experiment-green.txt": "12d6f8e5c5b840cd795734a802455b4059f498e25eba2faf26009441ffbf19be",
+    "experiment-red.txt": "318485b1c96130cd0e78f9c6aa29eadd4748d3fcf6c4d28cb69f3fdf400a7468",
+    "experiment-synthetic.json": "5c615b856748d35289aec62b5ecf16b82da39a60149e7e1ebad54967b1923c1c",
+    "final-classification-red.txt": "5fed26fc757cb97baa385dce9e1855e2539b0b8880ee7dc540d0d244cfff6e90",
+    "final-contracts-green.txt": "1052b3aba9fc1023bf3711677dbc31f1c110eb59463a7ccb31bcb307e11c1560",
+    "host-full-r1.txt": "ccfac6da11187cd3406a5e859a048b3eade029aa0ec362d17f72153b6e0ecfe6",
+    "host-full-r2.txt": "059aed9f613764c05e24d42ee0a508c18cb93f208f202d41e41912dedfbaf1e1",
+    "host-full-r3.txt": "e97df174dd4e856a8290af251eeeaf72605a20b325fa5965a9f39e6465ee8664",
+    "identity-green.txt": "5a6a233648d692aa8051f54eb74e77ffd93515c871788576d402c381ed2932e4",
+    "identity-red.txt": "4e8a0812bc8f3d3d288561e998f7e06863a04434059dbcffa7642ffae316d1ff",
+    "image-tests-r2.txt": "f64c45dfec189680b645a889ac48818c46cdb56e4962d74f68d53cf7cbb7dc9b",
+    "image-tests-r3.txt": "317ffed7941ec7a54ba487d938a75ad824191f7ec5fd8ec7b3f1b24764503cd6",
+    "microbenchmark-r2.json": "758d6b95465ab5c97fef3b913535f1b70f8a3445f5af04434400f047a455afba",
+    "microbenchmark-r3.json": "7494d7beee10b910e8df48ce42db733ceafc94e168b09ca48b7bca9eb492d362",
+    "mysql84-evidence.json": "43aca3bdd763af3bfe9fd832a468fdcba003c5ef706bc8d6caf70919dd1a22bb",
+    "mysql84-tests-r2.txt": "3e2d686d8630b33fbf7d1973d326da2fbeafc80df1b9a45a6b60fc8965b8e473",
+    "operational-final.txt": "d7cabcf3b2c3a6ad60548f5ff7caffe0e6bec486ee868e1212d978eadfd572d0",
+    "operational-green.txt": "18204ac5268d2cc46428baa1dba7409122e8bbbf807d724b62f942f5d87c1379",
+    "operational-red.txt": "51322d951b8116847b7cd19810a1e6d4c38d366f48a4bda393baa5e41fc27e6b",
+    "phases-green.txt": "d691cc1c507072107bdf8fdfa5405a96ae2eaf1abf089ddfc708434e0adde8e6",
+    "phases-red.txt": "97067977e8d8d320ad3d0cc76783c2fcacc00fe394dbfae7de0909d483db57a1",
+    "phases-targeted.txt": "5341fe6f6ddecb6f789a8898987dfdb195bdc7e8ec10b860fea2a4272adda7ea",
+    "request-id-red.txt": "9ccaa07943d5aedd3e7d66a45681e7e810481cf747bf67e593e4678eef2c0d64",
+    "qa-text-compat-red.txt": "30a71b05c96942b87821ec3b5df4d17234c60c2544ed73b24a8b6c65ae3b740e",
+    "qa-contracts-green.txt": "c50f51ec5f21184b77afd45ea38b65c1d955b9e452f653a40d3aa9e2d0014006",
+    "host-full-r5.txt": "957335e97a3ed822cd3cfc6372dd3a8fb65755fb774846a7e753205f1ca6ac3d",
+    "host-full-r4.txt": "04488a893451d900339b471fb3098ce86ebc42b081164f4f9f1376eb3486b6f4",
+    "qa-stderr-fd-red.txt": "8f8f2d56912345b682c7b749f8ad05e956837edd285e3b5e49c5ef9350ef216d",
+    "experiment-synthetic-r5.json": "5c615b856748d35289aec62b5ecf16b82da39a60149e7e1ebad54967b1923c1c",
+    "qa-diagnostics-red.txt": "e1ab9e10a47dcb701a1b6255fbde4d2718e88803aed56fbbe01ff8260c89c8b8",
+    "qa-capability-retries-baseline-red.txt": "d910ecb3723e7af30bcb6da60d8e0d719f24d94064077e1bd235c8a241be6b10",
+    "qa-contracts-red.txt": "ac52910b3f5118ae1c8c6333c64c51482f1fb66cccb9f7f120b8c4fac74709ff",
+    "image-tests-r5.txt": "5dd0fa7af9662fe0cb6b4dc63857fdd6e21298742bc097ddf89f762e529b01e3",
+    "qa-stderr-pipe-red.txt": "65fdecf339a5f4b3e5b37c48a7da9bfc01bc9453e469260074a9c0afe666a23e",
+    "qa-diagnostics-green.txt": "ca48bd4a43fa6f20bfba4b5d4950ae7b75d2ae0ae76981c8cfd180438bd085a8",
+    "qa-stderr-green.txt": "8fb18552d67191404258f8822754bd3d7ca44fbda80aad65a30961ed2ae5bba3",
+    "application-image-r5.json": "eacf37796b9ff09dfde5bed0a3fc6fcade29c0cf6773415598844af742a838dd",
+    "qa-contracts-attempt1.txt": "bf49142e590ddc604e45ae865e4f85dc980f253937fa996cb2838b0ce2888b6c",
+    "microbenchmark-r5.json": "4e7ecd184ebc9b3bfc486520ccd5e89a47a694d9520fd6ad5bc8d89dc1578460",
+    "publication-scan-r5.json": "82b8ef5ab11f35fd653d521288b23e5d793660290261cabbae996f9c63fe0cd6",
+    "publication-scan.json": "664e62c80195b12d155178511382cfa50420c7289828282a9d9638f9c445f004"
+  },
+  "document_validation": {
+    "local_links_checked": 19,
+    "broken_links": 0,
+    "api_document_contracts": {
+      "passed": 12,
+      "subtests_passed": 29,
+      "evidence": "document-contracts-green.txt"
+    },
+    "rendering": "Four Markdown documents rendered with GFM in the Codex in-app browser; updated validation and QA tables visually inspected",
+    "tables": 7,
+    "author_labels": 4,
+    "horizontal_overflow": false,
+    "overflowing_cells": 0,
+    "temporary_preview_closed": true,
+    "latest_rendering_status": "passed",
+    "documents": 4
+  },
+  "previous_candidates": [
+    {
+      "application_revision": "c137f7bc37719f7b84f71aa23490c8c397ded387",
+      "host_regression": {
+        "python": "3.14.5",
+        "code_revision": "bceddc0ba4b7b1538783dfb540dc1c1b80071efa",
+        "passed": 711,
+        "skipped": 6,
+        "subtests_passed": 660,
+        "duration_seconds": 39.14,
+        "evidence": "host-full-r3.txt"
+      },
+      "target_image": {
+        "platform": "linux/amd64",
+        "python": "3.12.14",
+        "passed": 707,
+        "skipped": 7,
+        "subtests_passed": 662,
+        "duration_seconds": 42.73,
+        "not_collected": [
+          "tests/test_build_identity.py (four host Git/build-tool tests; passed on host)"
+        ],
+        "skip_reasons": [
+          "6 disposable MySQL tests, separately passed on isolated MySQL",
+          "1 optional OTel test, absent from the stock image"
+        ],
+        "runtime_dependency_changes": {},
+        "runtime_file_count": 21,
+        "runtime_files_match": true,
+        "evidence": "image-tests-r3.txt",
+        "identity": "application-image-r3.json"
+      }
+    },
+    {
+      "application_revision": "cd2ab85fb305224074527027d42e484943c653d7",
+      "host_regression": {
+        "python": "3.14.5",
+        "passed": 720,
+        "skipped": 6,
+        "subtests_passed": 697,
+        "duration_seconds": 41.46,
+        "evidence": "host-full-r4.txt"
+      }
+    }
+  ],
+  "latest_qa_regression": {
+    "contracts": {
+      "passed": 120,
+      "subtests_passed": 73,
+      "evidence": "qa-contracts-green.txt"
+    },
+    "final_diagnostics": {
+      "passed": 34,
+      "subtests_passed": 12,
+      "evidence": "qa-stderr-green.txt"
+    }
+  },
+  "publication_scan": "publication-scan-r5.json"
+}

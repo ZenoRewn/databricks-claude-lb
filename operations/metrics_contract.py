@@ -42,18 +42,30 @@ FAMILIES = {
 CONTRACT = {'schema_version':'lb-metrics-v2','author':'Zeno Ren','families':FAMILIES,
             'identifiers_in_labels':False,'unknown_or_missing':'unknown, never zero',
             'replica_identity':['pod_uid','container_start_time']}
+FAMILIES_V3 = {**FAMILIES,
+    'lb_request_phase_duration_seconds': definition('histogram', 'seconds', ('api_type', 'phase')),
+    'lb_diagnostic_dropped_events_total': definition('counter', 'events', ('reason',)),
+    'lb_usage_accepted_events_total': definition('counter', 'events'),
+    'lb_usage_persisted_events_total': definition('counter', 'events'),
+    'lb_usage_oldest_pending_age_seconds': definition('gauge', 'seconds'),
+    'lb_usage_volatile_buffer': definition('gauge', 'boolean')}
+CONTRACT_V3 = {**CONTRACT, 'schema_version': 'lb-metrics-v3', 'families': FAMILIES_V3,
+               'request_path': '/metrics?schema=lb-metrics-v3', 'legacy_default': 'lb-metrics-v2'}
 SAMPLE = re.compile(r'^(lb_[a-zA-Z0-9_:]+)(?:\{(.*)\})?\s+([^\s]+)(?:\s+\d+)?$')
 LABEL = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)=("(?:[^"\\]|\\[\\"n])*")(?:,|$)')
 
 
-def parse_exposition(text):
+def parse_exposition(text, *, schema_version='lb-metrics-v2'):
+    if schema_version not in ('lb-metrics-v2', 'lb-metrics-v3'):
+        raise ValueError('Unsupported metrics contract version')
+    families = FAMILIES if schema_version == 'lb-metrics-v2' else FAMILIES_V3
     if len(text.encode())>4*1024*1024:
         raise ValueError('Metrics exposition exceeds 4 MiB')
     result=[];seen=set()
     for line in text.splitlines():
         if line.startswith('# TYPE lb_'):
             _,_,name,kind=line.split()
-            if name not in FAMILIES or FAMILIES[name]['type']!=kind:
+            if name not in families or families[name]['type']!=kind:
                 raise ValueError('Metric type does not match the versioned contract')
         if not line.startswith('lb_'):
             continue
@@ -61,13 +73,13 @@ def parse_exposition(text):
         if not matched:
             raise ValueError('Malformed metric sample')
         name,raw_labels,value=matched.groups();family=name;component=None
-        if family not in FAMILIES:
+        if family not in families:
             for suffix in ('_bucket','_count','_sum'):
-                if name.endswith(suffix) and name[:-len(suffix)] in FAMILIES:
+                if name.endswith(suffix) and name[:-len(suffix)] in families:
                     family=name[:-len(suffix)];component=suffix[1:];break
-        if family not in FAMILIES:
+        if family not in families:
             raise ValueError('Unknown lb metric; update the contract before collecting')
-        spec=FAMILIES[family];labels={};position=0;raw_labels=raw_labels or ''
+        spec=families[family];labels={};position=0;raw_labels=raw_labels or ''
         while position<len(raw_labels):
             label=LABEL.match(raw_labels,position)
             if label is None:

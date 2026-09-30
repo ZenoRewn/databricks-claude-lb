@@ -1,0 +1,16 @@
+.......................... [ 29%]
+......................................................... [ 94%]
+.....                                                                    [100%]
+=================================== FAILURES ===================================
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='databricks', api='messages', trigger='429') _
+tests/test_context_capabilities.py:202: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+_ CapabilityEntryTests.test_stream_retry_checks_new_endpoint_before_lease_or_send (provider='databricks', api='messages', trigger='connect') _
+tests/test_context_capabilities.py:202: in test_stream_retry_checks_new_endpoint_before_lease_or_send
+    self.assertEqual(len(calls), 1, 'Incompatible retry endpoint must never receive a POST')
+E   AssertionError: 2 != 1 : Incompatible retry endpoint must never receive a POST
+=========================== short test summary info ============================
+SUBFAILED(provider='databricks', api='messages', trigger='429') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+SUBFAILED(provider='databricks', api='messages', trigger='connect') tests/test_context_capabilities.py::CapabilityEntryTests::test_stream_retry_checks_new_endpoint_before_lease_or_send
+2 failed, 88 passed, 59 subtests passed in 1.34s

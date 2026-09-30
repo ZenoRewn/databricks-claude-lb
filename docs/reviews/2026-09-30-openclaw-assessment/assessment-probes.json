@@ -1,0 +1,56 @@
+{
+  "author": "Zeno Ren",
+  "evidence_scope": "local_synthetic_only",
+  "runtime": "3.14.5",
+  "partial_stream_protocol_error": {
+    "outcome": "failed",
+    "failure_reason": "none",
+    "actual_mock_sends": 1,
+    "response_closed": true,
+    "endpoint_active_after": 0,
+    "request_end_count": 1,
+    "stream_log_has_lb_request_id": false,
+    "stream_log_has_upstream_attempt_id": false,
+    "emitted_network_failure": true
+  },
+  "auth_repair_then_completed_stream": {
+    "outcome": "completed",
+    "failure_reason": "authentication",
+    "actual_mock_sends": 2,
+    "response_closed": true,
+    "endpoint_active_after": 0,
+    "request_end_count": 1,
+    "stream_log_has_lb_request_id": false,
+    "stream_log_has_upstream_attempt_id": false,
+    "emitted_network_failure": false
+  },
+  "error_logging": {
+    "http_status": 400,
+    "synthetic_error_body_canary_found_in_log": true
+  },
+  "strict_adapter_json_schema": {
+    "http_status": 200,
+    "upstream_route_called": 1,
+    "policy_response_header": "strict",
+    "drop_response_header": null,
+    "output_schema_forwarded": false,
+    "upstream_stream": false
+  },
+  "count_tokens_estimate": {
+    "base_estimate": 10,
+    "expanded_estimate": 10,
+    "system_chars_added": 10000,
+    "tool_description_chars_added": 10000,
+    "estimates_equal": true
+  },
+  "log_sink_blocking": {
+    "injected_sink_delay_seconds": 0.03,
+    "log_call_seconds": 0.031572,
+    "note": "Synthetic blocking demonstration, not a production latency benchmark"
+  },
+  "fresh_send_result_series": 0,
+  "existing_image_trim": {
+    "removed_images": 1,
+    "first_image_replaced_by_text": true
+  }
+}

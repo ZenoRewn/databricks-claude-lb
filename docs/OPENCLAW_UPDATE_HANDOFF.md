@@ -2,6 +2,22 @@
 
 Author: Zeno Ren
 
+## 2026-09-30 新候选交接
+
+本轮新增的是 LB 侧实现与离线工具，没有修改 OpenClaw scheduler、采集器、任务 ID、baseline 或历史数据。当前接口与字段见 [契约](OBSERVABILITY_AND_CONTEXT.md)，验证状态见 [回执](reviews/2026-09-30-lb-contracts/VALIDATION.md)。以下交接事项只能在核对实际运行镜像/文件后采用：
+
+1. 以服务端 `lb_request_id` 关联 request、send、error 和 stream。一次请求可能多次发送；最终成功的 reason 不再继承已修复的 401。
+2. 新日志 message 不保存原始错误片段。解析 schema_version/kind/安全字段，不同时把外层 JSON 与 message 当两次事件。
+3. 默认 `/metrics` 仍为 v2。切换 v3 时先同步 `operations/metrics-contract-v3.json`，再请求 `?schema=lb-metrics-v3` 并验证响应头；诊断丢弃、缺样或重启不能当零错误。
+4. startup 等待 headers，phase 可能嵌套。按请求开始时间、实际路由、模型、stream、体积桶和可信 tenant 对照；UA class 只是辅助线索。
+5. Token 估算接口现在需要鉴权并声明 low confidence；不可将估算值直接当可靠渠道窗口。能力目录 unknown/expired 时保持观测，调用端负责摘要与会话管理。
+6. 图片裁剪默认拒绝。只有调用方明确允许时发送 `X-LB-Image-Trim: allow`；strict 继续阻止裁剪。Chat adapter 的转换/缓冲模式有明确响应头，消费者需处理 failed/incomplete/refusal。
+7. 用量 accepted 与 persisted 分开；volatile-buffer=1 表示剩余易失边界。不能为补账重新推理。
+
+离线实验工具只生成可审阅证据，不能自动延长等待、启用付费探针、调重试/熔断或扩副本。保留历史采样，不为验收重写旧数据。
+
+## 2026-09-20 历史交接
+
 日期：2026-09-20
 
 > 历史候选交接，以下“尚未部署”描述的是本文编写时点。用户提供的后续独立检查报告记录了 892e397 已在生产运行。本轮新的本地优化及监控契约见 [升级后加固说明](POST_UPGRADE_HARDENING.md)；未修改或接入 OpenClaw，不应把这里的旧版本或本地新候选当作当前实时生产状态。

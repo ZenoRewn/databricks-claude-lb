@@ -1,0 +1,40 @@
+...F.F....F.F.                                             [100%]
+=================================== FAILURES ===================================
+______ AdapterContractTests.test_refusal_is_preserved_in_the_chat_message ______
+tests/test_adapter_semantics.py:26: in test_refusal_is_preserved_in_the_chat_message
+    self.assertEqual(result['choices'][0]['message']['refusal'], 'synthetic refusal')
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'refusal'
+_ AdapterContractTests.test_shared_cache_controls_are_forwarded_without_changing_retention _
+tests/test_adapter_semantics.py:29: in test_shared_cache_controls_are_forwarded_without_changing_retention
+    result = main._build_responses_payload_from_chat(body(prompt_cache_retention='24h',
+main.py:7052: in _build_responses_payload_from_chat
+    return build_chat_payload(chat_body, removed_sampling=_responses_adapter_removed_sampling_fields(chat_body))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+chat_adapter.py:147: in build_payload
+    reject('adapter.unsupported')
+chat_adapter.py:20: in reject
+    reject_parameters({field})
+request_telemetry.py:263: in reject_parameters
+    raise HTTPException(status_code=status, detail={'error': {'code': code,
+E   fastapi.exceptions.HTTPException: 400: {'error': {'code': 'parameter_not_forwarded', 'type': 'invalid_request_error', 'message': 'The gateway cannot preserve the requested semantics on this route. Use the native API or adjust the named parameters.', 'parameters': ['adapter.unsupported'], 'lb_request_id': None, 'retryable': False}}
+----------------------------- Captured stderr call -----------------------------
+{"ts": "2026-09-30T10:07:45.017Z", "level": "INFO", "logger": "main", "message": "lb_parameter_policy", "kind": "lb_parameter_policy", "action": "rejected", "schema_version": 1, "parameters": ["adapter.unsupported"]}
+------------------------------ Captured log call -------------------------------
+INFO     main:request_telemetry.py:52 lb_parameter_policy
+_ AdapterEntryTests.test_locally_echoed_model_is_not_misreported_as_upstream_resolution _
+tests/test_adapter_semantics.py:115: in test_locally_echoed_model_is_not_misreported_as_upstream_resolution
+    self.assertEqual(end.resolved_model, 'unknown')
+E   AssertionError: 'gpt-5.6-luna' != 'unknown'
+E   - gpt-5.6-luna
+E   + unknown
+_____________ AdapterEntryTests.test_refusal_survives_buffered_sse _____________
+tests/test_adapter_semantics.py:121: in test_refusal_survives_buffered_sse
+    self.assertIn(b'"refusal": "synthetic refusal"', wire)
+E   AssertionError: b'"refusal": "synthetic refusal"' not found in b'data: {"id": "chatcmpl-lb-eb34bcab3111414a9b109ae49ee2debc", "object": "chat.completion.chunk", "created": 1790762865, "model": "synthetic", "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": null}]}\n\ndata: {"id": "chatcmpl-lb-eb34bcab3111414a9b109ae49ee2debc", "object": "chat.completion.chunk", "created": 1790762865, "model": "synthetic", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}\n\ndata: [DONE]\n\n'
+=========================== short test summary info ============================
+FAILED tests/test_adapter_semantics.py::AdapterContractTests::test_refusal_is_preserved_in_the_chat_message
+FAILED tests/test_adapter_semantics.py::AdapterContractTests::test_shared_cache_controls_are_forwarded_without_changing_retention
+FAILED tests/test_adapter_semantics.py::AdapterEntryTests::test_locally_echoed_model_is_not_misreported_as_upstream_resolution
+FAILED tests/test_adapter_semantics.py::AdapterEntryTests::test_refusal_survives_buffered_sse
+4 failed, 10 passed, 14 subtests passed in 0.99s

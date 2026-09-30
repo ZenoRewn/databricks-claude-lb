@@ -2,6 +2,8 @@
 
 Author: Zeno Ren
 
+2026-09-30 的增量实现见 [当前诊断/参数/上下文契约](OBSERVABILITY_AND_CONTEXT.md) 与 [实验/用量边界](OPERATIONS_EXPERIMENTS.md)。下文保留 9/20 的历史默认与验证说明，不代表当前生产已升级；新验证见 [本轮回执](reviews/2026-09-30-lb-contracts/VALIDATION.md)。
+
 本文保留 2026-09-20 第一批候选实现的历史说明。后续协议、记账、可恢复暂停、监控类型和发布工具变更见 [升级后加固说明](POST_UPGRADE_HARDENING.md) 与 [发布操作指南](RELEASE_TOOL.md)。这些文档不替代具体环境的发布回执。
 
 日期：2026-09-20

@@ -1,0 +1,124 @@
+FFFFF..FF                                                     [100%]
+=================================== FAILURES ===================================
+____ AdapterContractTests.test_images_and_developer_role_keep_their_meaning ____
+tests/test_adapter_semantics.py:70: in test_images_and_developer_role_keep_their_meaning
+    self.assertEqual(result['input'][0]['role'], 'developer')
+E   AssertionError: 'user' != 'developer'
+E   - user
+E   + developer
+_ AdapterContractTests.test_incomplete_buffered_generation_does_not_become_stop _
+tests/test_adapter_semantics.py:85: in test_incomplete_buffered_generation_does_not_become_stop
+    self.assertEqual(payload['choices'][0]['finish_reason'], 'length')
+E   AssertionError: 'stop' != 'length'
+E   - stop
+E   + length
+_ AdapterContractTests.test_orphan_duplicate_and_incomplete_tool_pairs_are_rejected (messages=[{'role': 'tool', 'tool_call_id': 'call_one', 'content': 'synthetic'}]) _
+tests/test_adapter_semantics.py:61: in test_orphan_duplicate_and_incomplete_tool_pairs_are_rejected
+    with self.subTest(messages=messages), self.assertRaises(HTTPException) as error:
+                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: HTTPException not raised
+_ AdapterContractTests.test_orphan_duplicate_and_incomplete_tool_pairs_are_rejected _
+tests/test_adapter_semantics.py:63: in test_orphan_duplicate_and_incomplete_tool_pairs_are_rejected
+    self.assertEqual(error.exception.status_code, 400)
+                     ^^^^^^^^^^^^^^^
+E   AttributeError: '_AssertRaisesContext' object has no attribute 'exception'
+----------------------------- Captured stdout call -----------------------------
+u
+_ AdapterContractTests.test_schema_reasoning_store_and_explicit_tool_choice_are_preserved _
+tests/test_adapter_semantics.py:31: in test_schema_reasoning_store_and_explicit_tool_choice_are_preserved
+    self.assertEqual(payload['text']['format'], {'type': 'json_schema', 'name': 'synthetic', 'strict': True, 'schema': schema})
+                     ^^^^^^^^^^^^^^^
+E   KeyError: 'text'
+_ AdapterContractTests.test_tool_round_trip_preserves_ids_arguments_results_and_tool_definitions _
+tests/test_adapter_semantics.py:47: in test_tool_round_trip_preserves_ids_arguments_results_and_tool_definitions
+    self.assertEqual(result['input'][0]['role'], 'developer')
+E   AssertionError: 'user' != 'developer'
+E   - user
+E   + developer
+_ AdapterContractTests.test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped (extras={'n': 2}) _
+tests/test_adapter_semantics.py:79: in test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped
+    with self.subTest(extras=extras), self.assertRaises(HTTPException):
+                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: HTTPException not raised
+_ AdapterContractTests.test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped (extras={'stop': ['synthetic']}) _
+tests/test_adapter_semantics.py:79: in test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped
+    with self.subTest(extras=extras), self.assertRaises(HTTPException):
+                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: HTTPException not raised
+_ AdapterContractTests.test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped (extras={'context_management': {}}) _
+tests/test_adapter_semantics.py:79: in test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped
+    with self.subTest(extras=extras), self.assertRaises(HTTPException):
+                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: HTTPException not raised
+_ AdapterContractTests.test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped (extras={'response_format': {'type': 'unknown'}}) _
+tests/test_adapter_semantics.py:79: in test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped
+    with self.subTest(extras=extras), self.assertRaises(HTTPException):
+                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: HTTPException not raised
+_ AdapterContractTests.test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped (extras={'max_tokens': 10, 'max_completion_tokens': 20}) _
+tests/test_adapter_semantics.py:79: in test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped
+    with self.subTest(extras=extras), self.assertRaises(HTTPException):
+                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: HTTPException not raised
+_ AdapterContractTests.test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped (extras={'max_completion_tokens': 1.5}) _
+tests/test_adapter_semantics.py:79: in test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped
+    with self.subTest(extras=extras), self.assertRaises(HTTPException):
+                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: HTTPException not raised
+_ AdapterContractTests.test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped (extras={'tools': [{'type': 'unsupported'}]}) _
+tests/test_adapter_semantics.py:79: in test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped
+    with self.subTest(extras=extras), self.assertRaises(HTTPException):
+                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: HTTPException not raised
+_ AdapterEntryTests.test_image_trim_requires_explicit_policy_and_strict_always_preserves (headers={'X-LB-Image-Trim': 'allow'}) _
+tests/test_adapter_semantics.py:131: in test_image_trim_requires_explicit_policy_and_strict_always_preserves
+    self.assertEqual(response.status_code, status)
+E   AssertionError: 413 != 200
+_ AdapterEntryTests.test_image_trim_requires_explicit_policy_and_strict_always_preserves (headers={'X-LB-Image-Trim': 'allow', 'X-LB-Strict-Parameters': 'true'}) _
+tests/test_adapter_semantics.py:131: in test_image_trim_requires_explicit_policy_and_strict_always_preserves
+    self.assertEqual(response.status_code, status)
+E   AssertionError: 413 != 400
+________ AdapterEntryTests.test_incomplete_stream_keeps_length_terminal ________
+tests/test_adapter_semantics.py:112: in test_incomplete_stream_keeps_length_terminal
+    self.assertEqual(events[-1]['choices'][0]['finish_reason'], 'length')
+E   AssertionError: 'stop' != 'length'
+E   - stop
+E   + length
+_ AdapterEntryTests.test_strict_equivalent_conversion_is_visible_and_buffered_stream_is_declared _
+tests/test_adapter_semantics.py:100: in test_strict_equivalent_conversion_is_visible_and_buffered_stream_is_declared
+    self.assertEqual(route.call_args.args[0]['text']['format'], {'type': 'json_object'})
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'text'
+----------------------------- Captured stderr call -----------------------------
+{"ts": "2026-09-30T09:17:15.994Z", "level": "INFO", "logger": "main", "message": "lb_request_received", "kind": "lb_request_received", "route": "/v1/chat/completions", "client_class": "other", "lb_request_id": "5d6da75c-23e0-42fc-ae76-265696b712f6", "requested_model": "gpt-5.6-luna", "api_type": "chat", "request_id": "req_173ebcd2", "body_size_bytes": 130, "schema_version": 1, "downstream_headers_sent": false, "stream": true, "downstream_content_started": false}
+{"ts": "2026-09-30T09:17:15.994Z", "level": "INFO", "logger": "main", "message": "lb_legacy_diagnostic", "requested_model": "gpt-5.6-luna", "api_type": "chat", "lb_request_id": "5d6da75c-23e0-42fc-ae76-265696b712f6", "downstream_headers_sent": false, "stream": true, "downstream_content_started": false, "kind": "lb_legacy_diagnostic", "source": "chat_completions", "source_line": 7693, "schema_version": 1}
+{"ts": "2026-09-30T09:17:15.994Z", "level": "WARNING", "logger": "main", "message": "lb_legacy_diagnostic", "requested_model": "gpt-5.6-luna", "api_type": "chat", "lb_request_id": "5d6da75c-23e0-42fc-ae76-265696b712f6", "downstream_headers_sent": false, "stream": true, "downstream_content_started": false, "kind": "lb_legacy_diagnostic", "source": "_stream_disconnect_checker", "source_line": 7496, "schema_version": 1}
+{"ts": "2026-09-30T09:17:15.994Z", "level": "INFO", "logger": "main", "message": "lb_legacy_diagnostic", "requested_model": "gpt-5.6-luna", "api_type": "chat", "lb_request_id": "5d6da75c-23e0-42fc-ae76-265696b712f6", "downstream_headers_sent": false, "stream": true, "downstream_content_started": false, "kind": "lb_legacy_diagnostic", "source": "_route_chat_via_responses", "source_line": 7213, "schema_version": 1}
+{"ts": "2026-09-30T09:17:16.000Z", "level": "INFO", "logger": "main", "message": "lb_request_end", "generation_outcome": "unknown", "kind": "lb_request_end", "admission_reason": null, "error_origin": "unknown", "lb_request_id": "5d6da75c-23e0-42fc-ae76-265696b712f6", "source_tenant": "default", "outcome": "unknown", "parameter_policy": "strict", "failure_reason": "unknown", "operation_id": null, "deadline_phase": null, "requested_model": "gpt-5.6-luna", "api_type": "chat", "request_id": "req_173ebcd2", "http_status": 200, "duration_seconds": 0.008691, "schema_version": 1, "startup_budget_seconds": null, "admissions": 0, "total_budget_seconds": 1800.0, "upstream_sends": 0, "stream": true, "downstream_content_started": false, "draining_at_finish": false, "downstream_headers_sent": true, "downstream_body_completed": true, "dropped_parameters": [], "rejected_parameters": [], "phase_seconds": {"body_read": 0.0023346669986494817, "admission_wait": 5.375000910134986e-06, "auth_prepare": null, "send_to_headers": null, "send_call": null, "first_event_from_ingress": null, "first_content_from_ingress": null, "stream": null, "cleanup": null, "dns": null, "tcp": null, "tls": null, "pool": null}, "phase_offsets_seconds": {"admission_wait_started": 0.00011595799878705293, "admission_wait_finished": 0.000121749999379972, "body_read_started": 0.0009427080003661104, "body_read_finished": 0.0032780000001366716}}
+{"ts": "2026-09-30T09:17:16.000Z", "level": "INFO", "logger": "httpx", "message": "HTTP Request: POST http://local/v1/chat/completions \"HTTP/1.1 200 OK\""}
+------------------------------ Captured log call -------------------------------
+INFO     main:request_telemetry.py:44 lb_request_received
+INFO     main:main.py:7693 lb_legacy_diagnostic
+WARNING  main:main.py:7496 lb_legacy_diagnostic
+INFO     main:main.py:7213 lb_legacy_diagnostic
+INFO     main:request_telemetry.py:44 lb_request_end
+INFO     httpx:_client.py:1740 HTTP Request: POST http://local/v1/chat/completions "HTTP/1.1 200 OK"
+=========================== short test summary info ============================
+FAILED tests/test_adapter_semantics.py::AdapterContractTests::test_images_and_developer_role_keep_their_meaning
+FAILED tests/test_adapter_semantics.py::AdapterContractTests::test_incomplete_buffered_generation_does_not_become_stop
+SUBFAILED(messages=[{'role': 'tool', 'tool_call_id': 'call_one', 'content': 'synthetic'}]) tests/test_adapter_semantics.py::AdapterContractTests::test_orphan_duplicate_and_incomplete_tool_pairs_are_rejected
+FAILED tests/test_adapter_semantics.py::AdapterContractTests::test_orphan_duplicate_and_incomplete_tool_pairs_are_rejected
+FAILED tests/test_adapter_semantics.py::AdapterContractTests::test_schema_reasoning_store_and_explicit_tool_choice_are_preserved
+FAILED tests/test_adapter_semantics.py::AdapterContractTests::test_tool_round_trip_preserves_ids_arguments_results_and_tool_definitions
+SUBFAILED(extras={'n': 2}) tests/test_adapter_semantics.py::AdapterContractTests::test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped
+SUBFAILED(extras={'stop': ['synthetic']}) tests/test_adapter_semantics.py::AdapterContractTests::test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped
+SUBFAILED(extras={'context_management': {}}) tests/test_adapter_semantics.py::AdapterContractTests::test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped
+SUBFAILED(extras={'response_format': {'type': 'unknown'}}) tests/test_adapter_semantics.py::AdapterContractTests::test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped
+SUBFAILED(extras={'max_tokens': 10, 'max_completion_tokens': 20}) tests/test_adapter_semantics.py::AdapterContractTests::test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped
+SUBFAILED(extras={'max_completion_tokens': 1.5}) tests/test_adapter_semantics.py::AdapterContractTests::test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped
+SUBFAILED(extras={'tools': [{'type': 'unsupported'}]}) tests/test_adapter_semantics.py::AdapterContractTests::test_unsupported_critical_parameters_and_conflicting_limits_are_not_dropped
+SUBFAILED(headers={'X-LB-Image-Trim': 'allow'}) tests/test_adapter_semantics.py::AdapterEntryTests::test_image_trim_requires_explicit_policy_and_strict_always_preserves
+SUBFAILED(headers={'X-LB-Image-Trim': 'allow', 'X-LB-Strict-Parameters': 'true'}) tests/test_adapter_semantics.py::AdapterEntryTests::test_image_trim_requires_explicit_policy_and_strict_always_preserves
+FAILED tests/test_adapter_semantics.py::AdapterEntryTests::test_incomplete_stream_keeps_length_terminal
+FAILED tests/test_adapter_semantics.py::AdapterEntryTests::test_strict_equivalent_conversion_is_visible_and_buffered_stream_is_declared
+17 failed, 2 passed, 1 subtests passed in 0.43s
