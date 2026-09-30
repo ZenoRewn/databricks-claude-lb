@@ -28,7 +28,7 @@ def snapshot(root, *, files=RUNTIME_FILES):
             out_of_tree = out_of_tree or changed
     # A changed build recipe is part of source provenance even though it is not
     # installed as an application file inside the runtime image.
-    recipe = git('diff', '--quiet', 'HEAD', '--', 'Dockerfile') if revision else None
+    recipe = git('diff', '--quiet', 'HEAD', '--', 'Dockerfile', '.dockerignore') if revision else None
     if recipe is not None and recipe.returncode != 0:
         dirty = True
     return {'schema_version': 1, 'author': 'Zeno Ren', 'source_revision': revision,
