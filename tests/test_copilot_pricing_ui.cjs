@@ -24,4 +24,12 @@ const unknown = context.aggregateModels([{model_stats: {future: {requests: 1}}}]
 assert.equal(unknown.estimated_cost_usd, null);
 assert.equal(context.fmtModelCost(unknown), '未知');
 assert.equal(context.fmtModelCost({estimated_cost_usd: 0}), '$0');
+for (const modelName of ['constructor', '__proto__', 'toString']) {
+  const modelStats = JSON.parse(JSON.stringify({[modelName]: {requests: 1, input_tokens: 100, estimated_cost_usd: .5}}));
+  const unusual = context.aggregateModels([{model_stats: modelStats}]);
+  assert.deepEqual(Object.keys(unusual), [modelName]);
+  assert.equal(unusual[modelName].requests, 1);
+  assert.equal(unusual[modelName].estimated_cost_usd, .5);
+  assert.equal(vm.runInContext('Object.prototype.input_tokens', context), undefined);
+}
 console.log('Copilot pricing UI: partial, unknown, credits and zero-cost invariants passed.');

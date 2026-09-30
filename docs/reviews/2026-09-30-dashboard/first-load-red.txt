@@ -1,0 +1,12 @@
+AssertionError [ERR_ASSERTION]: The input did not match the regular expression /暂时无法读取/. Input:
+
+'正在读取渠道用量…'
+
+    at <repository>/tests/test_dashboard_ui.cjs:99:10 {
+  generatedMessage: true,
+  code: 'ERR_ASSERTION',
+  actual: '正在读取渠道用量…',
+  expected: /暂时无法读取/,
+  operator: 'match',
+  diff: 'simple'
+}

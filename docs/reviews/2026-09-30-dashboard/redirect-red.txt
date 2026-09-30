@@ -1,0 +1,14 @@
+AssertionError [ERR_ASSERTION]: Management DELETE must never follow redirects
++ actual - expected
+
++ undefined
+- 'error'
+
+    at <repository>/tests/test_dashboard_ui.cjs:49:10 {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: undefined,
+  expected: 'error',
+  operator: 'strictEqual',
+  diff: 'simple'
+}

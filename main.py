@@ -11,7 +11,7 @@ from request_telemetry import note_parameter_transforms, require_image_trim_cons
 from chat_adapter import build_payload as build_chat_payload, messages_to_items, tools_to_items, content as chat_content
 import model_capabilities
 from model_capabilities import observe_route_budget, estimate_payload
-from build_metadata import runtime_identity
+from build_metadata import runtime_identity, release_identity
 from safe_diagnostics import (DiagnosticFilter, DiagnosticStreamHandler, DiagnosticTextFormatter, default_handler,
                               render_metrics as diagnostic_metrics, EVENT_NAMES)
 from request_timing import (observed_phase, begin_stream as timing_begin_stream,
@@ -8413,6 +8413,12 @@ async def reset(
     return {"status": "reset", "note": "In-memory stats reset. Persisted usage data preserved."}
 
 
+@app.get("/version")
+async def version():
+    """Read-only public release identity for the Dashboard; never checks GitHub at runtime."""
+    return JSONResponse(release_identity(), headers={"Cache-Control": "no-store"})
+
+
 @app.get("/config/effective")
 async def config_effective(
     request: Request,
@@ -8450,6 +8456,7 @@ async def dashboard():
         content=DASHBOARD_HTML,
         headers={
             "Content-Security-Policy": csp,
+            "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
             "Referrer-Policy": "no-referrer",
             "Permissions-Policy": "camera=(), microphone=(), geolocation=()",

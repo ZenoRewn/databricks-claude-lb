@@ -2,595 +2,130 @@
 
 Author: Zeno Ren
 
-2026-09-30 的请求诊断、阶段计时、参数/图片语义和渠道能力观测见 [当前契约](docs/OBSERVABILITY_AND_CONTEXT.md)；单路由实验工具、熔断证据及易失用量边界见 [运维实验说明](docs/OPERATIONS_EXPERIMENTS.md)。[本轮验收](docs/reviews/2026-09-30-lb-contracts/VALIDATION.md) 分开记录主机、目标镜像、隔离 MySQL、独立复核和 GitHub 状态。
+为 Claude Code、OpenAI 兼容客户端和内部工具提供统一的模型网关：接入 Databricks、Azure OpenAI 与 GitHub Copilot，管理端点分流、保守重试、流式协议、用量持久化和运行观测。
 
-2026-09-30 已完成 AKS 发布：应用源码 `1d75685`，集群回执 `succeeded`，维护约 75 秒；镜像/运行文件、两个入口、三协议与逐请求记账已核验。Azure 独立进程验证与公网验证分别记录，详见 [部署回执](docs/reviews/2026-09-30-aks-release/REPORT.md)。
+[快速开始](#快速开始) · [配置与客户端](docs/CONFIGURATION.md) · [Dashboard](#dashboard) · [AKS 发布](docs/AKS.md) · [完整文档](docs/README.md)
 
-兼容性变化：Token 估算接口需要鉴权；图片裁剪默认拒绝、可显式允许；Chat 适配器保留工具/schema/refusal/incomplete，无法等价转换的关键参数明确拒绝。新指标采用显式 `/metrics?schema=lb-metrics-v3`，默认 `/metrics` 仍为 v2。默认不按低置信度上下文估算拒绝请求，不自动增加 timeout、重试或副本。
+## 服务能力
 
-可靠性优化的实现范围、指标口径和验证边界见 [服务可靠性说明](docs/SERVICE_RELIABILITY.md)。
+| 渠道 | 客户端入口 | 路由行为 |
+|---|---|---|
+| Databricks Claude | `/v1/messages` | Claude 模型映射、多 workspace 分流 |
+| GitHub Copilot | `/v1/responses`、`/v1/chat/completions` | OpenAI 风格模型优先使用 Copilot；保留账户亲和与有界认证修复 |
+| Azure OpenAI | `/v1/responses`、`/v1/chat/completions` | 按已配置 deployment 选择端点；仅在允许的准入/兼容性分支接管 |
 
-后续协议、记账和类型化监控变更见 [升级后加固说明](docs/POST_UPGRADE_HARDENING.md)；集群内发布与恢复工具见 [操作指南](docs/RELEASE_TOOL.md)。本地验证不等于已经更新生产，实际交付状态以对应验证回执为准。
+网关提供完整 SSE 帧转发、请求 ID 与分阶段诊断、熔断与半开试探、有界并发和输入预算、参数兼容提示，以及 JSON/MySQL 用量后端。图片可以压缩；超量裁剪默认拒绝，必须明确允许。Chat→Responses 适配保留可支持的工具、schema、refusal 和 incomplete 语义。
 
-合并前追加的独立 QA、三项缺陷修复及回归记录见 [独立复核](docs/reviews/2026-09-21-main-merge/REVIEW.md)。
-
-Copilot 实时费用采用 [GHCP 官方价格映射](docs/COPILOT_PRICING.md)，包含新模型、缓存写入和长上下文档位；估算与实际账单的边界见该说明。
-
-一个智能负载均衡代理，统一对接 **Databricks Claude**、**Azure OpenAI** 和 **GitHub Copilot** 三套上游，按模型自动路由。
-
-**运行契约：** [SSE framing、8 MiB/64 MiB 可配置资源策略、Copilot `api_types` 兼容性](docs/STREAM_PROTOCOL.md)。这些字节预算不是模型 token 上限或上游截断结论。
-
-## 为什么需要这个项目？
-
-- **突破单一 workspace/区域限制**：通过多个端点分散请求，提高整体吞吐量
-- **三路供给，单一入口**：Anthropic 走 Databricks，OpenAI/Gemini 系列优先 GHCP、回退 Azure，客户端只需一份 base URL
-- **高可用性**：内置熔断器、token 自愈、上游 HTML 错误兜底
-- **成本追踪**：内置模型定价，自动计算每日使用成本，支持 JSON/MySQL 持久化
-- **生产部署友好**：JSON 结构化日志、Prometheus `/metrics`、`/health/{live,ready}` 探针、K8s Secret rotation 零重启生效
-
-## 功能特性
-
-- **三路统一**
-  - Databricks Claude（`/v1/messages`）— 多 workspace 负载均衡
-  - GitHub Copilot（`/v1/chat/completions`、`/v1/responses`）— 多账号 + Device Flow 登录 + token 自动刷新
-  - Azure OpenAI（`/v1/chat/completions`、`/v1/responses`）— 多区域 + 按 deployment 路由
-- **自动路由** - `claude-*` 永远走 Databricks；其他模型 **GHCP 优先 → Azure fallback**
-- **GHCP token 自愈** - long-lived OAuth + 短期 session token 双层模型（session TTL 由上游 `expires_at` 决定，本账户实测 ≈24h）；后台定时刷新 + 401 自愈 + 配合 K8s Secret rotation 零重启生效
-- **图片自动压缩** - >200KB base64 image → ≤1280px JPEG q=82，让 Chrome fullPage 截图（30MB 级）也能塞进 ADB 4MB 上限；并有解码前软上限保护（张数/总像素/并发，防 OOM，见 docs/TROUBLESHOOTING.md）
-- **上游错误规范化** - 自动把上游 HTML 错误页（CDN "Connection Closed" 之类）转成结构化 JSON，避免泄露给客户端
-- **负载均衡** - `least_requests`（默认）/ `round_robin` / `random`
-- **熔断器** - 自动检测故障端点并临时禁用，超时后自动恢复
-- **流式响应** - UTF-8/BOM、CRLF/CR/LF 完整 SSE 帧转发；独立错误帧、有限内存、15s keep-alive；未完成帧丢弃，不伪造完成、不重放已执行 POST（见 [流协议与资源策略](docs/STREAM_PROTOCOL.md)）
-- **Extended Thinking** - 支持 Claude Opus/Sonnet 的 adaptive 思考模式（含旧模型自动降级 `enabled` + budget_tokens）
-- **Prompt Caching** - 自动清理 `cache_control` 额外字段（如 `scope`），兼容 Databricks
-- **用量持久化** - 按天存储 token 用量，JSON 文件 或 MySQL 8.x 后端，重启自动恢复
-- **Dashboard** - 四标签页（Anthropic / Azure / GitHub Copilot / 历史），深色 / 浅色主题切换
-- **可观测性** - JSON 日志（`LOG_FORMAT=json`）+ Prometheus `/metrics` + K8s livenessProbe / readinessProbe
+执行结果不明的推理不会为了“自愈”自动重放；用量落盘失败也不会触发重新生成。HTTP 200 不等于生成完成。具体规则见 [请求契约](docs/OBSERVABILITY_AND_CONTEXT.md) 与 [可靠性约束](docs/RESILIENCE.md)。
 
 ## 快速开始
 
-### 1. 克隆项目
+需要 **Python 3.11+**，建议使用 3.12。至少配置一个可用上游；MySQL 8.x 和 Docker 按使用场景选择。推理使用你自己的渠道凭据和额度。
+
+### 1. 安装
 
 ```bash
-git clone https://github.com/yourusername/databricks-claude-lb.git
+git clone https://github.com/ZenoRewn/databricks-claude-lb.git
 cd databricks-claude-lb
-```
-
-### 2. 安装依赖
-
-```bash
-pip install -r requirements.txt
-
-# 如需 MySQL 存储后端（可选）
-pip install aiomysql
-```
-
-### 3. 配置端点
-
-复制示例配置文件：
-
-```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.lock
 cp config.yaml.example config.yaml
 ```
 
-编辑 `config.yaml`，填入你的端点信息：
+### 2. 配置
+
+编辑 [config.yaml.example](config.yaml.example) 的本地副本，只保留实际使用的端点。`auth.api_key` 是客户端访问网关的密钥，上游凭据分别配置；支持 `${ENV_VAR_NAME}` 引用。真实 `config.yaml` 已被 Git 和 Docker 构建上下文排除。
 
 ```yaml
-load_balancer:
-  strategy: least_requests        # 负载均衡策略
-  circuit_breaker_threshold: 5    # 熔断器错误阈值
-  circuit_breaker_timeout: 60     # 熔断器恢复超时（秒）
-
 auth:
-  api_key: your-secret-api-key    # 自定义的 API Key
+  api_key: ${LB_API_KEY}
 
-# Databricks 端点配置
 endpoints:
   - name: workspace-1
-    api_base: https://adb-xxx.azuredatabricks.net/serving-endpoints
-    token: dapi_xxx               # Databricks Personal Access Token
+    api_base: https://adb-YOUR-WORKSPACE.azuredatabricks.net/serving-endpoints
+    token: ${DATABRICKS_TOKEN_1}
     weight: 1
-
-  - name: workspace-2
-    api_base: https://adb-yyy.azuredatabricks.net/serving-endpoints
-    token: ${DATABRICKS_TOKEN_2}  # 支持环境变量
-    weight: 1
-
-# Token 用量持久化（可选）
-# 简单模式：JSON 文件
-usage_data_dir: ./usage_data
-
-# 高级模式：支持 JSON 或 MySQL + 自动清理
-# usage_storage:
-#   type: mysql                   # json 或 mysql
-#   host: localhost
-#   port: 3306
-#   user: root
-#   password: ${MYSQL_PASSWORD}
-#   database: claude_lb
-#   retention_days: 90            # 自动清理超过 N 天的数据
-
-# Azure OpenAI 端点配置（可选）
-# azure_openai:
-#   endpoints:
-#     - name: eastus-region
-#       endpoint: https://my-openai-eastus.openai.azure.com
-#       api_key: ${AZURE_KEY_EASTUS}
-#       deployments: [gpt-4o, gpt-5]
-#       weight: 1
-
-# GitHub Copilot 端点配置（可选）
-# github_copilot:
-#   endpoints:
-#     - name: gh-account-1            # 见下方"GitHub Copilot 端点配置"详解
-#       weight: 1
-#       models: []                    # 空 = 通配（接受所有上游支持的模型）
 ```
 
-### 4. 启动服务
+在运行环境中设置所引用的变量。Azure deployment、Copilot Device Flow、多账户和存储配置见 [配置指南](docs/CONFIGURATION.md)。
+
+### 3. 启动与接入
 
 ```bash
-python main.py
+uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-或使用 uvicorn 带热重载：
+上面的命令仅监听本机 `127.0.0.1:8000`。`python main.py` 是开发入口，监听 `0.0.0.0` 并启用 reload；不要把它当作仅本地监听的生产启动方式。本地 Dashboard 为 [`/stats/dashboard`](http://127.0.0.1:8000/stats/dashboard)。
+
+Claude Code：
 
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-服务将在 `http://localhost:8000` 启动。
-
-### 5. 配置 Claude Code
-
-设置环境变量后启动 Claude Code：
-
-```bash
-export ANTHROPIC_BASE_URL='http://localhost:8000'
-export ANTHROPIC_API_KEY='your-secret-api-key'  # 与 config.yaml 中的 api_key 一致
-
+export ANTHROPIC_BASE_URL='http://127.0.0.1:8000'
+export ANTHROPIC_API_KEY="$LB_API_KEY"
 claude
 ```
 
-## Docker 部署
+OpenAI 兼容客户端使用 `http://127.0.0.1:8000/v1`，API Key 同样使用网关密钥。Responses-only 模型优先选择 Responses 客户端；其他接入示例见 [客户端配置](docs/CONFIGURATION.md#客户端接入)。
 
-### 构建镜像
+## Dashboard
 
-```bash
-docker build -t claude-lb .
-```
+按渠道查看主要指标、模型分布、端点状态和连接池观测；历史页展示持久化用量。支持深浅主题、暂停/手动刷新、明确的失败提示和需要鉴权确认的数据维护。
 
-### 运行容器
+![Dashboard 桌面预览，合成数据](pictures/dashboard.jpg)
 
-```bash
-docker run -d \
-  --name claude-lb \
-  -p 8000:8000 \
-  -v $(pwd)/config.yaml:/app/config.yaml \
-  -v $(pwd)/usage_data:/app/usage_data \
-  claude-lb
-```
+*图片为本地合成数据预览，不是生产流量或性能证据。*
 
-### Docker Compose（可选）
+统计口径在页面中单独标注：Databricks 请求/Token 累计包含启动时恢复的用量，模型与费用为今日数据；端点、Azure 和 Copilot 页面主要是当前进程统计。历史记录跨进程保留。未知和部分计价不会显示为完整的零费用，估算也不等同于供应商账单。
 
-创建 `docker-compose.yaml`：
+右上角 **Release** 展示实际构建提交，并可打开对应 GitHub commit 或与 `main` 比较：
 
-```yaml
-version: '3.8'
-services:
-  claude-lb:
-    build: .
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./config.yaml:/app/config.yaml
-      - ./usage_data:/app/usage_data
-    restart: unless-stopped
-```
+- **构建文件一致**：运行文件与完整构建记录相符。
+- **运行文件有变化**：构建带本地修改或运行文件不匹配。
+- **未标注 / 未核验**：缺少可信构建信息；不猜测版本。
 
-运行：
+版本来自只读 `/version`，不会调用 GitHub API，也不会公开配置和凭据。文件一致不代表 GitHub 已无新提交；页面每分钟更新版本信息，手动刷新会立即核对。运行实例升级后才能看到新的提交，不应拿 README 的最新 commit 冒充线上版本。
 
-```bash
-docker-compose up -d
-```
+## 配置与运维入口
 
-## API 端点
-
-| 端点 | 方法 | 认证 | 描述 |
-|------|------|------|------|
-| `/v1/messages` | POST | 需要 | Databricks Claude 消息 API（仅 `claude-*` 模型） |
-| `/v1/messages/count_tokens` | POST | 需要 | 本地输入 Token 估算，包含 system/tools；响应头声明低置信度及未知图片/状态开销，不能作为精确硬阈值 |
-| `/v1/models`、`/models` | GET | 可选 | OpenAI-compatible 模型列表；有鉴权头时必须匹配 `auth.api_key` |
-| `/v1/models/{model}`、`/models/{model}` | GET | 可选 | OpenAI-compatible 单模型信息 |
-| `/v1/responses` | POST | 需要 | OpenAI Responses API（按模型分流：Copilot 优先 → Azure fallback；`claude-*` 拒绝） |
-| `/v1/chat/completions` | POST | 需要 | OpenAI Chat Completions API（按模型分流：同上） |
-| `/health`、`/health/live` | GET | 不需要 | Liveness probe（仅检查进程） |
-| `/health/ready` | GET | 不需要 | Readiness probe（检查依赖；故障返回 503 + `issues` 数组） |
-| `/health/accepting` | GET | 不需要 | 本地接流量就绪：初始化完成、路由已配置且未 draining；上游健康另查 `/health/ready` |
-| `/metrics` | GET | 不需要 | Prometheus 文本格式 metrics（K8s / Azure Monitor 抓取） |
-| `/admin/copilot/reload` | POST | 需要 | 运维端点：从源重读所有 Copilot endpoint 的 long-lived token + 强制刷新 session（K8s Secret rotation 后立刻生效） |
-| `/admin/copilot/reset-pool` | POST | 需要 | 运维端点：重建共享 httpx.AsyncClient，逐出所有 keepalive/半开连接（怀疑连接池泄漏或 upstream_stall 持续增长时使用） |
-| `/admin/model-capabilities` | GET | 需要 | 渠道/模型/API 能力目录、来源与有效期；未验证或过期能力不自动变成硬限额 |
-| `/stats` | GET | 不需要 | 端点统计（含成本估算、Azure OpenAI、GitHub Copilot） |
-| `/stats/history` | GET | 不需要 | 历史用量数据（`?days=7`） |
-| `/stats/history` | DELETE | 需要 | 清理历史数据（`?keep_days=30`） |
-| `/stats/dashboard` | GET | 不需要 | 可视化监控面板（四标签页 + 主题切换） |
-| `/reset` | POST | 需要 | 重置内存统计（持久化数据保留） |
-
-### Dashboard
-
-![Dashboard](pictures/dashboard.png)
-
-Dashboard 包含四个标签页：
-- **Anthropic Models** - 实时 Databricks 端点状态、模型统计、成本估算
-- **Azure OpenAI Models** - Azure 端点状态和统计
-- **GitHub Copilot** - GHCP 端点 token 剩余时间、模型用量、假想成本（按 OpenAI 公开定价）
-- **Usage History** - 历史用量表格、成本趋势、数据清理操作
-
-**主题切换**：右上角的太阳 / 月亮按钮可在深色与浅色主题间切换。首次打开跟随操作系统 `prefers-color-scheme`；手动切换后写入 `localStorage['lb-theme']`，下次访问自动恢复。图表（Chart.js）会同步更新 legend、tooltip、grid、ticks 颜色，无需刷新页面。
-
-## 支持的模型
-
-### Databricks Claude
-
-| Claude 模型 | Databricks 模型 |
-|------------|-----------------|
-| claude-*-sonnet-* | `databricks-claude-sonnet-4-6`（默认），支持显式 4-5 / 4-6 / **5** |
-| claude-*-opus-* | `databricks-claude-opus-4-7`（默认），支持显式 4-5 / 4-6 / 4-7 / **4-8** / **5** |
-| claude-*-haiku-* | `databricks-claude-haiku-4-5` |
-
-> **Opus 5 / Sonnet 5 保底**：只要请求里出现 `opus-5` 或 `sonnet-5`（不管前后缀是 `claude-opus-5-latest`、`claude-opus-5-20260101` 还是裸 `opus-5`），LB 保证映射到 `databricks-claude-opus-5` / `databricks-claude-sonnet-5`，**永远不会被降级到 4-x**。回归测试 `test_opus_5_all_variants_bypass_downgrade` 锁定这个保证。
-
-### Azure OpenAI
-
-Azure OpenAI 端点无需模型名映射，请求中的 `model` 字段直接对应 Azure 上的 deployment 名称（如 `gpt-4o`, `gpt-5`, `o4-mini`）。代理会自动将请求路由到拥有该 deployment 的端点。
-
-### GitHub Copilot
-
-GitHub Copilot 端点同样以 `model` 字段直传上游（如 `gpt-5.5`、`gpt-5.6-sol`、`gpt-5.6-luna`、`gpt-5.6-terra`、`gpt-5-codex`、`claude-3.5-sonnet` 也会被 GHCP 接受）。和 Azure 不同的是，**GHCP 的 `models` 字段语义为白名单且空列表 = 通配**——不强制静态配置，因为 GHCP 上游模型列表会变化。
-
-> **注意**：GHCP 部分新模型（如 `gpt-5.5`、`gpt-5.6-sol`、`gpt-5.6-luna`、`gpt-5.6-terra`、`gpt-5-codex`）**只允许走 `/responses` API**，不允许直接走上游 `/chat/completions`。LB 会对这些模型的 `/v1/chat/completions` 请求做 buffered Chat→Responses 适配，并把结果包装回 Chat Completions 格式；流式请求也可用，但首字会等完整 Responses 返回。可用 `OPENAI_CHAT_TO_RESPONSES_MODELS` 覆盖适配模型列表。Codex Desktop 默认 `wire_api = "responses"`，仍建议直接使用 Responses。若 Copilot 明确拒绝某个模型，LB 会返回 `unsupported_model` 并在日志中记录 request id、客户端 header 形态、provider 选择和 endpoint 状态，方便点对点修复。
-
-## GitHub Copilot 端点配置
-
-> 关键点：每个 endpoint 的 `name` 字段是**你自己选的逻辑标识符**，配置后有 4 个用途，所以选一个稳定、好记、跨账号唯一的名字。
-
-### `name` 字段做了什么
-
-```yaml
-github_copilot:
-  endpoints:
-    - name: gh-account-1     # ← 这个 name
-      weight: 1
-      models: []
-```
-
-| 用途 | 行为 |
+| 任务 | 入口 |
 |---|---|
-| **本地 token 缓存文件名** | `~/.config/databricks-claude-lb/copilot-auth-<sanitized-name>.json`（非法字符 `[^A-Za-z0-9._-]` 会被替换成 `_`） |
-| **Device Flow CLI 入参** | `python main.py --copilot-login --endpoint <name>` 决定登录后 token 写到哪个文件 |
-| **K8s Secret 文件名** | mounted Secret 必须以 `copilot-auth-<name>.json` 命名才能被 LB 自动 pick up |
-| **日志 / Dashboard / `/stats` 标识** | `[Copilot] resolved token for 'gh-account-1' from ...`，多账号时方便区分 |
+| 配置渠道、认证、存储及客户端 | [配置指南](docs/CONFIGURATION.md) |
+| 查接口及鉴权要求 | [完整 API 表](CLAUDE.md#api-端点) |
+| 观察进程、依赖、接流量状态 | `/health/live`、`/health/ready`、`/health/accepting` |
+| 抓取指标 | `/metrics` 默认 v2；显式 v3 用 `/metrics?schema=lb-metrics-v3` |
+| 查看实际参数 | 带有效 LB Key 请求 `/config/effective` |
+| 查看历史、模型与费用口径 | [GHCP 计费说明](docs/COPILOT_PRICING.md)、[用量与耐久性](docs/OPERATIONS_EXPERIMENTS.md) |
+| 排查连接池、协议、客户端问题 | [排障指南](docs/TROUBLESHOOTING.md) |
 
-> 多账号场景：`name` 必须唯一，例如 `gh-personal`、`gh-corp`、`gh-team-shared`。同一台机器跑多个 endpoint 时各自的 token 缓存文件互不影响。
+JSON 用量后端只支持单写者。MySQL 使用批次账本与增量事务写入，但内存待写事件仍易失，不能承诺节点丢失时零 RPO。`/stats`、历史和指标是运维观测接口，公开范围由部署入口控制。
 
-### Token 来源（按优先级回退）
+## 构建与发布
 
-`resolve_github_token(endpoint)` 按下列顺序找一个 long-lived OAuth token：
-
-1. **`config.yaml` 显式配置**（推荐生产环境）
-   ```yaml
-   github_copilot:
-     endpoints:
-       - name: gh-account-1
-         github_token: ${GITHUB_COPILOT_TOKEN_1}    # 支持环境变量
-   ```
-   - K8s 场景配合 Secret 注入：`envFrom.secretRef.name: claude-lb-secrets` + `GITHUB_COPILOT_TOKEN_1` 在 Secret 里
-2. **本项目 device-flow 缓存**（推荐本地开发）
-   - 路径：`~/.config/databricks-claude-lb/copilot-auth-<name>.json`，权限 0600
-   - 由 `python main.py --copilot-login --endpoint <name>` 写入
-3. **兼容 copilot-lb 旧缓存**：`~/.config/copilot-lb/auth.json`（无 name 区分，全局共用）
-
-> 任一来源拿到 token 后，每次请求自动用它去 `https://api.github.com/copilot_internal/v2/token` 交换短期 session token。**TTL 以上游返回的 `expires_at` 为准，不要假定固定值** —— 2026-09-09 实测本账户 ≈24h（旧文档写 30 min 是错的）。后台定时任务（默认 300 s 扫一遍，剩 ≤600s 主动刷新）+ 请求级 401 自愈让你**永远不需要手动刷新短期 token**；当前 TTL 下实际约每天刷新一次。
-
-### Device Flow 登录步骤
-
-需要能开浏览器的机器，登录一次即可（long-lived token 一般不过期，除非用户主动 revoke）：
+推荐使用构建身份工具，它会绑定当前提交、运行文件 hash 和本地修改状态：
 
 ```bash
-python main.py --copilot-login --endpoint gh-account-1
+python -m operations.build_identity \
+  --build-tag claude-lb:local \
+  --platform linux/amd64
 ```
 
-终端会打印 verification URL + user code，去浏览器输入即可。完成后：
-- token 写入 `~/.config/databricks-claude-lb/copilot-auth-gh-account-1.json`（mode 0600）
-- AKS 部署时把这个文件作为 Secret 上传即可（见 `docs/AKS.md`）
+本地 Docker 配置挂载、离线依赖和验证流程见 [开发指南](docs/DEVELOPMENT.md)。本地 image ID、registry digest、运行 Pod imageID 和源码提交是不同证据，发布时分别核验。
 
-### 多账号示例
+AKS 操作从 [部署指南](docs/AKS.md) 和 [受控发布工具](docs/RELEASE_TOOL.md) 开始。`deploy/k8s/` 是示例形态，**不能整份 apply 覆盖现有生产环境**。单副本发布可能产生维护窗口；需要预先完成备份、排空、恢复材料和业务验收。
 
-```yaml
-github_copilot:
-  load_balancer:
-    strategy: least_requests
-    circuit_breaker_threshold: 5
-    circuit_breaker_timeout: 60
-  endpoints:
-    - name: gh-personal
-      weight: 2                       # 优先级更高
-      models: []                      # 通配
-    - name: gh-corp
-      weight: 1
-      models: [gpt-5.6-sol, gpt-5.6-luna, gpt-5.6-terra]  # 仅服务这些模型
-```
+最近一次已记录的 AKS 发布为 [2026-09-30 回执](docs/reviews/2026-09-30-aks-release/REPORT.md)，应用源码 `1d75685`。该回执描述其当时部署，不自动证明后续 Dashboard 或其他提交已经上线。历次代码验证与部署结果集中在 [验证索引](docs/reviews/README.md)。
 
-每个 endpoint 各自登录：
+## 开发
+
 ```bash
-python main.py --copilot-login --endpoint gh-personal
-python main.py --copilot-login --endpoint gh-corp
+python -m pip install -r requirements-test.lock
+python -m pytest tests/ -q --tb=short
+node tests/test_copilot_pricing_ui.cjs
+node tests/test_dashboard_ui.cjs
 ```
 
-### 路由规则速览
-
-```
-                  ┌─────────────────────────────────────────────────┐
-                  │ /v1/chat/completions, /v1/responses             │
-                  └────────────────┬────────────────────────────────┘
-                                   │
-                  ┌────────────────▼────────────────┐
-                  │  model 名包含 "claude" ？        │
-                  └────────────────┬────────────────┘
-                       是          │           否
-              ┌────────────────────┘           └─────────────┐
-              ▼                                              ▼
-   400 拒绝（必须走 /v1/messages）          ┌─────────────────────────┐
-                                            │ Copilot can_handle ?    │
-                                            └────────┬────────────────┘
-                                              是     │     否
-                                       ┌────────────┘     └──────────┐
-                                       ▼                              ▼
-                                 GHCP 优先尝试                  Azure 直接尝试
-                                       │
-                       ┌───────────────┴───────────────┐
-                       ▼                               ▼
-                    成功                            失败（unsupported_model
-                  返回 200                         / 503 / 全熔断）
-                                                       │
-                                            ┌──────────▼──────────┐
-                                            │ Azure 有该 deployment？ │
-                                            └──────────┬──────────┘
-                                              是       │       否
-                                          ┌───────────┘       └──────────┐
-                                          ▼                              ▼
-                                        Azure 接管                  返回结构化 503
-                                                                    （含原 Copilot 失败原因）
-```
-
-### Codex Desktop 配置示例
-
-`~/.codex/config.toml`：
-
-```toml
-model_provider = "claude-lb"
-model = "gpt-5.5"
-model_reasoning_effort = "high"
-
-[model_providers.claude-lb]
-name = "claude-lb"
-base_url = "http://127.0.0.1:8000/v1"   # 注意用 127.0.0.1 而非 localhost
-                                         # 见 docs/TROUBLESHOOTING.md 关于 macOS 系统代理
-wire_api = "responses"                   # GHCP gpt-5.x 必须走 /responses
-env_key = "OPENAI_API_KEY"
-```
-
-环境变量 `OPENAI_API_KEY` 设为与 LB `config.yaml` 中 `auth.api_key` 一致即可。
-
-### GitHub Copilot 配额与计数说明
-
-经常被问到："Dashboard 上 Copilot 的累计 token 数 / 假想成本，是不是就是我 GitHub 那边还剩多少配额？" —— **不是**。两个东西完全独立：
-
-| 维度 | LB Dashboard 显示的 | GitHub 真实配额 |
-|---|---|---|
-| 计费模式 | 按 OpenAI 公开价折算的"假想成本"（USD） | 订阅制 + premium request 配额 |
-| 重置周期 | 启动后累计；重启 LB 不归零（数据已落 JSON / MySQL） | 按 **GitHub billing cycle 月度**（订阅起始日，不是自然月 1 号）重置 |
-| 用途 | API 层流量分布、不同账号负载对比、按月看趋势 | 看自己 Copilot 订阅这个月还能用多少 premium request |
-
-**关键结论**：LB Dashboard 上的数字是给运维 / 成本分析用的"参考量"，**不能用来推算 GitHub 那边还剩多少配额**。
-
-#### 真实剩余配额查询
-
-- **个人 / Pro / Pro+**：登录 https://github.com/settings/copilot 看 "Premium request usage"
-- **Business / Enterprise admin**：调 GitHub API `/users/{user}/copilot/billing` 或在组织 Billing 页查
-- 各档位 monthly limit 见 [GitHub Copilot pricing](https://github.com/features/copilot/plans)
-
-#### 触发限速的现象
-
-GHCP 上游会返回 429 + `retry-after` 头。LB 的熔断器会临时摘掉该 endpoint，**下个 billing cycle** 自动恢复。如果你配了多账号 LoadBalancer（见上方"多账号示例"），其他账号的额度仍然可用 —— 这也是配多账号的主要价值。
-
-## 请求兼容性处理
-
-代理会自动处理 Claude Code 请求与 Databricks 之间的兼容性差异：
-
-| 处理项 | 说明 |
-|--------|------|
-| 模型名映射 | `claude-opus-4-7` → `databricks-claude-opus-4-7` |
-| Thinking 参数 | Opus 4.6+/Sonnet 4.6+ 使用 `adaptive`；旧模型自动转换为 `enabled` + `budget_tokens` |
-| cache_control | 自动 strip `scope` 等额外字段，保留 `{"type": "ephemeral"}` 支持 prompt caching |
-| 不支持的字段 | 自动移除 `context_management`、`output_config`、`defer_loading`、`input_examples`、`tool_reference` |
-
-## 用量持久化与成本追踪
-
-### 存储后端
-
-> **三路上游统一记账**：Databricks Claude、Azure OpenAI、GitHub Copilot 三个 Proxy 都调用同一个 `usage_store.record()`，所以 GHCP 用量也会按天落盘 + 重启自动恢复 + 出现在 `/stats/history` 和 Dashboard 的 Usage History 中。
-
-**JSON 文件（默认）**
-- 目录结构：`{usage_data_dir}/{YYYY}/{MM}/{YYYY-MM-DD}.json`
-- 无需额外依赖
-
-**MySQL 8.x（可选）**
-- 需要安装 `aiomysql`：`pip install aiomysql`
-- 自动创建 `usage_daily` 表（schema：`(date, model)` 联合主键 + token / 请求计数列）
-- 配置 `usage_storage.type: mysql`
-- ⚠️ 当前 schema **不区分 provider**：若同一个 `model` 名在 GHCP 和 Azure 都跑，统计会合并到同一行（实际场景里模型名分布天然不重叠）
-
-### 成本估算
-
-内置 Anthropic 官方定价，自动计算各模型的使用成本：
-
-| 模型系列 | Input $/MTok | Output $/MTok | Cache Write $/MTok | Cache Read $/MTok |
-|---------|-------------|---------------|--------------------|--------------------|
-| Opus | $5.00 | $25.00 | $6.25 | $0.50 |
-| Sonnet | $3.00 | $15.00 | $3.75 | $0.30 |
-| Haiku | $1.00 | $5.00 | $1.25 | $0.10 |
-
-### 历史数据清理
-
-- **自动清理**：配置 `retention_days`，启动时和每日自动执行
-- **API 清理**：`DELETE /stats/history?keep_days=30`
-- **Dashboard**：History 标签页内置清理面板
-
-## 负载均衡策略
-
-| 策略 | 说明 |
-|------|------|
-| `least_requests` | 选择当前活跃请求数最少的端点（默认，推荐） |
-| `round_robin` | 轮询方式分配请求 |
-| `random` | 随机选择端点 |
-
-## 熔断器机制
-
-- 当某个端点连续发生 `circuit_breaker_threshold` 次服务端错误时，熔断器开启
-- 熔断器开启后，该端点在 `circuit_breaker_timeout` 秒内不会收到新请求
-- 超时后进入 HALF_OPEN，仅允许一个真实请求探测恢复；成功才关闭熔断，累计错误数不清零
-- 客户端错误（4xx，除 429）不触发熔断器
-- `/reset` 保留原有 Databricks/Azure 显式重置行为；正常恢复不依赖重置或重启
-- 取消和客户端拒绝不证明上游恢复；详细状态、重试边界和兼容性见 [RESILIENCE.md](docs/RESILIENCE.md)
-
-## 架构说明
-
-```
-                                                  ┌─────────────────────┐
-                                            ┌────►│ Databricks WS 1     │
-                                            │     ├─────────────────────┤
-                                            │     │ ...                 │
-┌──────────────┐     ┌──────────────────┐   │     │ Databricks WS N     │
-│ Claude Code  │────►│ /v1/messages     │───┘     └─────────────────────┘
-│ (claude-*)   │     │                  │
-└──────────────┘     │ Load Balancer    │
-                     │ + 路由分流       │         ┌─────────────────────┐
-                     │                  │   ┌────►│ GitHub Copilot      │
-┌──────────────┐     │ /v1/chat/        │   │     │ (gh-account-1, ...) │
-│ Codex /      │────►│  completions     │───┤     └─────────────────────┘
-│ openclaw /   │     │ /v1/responses    │   │     ┌─────────────────────┐
-│ OpenAI 客户端│     │                  │   └────►│ Azure OpenAI        │
-└──────────────┘     │ • token 自愈     │         │ (eastus2 / sweden / │
-                     │ • 图片自动压缩   │         │  ...)               │
-                     │ • HTML 错误转 JSON│        └─────────────────────┘
-                     │ • SSE 心跳       │
-                     │ /metrics /health │
-                     └──────────────────┘
-
-模型路由：
-  claude-*           → Databricks（不 fallback）
-  其他（gpt-* / etc.）→ Copilot 优先；失败 / 不支持 → Azure fallback
-```
-
-## 环境变量
-
-| 变量 | 描述 | 默认值 |
-|------|------|--------|
-| `CONFIG_PATH` | 配置文件路径 | `config.yaml` |
-| `LOG_FORMAT` | 日志格式（`json` / `text`） | `text` |
-| `LOG_LEVEL` | 日志级别 | `INFO` |
-| `STREAM_HEARTBEAT_INTERVAL` | streaming 等待上游响应头及 chunk 空闲期间的 SSE 心跳间隔（秒） | `15` |
-| `OPENAI_CHAT_TO_RESPONSES_MODELS` | 逗号分隔；这些模型从 `/v1/chat/completions` buffered 转到 `/v1/responses`。遇到 GHCP `model X is not accessible via the /chat/completions endpoint` 报错时把 X 追加到这里即可 | `gpt-5.5,gpt-5-codex,gpt-5.6-sol,gpt-5.6-luna,gpt-5.6-terra` |
-| `COPILOT_REFRESH_INTERVAL` | GHCP session token 后台刷新扫描间隔（秒） | `300` |
-| `COPILOT_REFRESH_THRESHOLD` | session token 剩余 ≤ 此秒数时主动刷新 | `600` |
-| `COPILOT_POOL_MAX_CONNECTIONS` | Copilot 共享 httpx client 的 `max_connections` | `500` |
-| `COPILOT_POOL_MAX_KEEPALIVE` | Copilot 共享 httpx client 的 `max_keepalive_connections` | `200` |
-| `COPILOT_POOL_KEEPALIVE_EXPIRY` | httpx keepalive 过期时间（秒）。90 比默认的 30 更省 reconnect，与 Copilot CDN 侧的 idle 容忍度对齐 | `90` |
-| `COPILOT_POOL_ACQUIRE_TIMEOUT` | 从连接池获取连接的 `timeout.pool`（秒）。20 让 upstream_stall 快速返回给客户端，允许 Codex 自己 retry；恢复旧行为设 `60` | `20` |
-| `COPILOT_POOL_READ_TIMEOUT` | 每连接 read timeout（秒）。默认无上限；设 `None`/`0`/空 = 无上限（推荐，长 thinking 不误伤），设正数则强制封顶 | *(none)* |
-| `COPILOT_HTTP2` | 启用 HTTP/2 到 Copilot 上游。一条 TCP 连接承载多路 stream，大幅降低"新建连接"压力；需要 `pip install h2`。启动时会 log 三种状态之一：`HTTP/2 negotiation enabled (h2 pkg X)` / `COPILOT_HTTP2=true but h2 package NOT installed` (ERROR，fallback 到 HTTP/1.1) / `HTTP/1.1 (h2 pkg available/not installed)`；运行时看 `/stats` 里 `github_copilot.pool.last_negotiated_http_version` 或 `/metrics` 的 `copilot_upstream_http_version{version="HTTP/2"}=1` 确认上游 CDN 真的接受了 h2 | `false` |
-| `COPILOT_UPSTREAM_PROBE_TIMEOUT` | PoolTimeout 触发时对上游做 DNS+TCP 探针的每步超时（秒），结果打进日志与 SSE error 尾部 | `3` |
-| `COPILOT_UPSTREAM_PROBE_CACHE_TTL` | 探针结果缓存 TTL（秒），防止密集失败风暴 | `5` |
-| `COPILOT_EDITOR_VERSION` | 请求头 `Editor-Version` 值。默认 `vscode/1.104.0`（2025 stable 中期），比 2024-11 的 1.95.3 更不容易被 Cloudflare bot management 标为 legacy client；官方发新稳定版时可自行滚动 | `vscode/1.104.0` |
-| `COPILOT_EDITOR_PLUGIN_VERSION` | 请求头 `Editor-Plugin-Version` 值 | `copilot-chat/0.30.0` |
-| `COPILOT_USER_AGENT` | 请求头 `User-Agent` 值 | `GitHubCopilotChat/0.30.0` |
-| `COPILOT_HTML_SOFT_COOLDOWN` | 上游返回 HTML challenge/错误页时的软熔断窗口秒数。命中的 endpoint 在窗口内被 `_select_endpoint` 优先跳过；0 = 关闭该功能。不动 `total_errors` 也不触发硬熔断，比 `circuit_breaker_timeout` (60s+) 更适合 CDN 抖动场景 | `30` |
-| `COPILOT_STREAM_HIGH_WATERMARK` | 全部 Copilot endpoint 合计 active requests 的连续高水位阈值（共享连接池 500 的 80%） | `400` |
-| `COPILOT_STREAM_OVERLOAD_GRACE` | 高水位持续多久后才启用异常连接兜底回收（秒） | `30` |
-| `COPILOT_STREAM_DISCONNECT_GRACE` | 下游断开持续多久后才强制回收（秒） | `15` |
-| `COPILOT_STREAM_MONITOR_INTERVAL` | Copilot 连接监控采样间隔（秒） | `5` |
-| `ANTHROPIC_BASE_URL` | Claude Code 指向代理地址 | - |
-| `ANTHROPIC_API_KEY` | 与 config.yaml 中 api_key 一致 | - |
-| `OPENAI_API_KEY` | Codex / OpenAI 客户端用，与 api_key 一致 | - |
-| `AZURE_KEY_*` | Azure OpenAI API 密钥 | - |
-| `GITHUB_COPILOT_TOKEN_*` | GHCP long-lived OAuth token（K8s Secret 注入） | - |
-| `MYSQL_PASSWORD` | MySQL 密码（如使用 MySQL 存储） | - |
-
-配置文件中的 token/api_key/password 支持环境变量语法：`${ENV_VAR_NAME}`
-
-## 生产部署 (AKS / K8s)
-
-完整的 Kubernetes / AKS 部署清单和 Token rotation 流程见 **[`docs/AKS.md`](docs/AKS.md)**。
-
-要点速览：
-
-- `deploy/k8s/` 已经准备好可直接 `kubectl apply -k` 的 Kustomize 清单（Deployment / Service / ConfigMap / PVC + secret 示例）
-- **Token rotation 零重启**：把 device-flow 生成的 `copilot-auth-<name>.json` 作为 K8s Secret 挂到 `/home/app/.config/databricks-claude-lb/`；rotate Secret 后 kubelet 自动同步（约 1 min）+ LB 后台刷新自动 pick up；要立刻生效就调一次 `POST /admin/copilot/reload`
-- **liveness / readiness 已分离**：`/health/live` 仅查进程，`/health/ready` 查依赖（至少 1 个 ADB endpoint 可用 + 至少 1 个 Copilot endpoint token 有效）
-- **Prometheus / Azure Monitor managed Prometheus**：`/metrics` 端点 + `prometheus.io/scrape: "true"` 注解已配
-- **JSON 日志**：`LOG_FORMAT=json` 让 Azure Log Analytics 可直接 KQL 解析
-
-故障排查见 **[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)**：含 macOS 系统代理拦截 localhost、Claude Code 32MB 客户端限制、Databricks 4MB 上限、GHCP 模型 API 约束等常见坑。
-
-## 前置条件
-
-- Python 3.10+
-- 至少一个启用了 Claude 模型的 Databricks workspace
-- Databricks Personal Access Token
-- （可选）Azure OpenAI 资源及 API Key
-- （可选）MySQL 8.x（如使用 MySQL 存储后端）
-
-## 常见问题
-
-**Q: 为什么三个端点的请求数不均衡？**
-
-A: `least_requests` 策略基于当前活跃请求数分配，而非总请求数。处理速度快的端点会接收更多请求，这是合理的负载均衡行为。
-
-**Q: 熔断器触发后如何恢复？**
-
-A: 等待 `circuit_breaker_timeout` 秒后自动恢复，或调用 `POST /reset` 手动重置。
-
-**Q: 支持哪些 Claude 模型？**
-
-A: 支持 Opus 4.5/4.6/4.7、Sonnet 4.5/4.6、Haiku 4.5。默认映射到各系列最新版本（Opus → 4.7，Sonnet → 4.6）。
-
-**Q: Prompt caching 是否生效？**
-
-A: 是的。代理会保留 `cache_control: {"type": "ephemeral"}`，仅 strip 掉 Databricks 不支持的额外字段（如 `scope`），因此 prompt caching 正常工作。
-
-**Q: 用量数据在服务重启后会丢失吗？**
-
-A: 不会。用量数据按天持久化到 JSON 文件或 MySQL，重启时自动恢复当天数据；Dashboard 的 KPI Est. Cost 和 Anthropic Models 表也基于该恢复值，不会因重启回零。
-
-**Q: 如何切换到 MySQL 存储？**
-
-A: 安装 `pip install aiomysql`，然后在 config.yaml 中配置 `usage_storage.type: mysql` 及数据库连接信息。
-
-**Q: 偶尔报 `API Error: The socket connection was closed unexpectedly` 怎么办？**
-
-A: 已在 v 最新版修复。代理现在会：
-1. 捕获 httpx 的 `RemoteProtocolError`/`ReadError`/`WriteError` 等上游中断异常并触发重试（未发送 `message_start` 前切换端点）
-2. 已向客户端 yield 过 `message_start` 后若上游失败，补发合法的 `message_stop` + `error` 事件，让 Anthropic SDK 正常结束流而不是看到 socket 被断
-3. 等待上游响应头及流式响应空闲期间每 15s 发送 `: keep-alive\n\n` SSE 注释心跳，防止 Cloudflare / ingress / NAT / 反代因空闲关闭连接
-4. httpx `read` 超时改为 `None`（流式请求由 chunk 节拍保证），配合 uvicorn `timeout_keep_alive=600`，可承受 >5 分钟的长 thinking 响应
-5. `response.aclose()` 在 `finally` 分支执行，避免连接池被半开连接占满
-6. Copilot SSE 使用 exactly-once request lease；即使 ASGI 向已断开的客户端发送 chunk 失败，也会关闭 upstream response、取消 pump 并归还 active slot
-7. Copilot 独立连接池为 `500/200`（总连接/keepalive），`PoolTimeout` 仅表示本地容量压力，不再计作 upstream endpoint 故障或触发熔断
-8. `/metrics` 暴露 active/oldest/upstream-idle、PoolTimeout、断开检测和强制回收计数；高水位持续后只回收已确认断开的连接，**不会按总时长或 upstream idle 杀掉长 thinking**
-
-如果更新后仍有复现，检查日志中是否有 `Stream network error on ...: RemoteProtocolError/ReadError` 字样，对应端点可能需要检查网络或熔断阈值。
+UI 本地预览使用 `python tests/dashboard_preview.py`，全部数据为合成 fixture，不调用模型或生产数据库。模块职责、隔离 MySQL 与发布工具测试见 [开发指南](docs/DEVELOPMENT.md)。
 
 ## License
 
