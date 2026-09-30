@@ -25,6 +25,20 @@ def catalog_data(**overrides):
 
 
 class CapabilityTests(unittest.TestCase):
+    def test_enforcement_does_not_mistake_plain_text_or_schema_examples_for_features(self):
+        from model_capabilities import evaluate_budget
+        catalog = self.make(features={'tools': True, 'images': False, 'structured_output': False, 'opaque_state': False})
+        payloads = [
+            {'input': 'synthetic', 'text': {'format': {'type': 'text'}}},
+            {'input': 'synthetic', 'tools': [{'type': 'function', 'name': 'describe', 'parameters': {
+                'type': 'object', 'properties': {'encrypted_content': {'type': 'string'}},
+                'examples': [{'type': 'input_image', 'image_url': 'https://fixture.invalid/example'}]}}]}]
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                result = evaluate_budget(catalog, 'copilot', 'responses', 'synthetic-model', payload, mode='enforce')
+                self.assertEqual(result['image_count'], 0)
+                self.assertNotIn('opaque_state', result['unknown_components'])
+
     def test_shipped_example_has_no_fabricated_verified_limits(self):
         from model_capabilities import CapabilityCatalog
         document = json.loads((Path(__file__).parents[1] / 'model-capabilities.example.json').read_text())

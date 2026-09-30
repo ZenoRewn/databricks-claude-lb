@@ -134,34 +134,40 @@ def estimate_payload(payload):
     excess depth/node count yields a partial estimate rather than a guessed total.
     """
     total, images, visited, unknown = 2, 0, 0, set()
-    roots = ((key, value) for key, value in payload.items() if key in SEMANTIC_FIELDS) if isinstance(payload, dict) else iter(())
+    definitions = {'tools', 'response_format', 'text', 'output_config'}
+    def children(value, definition):
+        for key, item in value.items() if isinstance(value, dict) else enumerate(value):
+            yield key, item, definition
+    roots = ((key, value, key in definitions) for key, value in payload.items() if key in SEMANTIC_FIELDS) if isinstance(payload, dict) else iter(())
     stack = [iter(roots)]
     while stack:
         try:
-            key, value = next(stack[-1])
+            key, value, definition = next(stack[-1])
         except StopIteration:
             stack.pop(); continue
         visited += 1
         if visited > 100000 or len(stack) > 128:
             unknown.add('traversal_limit'); break
-        if key in ('encrypted_content',):
+        if not definition and key in ('encrypted_content',):
             unknown.add('opaque_state'); continue
-        if key in ('previous_response_id', 'conversation', 'conversation_id') and value:
+        if not definition and key in ('previous_response_id', 'conversation', 'conversation_id') and value:
             unknown.add('prior_state'); continue
         total += _utf8_size(key) + 4 if isinstance(key, str) else 1
         if isinstance(value, dict):
             kind = value.get('type')
-            if isinstance(kind, str) and kind in ('image', 'image_url', 'input_image'):
+            if not definition and isinstance(kind, str) and kind in ('image', 'image_url', 'input_image'):
                 images += 1; unknown.add('images'); continue
-            if isinstance(kind, str) and kind in ('file', 'input_file', 'input_audio', 'audio'):
+            if not definition and isinstance(kind, str) and kind in ('file', 'input_file', 'input_audio', 'audio'):
                 unknown.add('files' if kind in ('file', 'input_file') else 'audio'); continue
+            if not definition and kind == 'item_reference':
+                unknown.add('prior_state'); continue
             total += 2
-            stack.append(iter(value.items()))
+            stack.append(children(value, definition))
         elif isinstance(value, list):
             total += 2
-            stack.append(iter(enumerate(value)))
+            stack.append(children(value, definition))
         elif isinstance(value, str):
-            if value.startswith('data:image/'):
+            if not definition and value.startswith('data:image/'):
                 images += 1; unknown.add('images')
             else:
                 total += _utf8_size(value) + 2
@@ -185,6 +191,32 @@ def output_budget(payload, api_type):
     return None
 
 
+def requested_features(payload):
+    """Inspect protocol positions, never treat schema examples as live input."""
+    images = False
+    opaque = any(bool(payload.get(key)) for key in ('previous_response_id', 'conversation', 'conversation_id'))
+    roots = [payload.get(key) for key in ('messages', 'input') if isinstance(payload.get(key), list)]
+    stack, visited = [iter(items) for items in roots], 0
+    while stack and visited < 100000:
+        try:
+            item = next(stack[-1])
+        except StopIteration:
+            stack.pop(); continue
+        visited += 1
+        if not isinstance(item, dict):
+            continue
+        kind = item.get('type')
+        if isinstance(kind, str):
+            images = images or kind in ('image', 'image_url', 'input_image')
+            opaque = opaque or kind == 'item_reference' or kind == 'reasoning' and bool(item.get('encrypted_content'))
+        if len(stack) < 128 and isinstance(item.get('content'), list):
+            stack.append(iter(item['content']))
+    formats = [payload.get('response_format')]
+    formats.extend(payload[key].get('format') for key in ('text', 'output_config') if isinstance(payload.get(key), dict))
+    return {'tools': bool(payload.get('tools')), 'images': images, 'opaque_state': bool(opaque),
+            'structured_output': any(isinstance(fmt, dict) and fmt.get('type') in ('json_schema', 'json_object') for fmt in formats)}
+
+
 def evaluate_budget(catalog, provider, api_type, model, payload, *, endpoint_alias=None, mode='observe'):
     if mode not in ('off', 'observe', 'enforce'):
         raise ValueError('Invalid context budget mode')
@@ -200,11 +232,7 @@ def evaluate_budget(catalog, provider, api_type, model, payload, *, endpoint_ali
               'reserved_output_tokens': reserved, 'input_limit': limits['input_tokens'],
               'context_limit': limits['context_tokens'], 'output_limit': limits['output_tokens']}
     if mode == 'enforce' and verified:
-        text_config = payload.get('text') if isinstance(payload.get('text'), dict) else {}
-        output_config = payload.get('output_config') if isinstance(payload.get('output_config'), dict) else {}
-        present = {'tools': bool(payload.get('tools')), 'images': estimate['image_count'] > 0,
-                   'opaque_state': 'opaque_state' in estimate['unknown_components'] or 'prior_state' in estimate['unknown_components'],
-                   'structured_output': bool(payload.get('response_format') or text_config.get('format') or output_config.get('format'))}
+        present = requested_features(payload)
         unsupported = [name for name in FEATURES if present[name] and capability['features'][name] is False]
         output_over = reserved is not None and limits['output_tokens'] is not None and reserved > limits['output_tokens']
         if unsupported or output_over:
