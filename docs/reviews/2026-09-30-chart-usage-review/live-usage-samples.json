@@ -1,0 +1,60 @@
+{
+  "author": "Zeno Ren",
+  "scope": "three read-only v3 scrapes from the same Pod and container lifecycle; not a supplier billing reconciliation",
+  "container_started_at_utc": "2026-09-30T13:04:06Z",
+  "container_restart_count": 0,
+  "image_digest": "sha256:3389f5ea25e03c4170d5b8243b38d98fddbb7057b455868b521823a8e926f42c",
+  "source_revision": "1d75685655f672177374cf3327cd16c4bcffe2db",
+  "live_usage_store_sha256": "fea36b5b6ad69a42b6aaae197101ee7bc904aa153776714faf12e9677d127efa",
+  "host_usage_store_hash_matches": true,
+  "samples": [
+    {
+      "observed_at_utc": "2026-09-30T14:52:44.190260+00:00",
+      "accepted_events_total": 262,
+      "persisted_events_total": 262,
+      "pending_events": 0,
+      "oldest_pending_age_seconds": 0,
+      "flush_failures_total": 3,
+      "flush_successes_total": 135,
+      "rejected_events_total": 0,
+      "backend_ready": 1,
+      "last_success_timestamp_seconds": 1790779960.747405,
+      "inflight_batch": 0,
+      "pending_groups": 0,
+      "volatile_buffer": 1
+    },
+    {
+      "observed_at_utc": "2026-09-30T14:54:05.986274+00:00",
+      "accepted_events_total": 269,
+      "persisted_events_total": 268,
+      "pending_events": 1,
+      "oldest_pending_age_seconds": 2.3110954761505127,
+      "flush_failures_total": 3,
+      "flush_successes_total": 137,
+      "rejected_events_total": 0,
+      "backend_ready": 1,
+      "last_success_timestamp_seconds": 1790780020.7833347,
+      "inflight_batch": 0,
+      "pending_groups": 0,
+      "volatile_buffer": 1
+    },
+    {
+      "observed_at_utc": "2026-09-30T14:56:36.406574+00:00",
+      "accepted_events_total": 280,
+      "persisted_events_total": 279,
+      "pending_events": 1,
+      "oldest_pending_age_seconds": 2.090965509414673,
+      "flush_failures_total": 3,
+      "flush_successes_total": 142,
+      "rejected_events_total": 0,
+      "backend_ready": 1,
+      "last_success_timestamp_seconds": 1790780170.8666422,
+      "inflight_batch": 0,
+      "pending_groups": 0,
+      "volatile_buffer": 1
+    }
+  ],
+  "pod_uid_sha256": "97d13cb2ed59f3957de923532239fb0f853dbdb05acee45df506c5a428aec9f5",
+  "container_name": "claude-lb",
+  "lifecycle_binding": "All three reads target the same named Pod; its observed UID is hashed here, with raw identity retained privately."
+}

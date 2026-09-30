@@ -1,0 +1,20 @@
+{
+  "author": "Zeno Ren",
+  "scope": "synthetic fixture only",
+  "viewport": "1280x960 matching the prior desktop baseline",
+  "visual_checks": [
+    "light and dark Token doughnut and latency bars",
+    "theme switch",
+    "dark history token and cost series"
+  ],
+  "screenshots": {
+    "dashboard-light.jpg": "0324888fc31c9a3d19880f5dd9fbd15f6bedb9ca20f57c2bb1c2528d353058bc",
+    "dashboard-dark.jpg": "79cd1c1592ab36e5efffbedcca9867a387cd46c7c15425d95eb8dc34de04bc46"
+  },
+  "dashboard_sha256": "c83f4905f0d9101e0746279b8b979cd0057277d7868d5b4afdcd365859706df6",
+  "relative_file_links_checked": 40,
+  "node_suites": [
+    "test_dashboard_ui.cjs passed",
+    "test_copilot_pricing_ui.cjs passed"
+  ]
+}

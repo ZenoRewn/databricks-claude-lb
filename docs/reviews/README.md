@@ -6,6 +6,7 @@ Author: Zeno Ren
 
 | 日期 | 范围 | 入口 |
 |---|---|---|
+| 2026-09-30 | 图表明亮配色与 usage 告警只读评估 | [现场证据与建议](2026-09-30-chart-usage-review/ASSESSMENT.md) |
 | 2026-09-30 | Dashboard、运行版本与仓库整理 | [本轮记录](2026-09-30-dashboard/REPORT.md) |
 | 2026-09-30 | AKS 生产发布 | [部署回执](2026-09-30-aks-release/REPORT.md) |
 | 2026-09-30 | 发布镜像与源码注解一致性 | [工具修复](2026-09-30-release-source-identity/REPORT.md) |
