@@ -6,7 +6,29 @@ import httpx
 
 REASONS = ('none', 'context_window_exceeded', 'invalid_input', 'rate_limited',
            'authentication', 'upstream_unavailable', 'invalid_protocol',
-           'upstream_failure', 'output_limit', 'unknown')
+           'upstream_failure', 'output_limit', 'unknown', 'transport_protocol_error',
+           'startup_timeout', 'read_timeout', 'write_timeout', 'connection_error',
+           'pool_timeout', 'upstream_truncated', 'request_deadline_exceeded',
+           'client_disconnected', 'cancelled', 'local_resource_limit',
+           'local_observer_error', 'internal_error')
+
+
+def exception_reason(exc):
+    # Classification is diagnostic only; it never authorizes POST replay.
+    if type(exc).__name__ == 'UpstreamStartupTimeout':
+        return 'startup_timeout'
+    for cls, reason in ((httpx.PoolTimeout, 'pool_timeout'),
+                        (httpx.RemoteProtocolError, 'transport_protocol_error'),
+                        (httpx.LocalProtocolError, 'invalid_protocol'),
+                        (httpx.ReadTimeout, 'read_timeout'),
+                        (httpx.WriteTimeout, 'write_timeout'),
+                        (httpx.ConnectTimeout, 'connection_error'),
+                        (httpx.ConnectError, 'connection_error'),
+                        (httpx.ReadError, 'transport_protocol_error'),
+                        (httpx.WriteError, 'transport_protocol_error')):
+        if isinstance(exc, cls):
+            return reason
+    return 'internal_error'
 
 
 def decode_json_response(response):

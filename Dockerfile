@@ -25,7 +25,7 @@ FROM ${DEPENDENCY_STAGE} AS runtime
 #   usage_store.py  —— 顶层 import（main.py:1888），无保护；缺失 → ModuleNotFoundError，启动即崩
 #   otel_setup.py   —— lifespan 内 import + except Exception 兜底；缺失 tracing 静默失能
 #   dashboard.html  —— import 时按 __file__ 同级路径读取，except OSError 降级空壳
-COPY main.py effort_compat.py request_telemetry.py request_budget.py admission.py gateway_lifecycle.py upstream_body.py usage_store.py otel_setup.py response_semantics.py cleanup_observability.py copilot_pricing.py release_probe.py dashboard.html ./
+COPY main.py effort_compat.py request_telemetry.py safe_diagnostics.py request_budget.py admission.py gateway_lifecycle.py upstream_body.py usage_store.py otel_setup.py response_semantics.py cleanup_observability.py copilot_pricing.py release_probe.py dashboard.html ./
 
 ARG SOURCE_REVISION=working-tree
 RUN SOURCE_REVISION="$SOURCE_REVISION" python -c 'import os,json,pathlib,hashlib,importlib.metadata as m,subprocess; pathlib.Path("/app/build-info.json").write_text(json.dumps({"source_revision":os.environ["SOURCE_REVISION"],"files":{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in pathlib.Path("/app").iterdir() if p.is_file()},"packages":{d.metadata["Name"]:d.version for d in m.distributions()},"os_packages":subprocess.check_output(["dpkg-query","-W"],text=True)},sort_keys=True))'

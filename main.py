@@ -4,7 +4,10 @@ from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_
                                note_admission, note_admission_end, note_generation,
                                note_json_result, note_candidate_selection, note_retry_decision,
                                current_request_id as telemetry_request_id,
-                               set_parameter_policy, note_parameter_drops)
+                               set_parameter_policy, note_parameter_drops,
+                               log_context, note_request_context, note_exception,
+                               note_local_terminal, note_failure, log_event)
+from safe_diagnostics import DiagnosticFilter, DiagnosticStreamHandler, default_handler
 from upstream_body import (read_error_body, render_metrics as error_body_metrics,
                            MAX_BYTES as UPSTREAM_ERROR_BODY_MAX_BYTES,
                            TIMEOUT as UPSTREAM_ERROR_BODY_TIMEOUT_SECONDS)
@@ -278,19 +281,25 @@ def _setup_logging():
     level_name = os.getenv("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
     fmt = os.getenv("LOG_FORMAT", "text").lower()
-    handler = logging.StreamHandler()
+    handler = DiagnosticStreamHandler()
     if fmt == "json":
         handler.setFormatter(_JsonLogFormatter())
     else:
         handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
     # 用 force=True 接管 uvicorn 默认配置
-    logging.basicConfig(level=level, handlers=[handler], force=True)
+    logging.basicConfig(level=level, handlers=[default_handler(handler)], force=True)
+    for name in {'main', __name__}:
+        current = logging.getLogger(name)
+        if not any(isinstance(f, DiagnosticFilter) for f in current.filters):
+            current.addFilter(DiagnosticFilter(log_context))
     # uvicorn / httpx 的 logger 也走同一 handler
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "httpx"):
         lg = logging.getLogger(name)
         lg.handlers = []
         lg.propagate = True
         lg.setLevel(level)
+        if not any(isinstance(f, DiagnosticFilter) for f in lg.filters):
+            lg.addFilter(DiagnosticFilter(log_context))
 
 
 _setup_logging()
@@ -639,6 +648,7 @@ def _sse_terminal_error(api_type: str, code: str, message: str,
     ``error.metadata`` as structured backup for clients that DO read it (curl,
     OpenAI Python SDK, some enterprise wrappers).
     """
+    note_local_terminal(code)
     message = _apply_request_id_prefix(message, metadata)
     error_body: dict = {"code": code, "message": message,
                         "retryable": False, "execution_certainty": "unknown"}
@@ -1198,7 +1208,7 @@ class _SSEObservation:
             error = data.get("error", data)
         if isinstance(error, dict):
             reason = failure_reason({'error':error})
-            note_reason(reason)
+            note_failure(reason, origin='upstream_stream')
             # Narrow request-local evidence only. Auth/quota/overload/server and
             # unknown EOF/errors remain conservative endpoint failures.
             self.neutral = self.neutral or reason in ('context_window_exceeded','invalid_input','output_limit')
@@ -2838,7 +2848,7 @@ class ClaudeProxy:
                         ids = error_body["error"].get("upstream_ids") or {}
                         _note_upstream_html(self, endpoint, "Databricks", "messages",
                                             e.response.status_code, upstream_ids=ids)
-                    logger.error(f"Request failed with {e.response.status_code}: {json.dumps(error_body, ensure_ascii=False)[:500]}")
+                    logger.error("Upstream HTTP request rejected (%s)", e.response.status_code)
                     _account_terminal_http_error(self,endpoint,model,start_time,'messages',e.response)
                     raise HTTPException(status_code=e.response.status_code, detail=error_body,
                                         headers=_http_error_headers(e.response))
@@ -2879,7 +2889,7 @@ class ClaudeProxy:
     async def _normal_request(self, endpoint, url, body, headers, model: str = "unknown", start_time: float = 0,
                                 request_id: Optional[str] = None) -> JSONResponse:
         """非流式请求 - 直接透传"""
-        response = await inference_call(self.client.post(url, json=body, headers=headers), 'databricks', 'messages')
+        response = await inference_call(self.client.post(url, json=body, headers=headers), 'databricks', 'messages', model=model, endpoint=endpoint.name)
         response.raise_for_status()
 
         return _buffered_result(self,endpoint,response,model,'messages',start_time,effort_response_headers(body))
@@ -2931,7 +2941,7 @@ class ClaudeProxy:
                 try:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
                     async with aclosing(_await_with_heartbeat(
-                        inference_call(proxy_self.client.send(req, stream=True), 'databricks', 'messages'), HEARTBEAT
+                        inference_call(proxy_self.client.send(req, stream=True), 'databricks', 'messages', model=model, endpoint=current_endpoint.name), HEARTBEAT
                     )) as pending_headers:
                         async for kind, payload in pending_headers:
                             if kind == "heartbeat":
@@ -2948,10 +2958,10 @@ class ClaudeProxy:
                         try:
                             error_json = json.loads(error_body)
                             error_msg = error_json.get('message', 'Request failed')
-                            logger.error(f"Stream request failed ({response.status_code}): {error_json}")
+                            logger.error("Upstream stream request rejected (%s)", response.status_code)
                         except Exception:
                             error_msg = error_body.decode('utf-8') if isinstance(error_body, bytes) else str(error_body)
-                            logger.error(f"Stream request failed ({response.status_code}): {error_msg}")
+                            logger.error("Upstream stream request rejected (%s)", response.status_code)
 
                         # P1.3: 用 _build_upstream_error_detail 复用 HTML 识别通道，然后
                         # 只把 upstream_html_error 触发软熔断（不改 event: error 帧的 shape）
@@ -3018,6 +3028,7 @@ class ClaudeProxy:
                     return
 
                 except (_LocalStreamLimit, _LocalObserverError) as e:
+                    note_local_terminal(e.code)
                     await end_current_request(success=False, is_client_error=True)
                     _msg = _apply_request_id_prefix(str(e), {"request_id": request_id} if request_id else None)
                     payload = {"type": "error", "error": {"code": e.code, "type": "local_resource_limit" if isinstance(e, _LocalStreamLimit) else "local_observer_error", "message": _msg,
@@ -3028,8 +3039,10 @@ class ClaudeProxy:
                 except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
                         httpx.ConnectError, httpx.RemoteProtocolError,
                         httpx.ReadError, httpx.WriteError) as e:
+                    note_exception(e)
                     # 网络超时/连接错误/上游中断 - 触发熔断, 可重试
-                    error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
+                    note_exception(e)
+                    error_detail = f"{type(e).__name__}: Upstream request could not complete; execution may have occurred."
                     logger.error(f"Stream network error on {current_endpoint.name}: {error_detail}")
                     await end_current_request(success=False, is_client_error=False)
 
@@ -3054,8 +3067,9 @@ class ClaudeProxy:
 
                 except Exception as e:
                     import traceback
-                    error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
-                    logger.error(f"Stream error: {error_detail}\n{traceback.format_exc()}")
+                    note_exception(e)
+                    error_detail = f"{type(e).__name__}: Upstream request could not complete; execution may have occurred."
+                    logger.error("Stream failed (%s)", type(e).__name__)
                     await end_current_request(success=False, is_client_error=isinstance(e, httpx.PoolTimeout))
                     _detail = _apply_request_id_prefix(error_detail, {"request_id": request_id} if request_id else None)
                     yield _sse_terminal_error('messages','upstream_stream_error',_detail)
@@ -3292,7 +3306,7 @@ class AzureOpenAIProxy:
 
     async def _normal_request(self, endpoint, url, body, headers, model: str, api_type: str, start_time: float) -> JSONResponse:
         """非流式请求；request lease 由调用方 exactly-once 结算。"""
-        response = await inference_call(self.client.post(url, json=body, headers=headers), 'azure_openai', api_type)
+        response = await inference_call(self.client.post(url, json=body, headers=headers), 'azure_openai', api_type, model=model, endpoint=endpoint.name)
         response.raise_for_status()
 
         return _buffered_result(self,endpoint,response,model,api_type,start_time)
@@ -3343,7 +3357,7 @@ class AzureOpenAIProxy:
                 try:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
                     async with aclosing(_await_with_heartbeat(
-                        inference_call(proxy_self.client.send(req, stream=True), 'azure_openai', api_type), HEARTBEAT
+                        inference_call(proxy_self.client.send(req, stream=True), 'azure_openai', api_type, model=model, endpoint=current_endpoint.name), HEARTBEAT
                     )) as pending_headers:
                         async for kind, payload in pending_headers:
                             if kind == "heartbeat":
@@ -3372,8 +3386,7 @@ class AzureOpenAIProxy:
                             _note_upstream_html(proxy_self, current_endpoint, "Azure", api_type,
                                                 response.status_code, upstream_ids=ids)
                         logger.error(
-                            f"Azure stream failed ({response.status_code}, "
-                            f"{'HTML error page' if is_html else 'JSON/text'}): {log_snippet}"
+                            "Azure stream request rejected (%s)", response.status_code
                         )
                         await end_current_request(success=False, is_client_error=is_client_error)
 
@@ -3419,6 +3432,7 @@ class AzureOpenAIProxy:
                     return
 
                 except (_LocalStreamLimit, _LocalObserverError) as e:
+                    note_local_terminal(e.code)
                     await end_current_request(success=False, is_client_error=True)
                     yield _sse_terminal_error(api_type, e.code, str(e))
                     return
@@ -3426,7 +3440,9 @@ class AzureOpenAIProxy:
                 except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
                         httpx.ConnectError, httpx.RemoteProtocolError,
                         httpx.ReadError, httpx.WriteError) as e:
-                    error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
+                    note_exception(e)
+                    note_exception(e)
+                    error_detail = f"{type(e).__name__}: Upstream request could not complete; execution may have occurred."
                     logger.error(f"Azure stream network error on {current_endpoint.name}: {error_detail}")
                     await end_current_request(success=False)
 
@@ -3448,7 +3464,8 @@ class AzureOpenAIProxy:
                     return
 
                 except Exception as e:
-                    error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
+                    note_exception(e)
+                    error_detail = f"{type(e).__name__}: Upstream request could not complete; execution may have occurred."
                     logger.error(f"Azure stream error: {error_detail}")
                     await end_current_request(success=False, is_client_error=isinstance(e, httpx.PoolTimeout))
                     yield _sse_terminal_error(api_type, "upstream_error", error_detail)
@@ -3635,7 +3652,7 @@ def _build_upstream_error_detail(status, body_text, provider, endpoint_name, con
         payload = None
     detail = enrich_error(detail,status=status,payload=payload,headers=upstream_headers,
                           request_id=lb_request_id or telemetry_request_id())
-    note_reason(detail['error']['reason'])
+    note_failure(detail['error']['reason'], origin='upstream_http', status=status)
     return detail
 
 
@@ -5301,6 +5318,7 @@ class CopilotProxy:
                     raise HTTPException(status_code=status, detail=error_body,
                                         headers=_http_error_headers(e.response))
                 except httpx.PoolTimeout as e:
+                    note_exception(e)
                     # Local client saturation is not an upstream endpoint failure.
                     last_error = e
                     self.global_stats.total_errors += 1
@@ -5364,7 +5382,7 @@ class CopilotProxy:
                                recovery: Optional["_OpaqueStateRecovery"] = None) -> JSONResponse:
         if recovery is None:  # 直接调用（测试 / 低层调用者）也要有预算
             recovery = _OpaqueStateRecovery(self, api_type)
-        response = await inference_call(self.client.post(url, json=body, headers=headers), 'copilot', api_type)
+        response = await inference_call(self.client.post(url, json=body, headers=headers), 'copilot', api_type, model=model, endpoint=endpoint.name)
         try:
             self.last_negotiated_http_version = response.http_version
         except Exception:  # noqa: BLE001
@@ -5433,8 +5451,7 @@ class CopilotProxy:
                 ids = upstream_detail.get("error", {}).get("upstream_ids") or {}
                 self._apply_html_cooldown(endpoint, api_type, response.status_code, upstream_ids=ids)
                 logger.error(
-                    f"[Copilot] non-stream HTML error page ({response.status_code}, "
-                    f"content-type={content_type}): {(body_text or '')[:300].replace(chr(10), ' ')}"
+                    "Copilot buffered response is an HTML error (%s)", response.status_code
                 )
                 # HTML challenge / 上游软故障统一按 502 抛，让客户端不误信 200 body。
                 # 保留 upstream_detail 的 error 结构 + upstream_ids 便于 debug。
@@ -5632,7 +5649,7 @@ class CopilotProxy:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
                     body_bytes_size = len(req.content)
                     async with aclosing(_await_with_heartbeat(
-                        inference_call(proxy_self.client.send(req, stream=True), 'copilot', api_type), HEARTBEAT
+                        inference_call(proxy_self.client.send(req, stream=True), 'copilot', api_type, model=model, endpoint=current_endpoint.name), HEARTBEAT
                     )) as pending_headers:
                         async for kind, payload in pending_headers:
                             if kind == "heartbeat":
@@ -5689,8 +5706,7 @@ class CopilotProxy:
                             ids = upstream_detail["error"].get("upstream_ids") or {}
                             proxy_self._apply_html_cooldown(current_endpoint, api_type, response.status_code, upstream_ids=ids)
                         logger.error(
-                            f"[Copilot] stream failed ({response.status_code}, ct={upstream_ct}, "
-                            f"{'HTML error page' if is_html else 'JSON/text'}): {log_snippet}"
+                            "Copilot stream request rejected (%s)", response.status_code
                         )
                         # 上游拒绝本请求携带的 opaque state。两类：item id 归属对不上，
                         # 或 encrypted_content blob 解不开（实测是两级独立校验，见
@@ -5863,6 +5879,7 @@ class CopilotProxy:
                     return
 
                 except (_LocalStreamLimit, _LocalObserverError) as e:
+                    note_local_terminal(e.code)
                     await end_current_request(success=False, is_client_error=True)
                     yield _sse_terminal_error(api_type, e.code, str(e), metadata=_sse_error_metadata())
                     _emit_stream_end("local_resource_limit" if isinstance(e, _LocalStreamLimit) else "local_observer_error",
@@ -5879,6 +5896,7 @@ class CopilotProxy:
                                       reason=str(e)[:200])
                     return
                 except httpx.PoolTimeout as e:
+                    note_exception(e)
                     proxy_self.pool_timeout_total += 1
                     log_msg, sse_msg, pt_fields = await proxy_self._describe_pool_timeout(
                         current_endpoint.name, e,
@@ -5936,6 +5954,7 @@ class CopilotProxy:
                 except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
                         httpx.ConnectError, httpx.RemoteProtocolError,
                         httpx.ReadError, httpx.WriteError) as e:
+                    note_exception(e)
                     is_read_timeout = isinstance(e, httpx.ReadTimeout)
                     if is_read_timeout:
                         # Independent counter so `read=None` regressions become
@@ -5950,7 +5969,7 @@ class CopilotProxy:
                     probe_snapshot = await proxy_self._probe_upstream_connect(current_endpoint)
                     probe_str = proxy_self._format_probe(probe_snapshot)
                     error_detail = (
-                        f"{type(e).__name__}: {str(e) or 'Unknown error'} "
+                        f"{type(e).__name__}: Upstream request could not complete; execution may have occurred. "
                         f"(connection_id={connection_id} chunks_yielded={chunks_yielded_count} "
                         f"first_event={first_event_name} last_event={last_event_name} "
                         f"{probe_str})"
@@ -5967,7 +5986,7 @@ class CopilotProxy:
                             "connection_id": connection_id,
                     **protocol_metrics,
                             "exc_type": type(e).__name__,
-                            "exc_message": str(e),
+                            "error_origin": "transport",
                             "chunks_yielded": chunks_yielded_count,
                             "first_event": first_event_name,
                             "last_event": last_event_name,
@@ -6013,7 +6032,8 @@ class CopilotProxy:
                     return
 
                 except Exception as e:
-                    error_detail = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
+                    note_exception(e)
+                    error_detail = f"{type(e).__name__}: Upstream request could not complete; execution may have occurred."
                     logger.error(f"[Copilot] stream error: {error_detail}")
                     await end_current_request(success=False)
                     yield _sse_terminal_error(api_type, "upstream_error", error_detail,
@@ -6633,6 +6653,7 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
 
+    note_request_context(body.get("model"), stream=body.get("stream", False))
     # 大请求先尝试压缩图片（小请求跳过节省 CPU）
     if body_size > _IMG_COMPRESS_THRESHOLD:
         try:
@@ -6679,7 +6700,7 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
         )
 
     stream = body.get("stream", False)
-    logger.info(f"[Databricks][{request_id}] Request: model={body.get('model')}, stream={stream}, thinking={body.get('thinking')}, size={body_size/1024:.1f}KB")
+    log_event({'kind': 'lb_request_received', 'request_id': request_id, 'body_size_bytes': body_size, 'stream': stream})
 
     return await proxy.proxy_request(body, stream=stream, request_id=request_id)
 
@@ -7228,24 +7249,11 @@ def _request_auth_header_names(request: Request) -> list:
 
 
 def _log_openai_request(request_id: str, route: str, request: Request, body: dict, body_size: int, stream: bool):
-    auth_headers = _request_auth_header_names(request)
-    user_agent = (request.headers.get("user-agent") or "")[:160]
-    content_type = request.headers.get("content-type") or ""
-    logger.info(
-        f"[OpenAICompat][{request_id}] {route} model={body.get('model')} stream={stream} "
-        f"body_size={body_size} auth_headers={auth_headers} content_type={content_type} "
-        f"user_agent={user_agent}",
-        extra={
-            "request_id": request_id,
-            "route": route,
-            "model": body.get("model"),
-            "stream": stream,
-            "body_size_bytes": body_size,
-            "auth_headers_present": auth_headers,
-            "content_type": content_type,
-            "user_agent": user_agent,
-        },
-    )
+    ua = (request.headers.get('user-agent') or '')[:256].lower()
+    client_class = next((name for name in ('openclaw', 'codex', 'claude', 'openai', 'curl') if name in ua), 'other')
+    # Client class is a hint, never a trusted tenant or authorization claim.
+    log_event({'kind': 'lb_request_received', 'request_id': request_id, 'route': route,
+               'body_size_bytes': body_size, 'stream': stream, 'client_class': client_class})
 
 
 async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Optional[str] = None,
@@ -7537,6 +7545,7 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
     stream = body.get("stream", False)
+    note_request_context(body.get("model"), stream=stream)
     _log_openai_request(request_id, "/v1/responses", request, body, len(body_bytes), stream)
     if len(body_bytes) > _IMG_COMPRESS_THRESHOLD:
         try:
@@ -7608,6 +7617,7 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
     stream = body.get("stream", False)
+    note_request_context(body.get("model"), stream=stream)
     _log_openai_request(request_id, "/v1/chat/completions", request, body, len(body_bytes), stream)
     if len(body_bytes) > _IMG_COMPRESS_THRESHOLD:
         try:

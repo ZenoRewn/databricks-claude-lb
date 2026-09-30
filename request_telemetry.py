@@ -15,7 +15,8 @@ import time
 import uuid
 from fastapi import HTTPException
 from request_budget import startup_budget, UpstreamStartupTimeout, remaining_seconds
-from response_semantics import REASONS, assess_json
+from response_semantics import REASONS, assess_json, exception_reason, failure_reason
+from safe_diagnostics import safe_fields, safe_identifier, DIAGNOSTIC_DROPS
 
 logger = logging.getLogger('main')
 ROUTES = {'/v1/messages':'messages', '/v1/responses':'responses', '/v1/chat/completions':'chat'}
@@ -36,10 +37,11 @@ def safe_id(value):
 
 def log_event(fields):
     try:
-        logger.info('%s %s', fields['kind'], json.dumps(fields), extra=fields)
+        fields = safe_fields({**log_context(), **fields, 'schema_version': 1})
+        logger.info('%s', fields['kind'], extra=fields)
     except Exception:
         # Observability must never cancel generation or strand an owned response.
-        pass
+        DIAGNOSTIC_DROPS['event_error'] += 1
 
 
 class RequestTelemetry:
@@ -114,6 +116,68 @@ class RequestRecord:
     dropped_parameters: set = field(default_factory=set)
     rejected_parameters: set = field(default_factory=set)
     failure_reason: str = 'none'
+    error_origin: str = 'none'
+    requested_model: str = 'unknown'
+    stream: bool = False
+    active_attempt: dict = field(default_factory=dict)
+    last_error_key: tuple | None = None
+    downstream_headers_sent: bool = False
+    downstream_content_started: bool = False
+
+
+def log_context():
+    record = CURRENT.get()
+    if record is None:
+        return {}
+    return {'lb_request_id': record.request_id, 'api_type': record.api_type,
+            'requested_model': record.requested_model, 'stream': record.stream,
+            'downstream_headers_sent': record.downstream_headers_sent,
+            'downstream_content_started': record.downstream_content_started,
+            **record.active_attempt}
+
+
+def note_request_context(model, *, stream=False):
+    record = CURRENT.get()
+    if record:
+        record.requested_model = safe_identifier(model)
+        record.stream = bool(stream)
+
+
+def note_failure(reason, *, origin='unknown', status=None, exception=None):
+    record = CURRENT.get()
+    if record is None:
+        return
+    note_reason(reason)
+    record.error_origin = origin
+    key = (record.active_attempt.get('upstream_attempt_id'), reason, origin, status)
+    if key == record.last_error_key:
+        return
+    record.last_error_key = key
+    log_event({'kind': 'lb_upstream_error', 'reason': record.failure_reason,
+               'error_origin': origin, 'upstream_http_status': status,
+               'upstream_code_class': record.failure_reason,
+               'exc_type': type(exception).__name__ if exception else None})
+
+
+def note_exception(exc):
+    reason = exception_reason(exc)
+    note_failure(reason, origin='local' if reason == 'internal_error' else 'transport', exception=exc)
+
+
+def note_local_terminal(code):
+    record = CURRENT.get()
+    if record is None:
+        return
+    mapping = {'upstream_truncated': 'upstream_truncated', 'pool_acquire_timeout': 'pool_timeout',
+               'protocol_buffer_limit': 'local_resource_limit', 'local_observer_error': 'local_observer_error',
+               'request_deadline_exceeded': 'request_deadline_exceeded'}
+    reason = mapping.get(code)
+    if reason:
+        note_failure(reason, origin='local' if reason in ('local_resource_limit', 'local_observer_error',
+                                                        'request_deadline_exceeded') else 'transport')
+    elif record.failure_reason == 'none':
+        note_failure('unknown')
+    note_generation('failed')
 
 
 def set_parameter_policy(value):
@@ -182,6 +246,10 @@ def note_generation(outcome):
     record = CURRENT.get()
     if record and outcome in ('completed','failed','error','incomplete'):
         record.generation = 'failed' if outcome == 'error' else outcome
+        if record.generation == 'completed':
+            record.failure_reason = record.error_origin = 'none'
+        elif record.generation == 'failed' and record.failure_reason == 'none':
+            record.failure_reason = 'unknown'
 
 
 def note_reason(reason):
@@ -206,13 +274,19 @@ def note_json_result(payload, api_type):
     return
 
 
-async def inference_call(awaitable, provider, api_type):
+async def inference_call(awaitable, provider, api_type, *, model=None, endpoint=None):
     record = CURRENT.get()
     metrics = record.metrics if record else TELEMETRY
     metrics.sends[(provider,api_type)] += 1
     attempt_id = str(uuid.uuid4())
     if record:
         record.sends += 1
+        record.active_attempt = {'upstream_attempt_id': attempt_id, 'provider': provider,
+                                 'forwarded_model': safe_identifier(model), 'resolved_model': 'unknown',
+                                 'endpoint_alias': safe_identifier(endpoint)}
+        record.last_error_key = None
+    context = log_context()
+    log_event({'kind': 'lb_upstream_send_start', **context})
     started = time.monotonic()
     result = 'transport_error'
     status = None
@@ -227,10 +301,14 @@ async def inference_call(awaitable, provider, api_type):
         raise
     except UpstreamStartupTimeout:
         result = 'startup_timeout'
+        note_failure('startup_timeout', origin='transport')
+        raise
+    except Exception as exc:
+        note_exception(exc)
         raise
     finally:
         metrics.send_results[(provider,api_type,result)] += 1
-        fields={'kind':'lb_upstream_send_end','lb_request_id':record.request_id if record else None,
+        fields={**context,'kind':'lb_upstream_send_end','lb_request_id':record.request_id if record else None,
                 'upstream_attempt_id':attempt_id,'provider':provider,'api_type':api_type,
                 'result':result,'upstream_status':status if type(status) is int else None,
                 'duration_seconds':round(time.monotonic()-started,6)}
@@ -276,6 +354,8 @@ class RequestTelemetryMiddleware:
             except OSError:
                 disconnected=True
                 raise
+            if message['type']=='http.response.start':
+                record.downstream_headers_sent = True
             if message['type']=='http.response.body' and not message.get('more_body',False):
                 body_complete=True
         try:
@@ -307,6 +387,14 @@ class RequestTelemetryMiddleware:
                 outcome='failed'
             else:
                 outcome='unknown'
+            if outcome == 'completed':
+                record.failure_reason = record.error_origin = 'none'
+            elif outcome in ('client_disconnected', 'cancelled', 'internal_error', 'deadline_exceeded'):
+                record.failure_reason = 'request_deadline_exceeded' if outcome == 'deadline_exceeded' else outcome
+                record.error_origin = 'client' if outcome in ('client_disconnected', 'cancelled') else 'local'
+            elif record.failure_reason == 'none':
+                record.failure_reason = failure_reason({}, status) if status and status >= 400 else 'unknown'
+                record.error_origin = 'unknown'
             elapsed=time.monotonic()-record.started
             self.metrics.outcomes[(api_type,outcome)] += 1
             self.metrics.reasons[(api_type,record.failure_reason)] += 1
@@ -315,8 +403,9 @@ class RequestTelemetryMiddleware:
                 if elapsed <= upper:
                     self.metrics.latency_buckets[(api_type,outcome,upper)] += 1
             self.metrics.active[api_type] -= 1
+            context = log_context()
             CURRENT.reset(token)
-            fields={'kind':'lb_request_end','lb_request_id':record.request_id,'api_type':api_type,
+            fields={**context,'kind':'lb_request_end','lb_request_id':record.request_id,'api_type':api_type,
                     'request_id':safe_id(scope.get('state',{}).get('request_id')),
                     'operation_id':operation_id,
                     'source_tenant':scope.get('state',{}).get('lb_source_tenant'),
@@ -326,6 +415,7 @@ class RequestTelemetryMiddleware:
                     'rejected_parameters':sorted(record.rejected_parameters),
                     'outcome':outcome,'http_status':status,'generation_outcome':record.generation,
                     'failure_reason':record.failure_reason,
+                    'error_origin':record.error_origin,
                     'downstream_body_completed':body_complete,'admissions':record.admissions,
                     'upstream_sends':record.sends,'duration_seconds':round(elapsed,6)}
             log_event(fields)
