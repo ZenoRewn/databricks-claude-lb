@@ -12,6 +12,7 @@ RECOVER='lb.zeno.ink/recovery-only'
 SPEC='lb.zeno.ink/controlled-spec-sha256'
 FINALIZER='lb.zeno.ink/observe-termination'
 GATE='lb.zeno.ink/release-gate'
+SOURCE='lb.zeno.ink/source-revision'
 DNS=re.compile(r'[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?')
 SHA=re.compile(r'[a-f0-9]{40}')
 DIGEST=re.compile(r'[^\s@]+@sha256:[a-f0-9]{64}')
@@ -39,6 +40,21 @@ def target_pod_spec(current,plan):
     for key in ('livenessProbe','readinessProbe','startupProbe','lifecycle'):pod['containers'][0][key]=copy.deepcopy(settings[key])
     pod['terminationGracePeriodSeconds']=settings['terminationGracePeriodSeconds']
     return pod
+
+
+def source_annotations(current,revision):
+    annotations=copy.deepcopy(current['spec']['template'].get('metadata',{}).get('annotations') or {})
+    if revision is None:annotations.pop(SOURCE,None)
+    else:annotations[SOURCE]=revision
+    return annotations
+
+
+def verify_target_template(deployment,pod_spec,annotations):
+    if not isinstance(deployment,dict):raise ValueError('deployment_readback_missing')
+    template=deployment.get('spec',{}).get('template',{})
+    if (template.get('spec')!=pod_spec
+            or (template.get('metadata',{}).get('annotations') or {})!=annotations):
+        raise ValueError('deployment_template_readback_mismatch')
 
 
 def validate_plan(plan):

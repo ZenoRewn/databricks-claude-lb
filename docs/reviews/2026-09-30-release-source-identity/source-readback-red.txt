@@ -1,0 +1,88 @@
+.......                                                       [100%]
+=================================== FAILURES ===================================
+_ SourceRevisionTests.test_cluster_preflight_rejects_server_rewriting_source_image_or_probes (field='source') _
+tests/release/test_source_revision.py:141: in test_cluster_preflight_rejects_server_rewriting_source_image_or_probes
+    Backend.perform(backend, 'preflight', {})
+operations/release/backend.py:322: in perform
+    if any(h.get('spec',{}).get('scaleTargetRef',{}).get('name')==self.deployment for h in self.api.list('hpa',self.namespace)):
+                                                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1176: in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1180: in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1241: in _execute_mock_call
+    raise effect
+E   RuntimeError: Preflight continued after rewritten dry-run
+_ SourceRevisionTests.test_cluster_preflight_rejects_server_rewriting_source_image_or_probes (field='image') _
+tests/release/test_source_revision.py:141: in test_cluster_preflight_rejects_server_rewriting_source_image_or_probes
+    Backend.perform(backend, 'preflight', {})
+operations/release/backend.py:322: in perform
+    if any(h.get('spec',{}).get('scaleTargetRef',{}).get('name')==self.deployment for h in self.api.list('hpa',self.namespace)):
+                                                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1176: in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1180: in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1241: in _execute_mock_call
+    raise effect
+E   RuntimeError: Preflight continued after rewritten dry-run
+_ SourceRevisionTests.test_cluster_preflight_rejects_server_rewriting_source_image_or_probes (field='probe') _
+tests/release/test_source_revision.py:141: in test_cluster_preflight_rejects_server_rewriting_source_image_or_probes
+    Backend.perform(backend, 'preflight', {})
+operations/release/backend.py:322: in perform
+    if any(h.get('spec',{}).get('scaleTargetRef',{}).get('name')==self.deployment for h in self.api.list('hpa',self.namespace)):
+                                                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1176: in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1180: in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1241: in _execute_mock_call
+    raise effect
+E   RuntimeError: Preflight continued after rewritten dry-run
+_ SourceRevisionTests.test_normal_ack_cannot_silently_rewrite_the_approved_template (field='source') _
+tests/release/test_source_revision.py:103: in test_normal_ack_cannot_silently_rewrite_the_approved_template
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: ValueError not raised
+_ SourceRevisionTests.test_normal_ack_cannot_silently_rewrite_the_approved_template (field='image') _
+tests/release/test_source_revision.py:103: in test_normal_ack_cannot_silently_rewrite_the_approved_template
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: ValueError not raised
+_ SourceRevisionTests.test_normal_ack_cannot_silently_rewrite_the_approved_template (field='probe') _
+tests/release/test_source_revision.py:103: in test_normal_ack_cannot_silently_rewrite_the_approved_template
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: ValueError not raised
+_ SourceRevisionTests.test_plan_rejects_server_rewriting_source_image_or_probes (field='source') _
+tests/release/test_source_revision.py:126: in test_plan_rejects_server_rewriting_source_image_or_probes
+    with patch.object(cli, 'capture', return_value=snapshot), self.assertRaises(ValueError):
+                                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: ValueError not raised
+_ SourceRevisionTests.test_plan_rejects_server_rewriting_source_image_or_probes (field='image') _
+tests/release/test_source_revision.py:126: in test_plan_rejects_server_rewriting_source_image_or_probes
+    with patch.object(cli, 'capture', return_value=snapshot), self.assertRaises(ValueError):
+                                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: ValueError not raised
+_ SourceRevisionTests.test_plan_rejects_server_rewriting_source_image_or_probes (field='probe') _
+tests/release/test_source_revision.py:126: in test_plan_rejects_server_rewriting_source_image_or_probes
+    with patch.object(cli, 'capture', return_value=snapshot), self.assertRaises(ValueError):
+                                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: ValueError not raised
+=========================== short test summary info ============================
+SUBFAILED(field='source') tests/release/test_source_revision.py::SourceRevisionTests::test_cluster_preflight_rejects_server_rewriting_source_image_or_probes
+SUBFAILED(field='image') tests/release/test_source_revision.py::SourceRevisionTests::test_cluster_preflight_rejects_server_rewriting_source_image_or_probes
+SUBFAILED(field='probe') tests/release/test_source_revision.py::SourceRevisionTests::test_cluster_preflight_rejects_server_rewriting_source_image_or_probes
+SUBFAILED(field='source') tests/release/test_source_revision.py::SourceRevisionTests::test_normal_ack_cannot_silently_rewrite_the_approved_template
+SUBFAILED(field='image') tests/release/test_source_revision.py::SourceRevisionTests::test_normal_ack_cannot_silently_rewrite_the_approved_template
+SUBFAILED(field='probe') tests/release/test_source_revision.py::SourceRevisionTests::test_normal_ack_cannot_silently_rewrite_the_approved_template
+SUBFAILED(field='source') tests/release/test_source_revision.py::SourceRevisionTests::test_plan_rejects_server_rewriting_source_image_or_probes
+SUBFAILED(field='image') tests/release/test_source_revision.py::SourceRevisionTests::test_plan_rejects_server_rewriting_source_image_or_probes
+SUBFAILED(field='probe') tests/release/test_source_revision.py::SourceRevisionTests::test_plan_rejects_server_rewriting_source_image_or_probes
+9 failed, 7 passed, 2 subtests passed in 0.19s

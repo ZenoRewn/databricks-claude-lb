@@ -11,7 +11,7 @@ import yaml
 
 from .engine import new_record,TERMINAL
 from .kube import KubeAPI
-from .model import APP_FILES,SCHEMA,encoded,digest,validate_plan,public_snapshot,default_target_settings,target_pod_spec
+from .model import APP_FILES,SCHEMA,encoded,digest,validate_plan,public_snapshot,default_target_settings,target_pod_spec,source_annotations,verify_target_template
 from .snapshot import capture
 
 
@@ -41,8 +41,10 @@ def plan_release(api,profile,output,source_root):
     deployment=snapshot['deployment']
     operations=[{'op':'test','path':'/metadata/uid','value':deployment['metadata']['uid']},
                 {'op':'test','path':'/metadata/resourceVersion','value':deployment['metadata']['resourceVersion']},
-                {'op':'replace','path':'/spec/template/spec','value':target_pod_spec(deployment,profile)}]
+                {'op':'replace','path':'/spec/template/spec','value':target_pod_spec(deployment,profile)},
+                {'op':'add','path':'/spec/template/metadata/annotations','value':source_annotations(deployment,profile['source_revision'])}]
     preview=api.request('PATCH','deployment',profile['namespace'],profile['deployment'],operations,query={'dryRun':'All'},patch=True)
+    verify_target_template(preview,target_pod_spec(deployment,profile),source_annotations(deployment,profile['source_revision']))
     from .snapshot import protected_spec
     if protected_spec(preview,profile['container'])!=protected_spec(deployment,profile['container']):
         raise ValueError('Server dry-run changed protected fields')
@@ -51,6 +53,7 @@ def plan_release(api,profile,output,source_root):
     private_write(output/'plan.json',encoded(profile))
     private_write(output/'review.json',encoded({'author':'Zeno Ren','before':public_snapshot(snapshot),
         'target_image':profile['image'],'source_revision':profile['source_revision'],
+        'target_source_annotation':profile['source_revision'],
         'target_settings':profile['target_settings'],'server_dry_run_verified':True,
         'services':discovered,'maintenance_seconds':profile['maintenance_seconds'],
         'legacy_bootstrap':profile['legacy_bootstrap'],'public_urls':profile['public_urls'],

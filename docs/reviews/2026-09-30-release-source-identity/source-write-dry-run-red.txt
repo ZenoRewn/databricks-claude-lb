@@ -1,0 +1,22 @@
+.                                                                     [100%]
+=================================== FAILURES ===================================
+_ SourceRevisionTests.test_per_write_dry_run_mismatch_prevents_actual_mutation (field='source') _
+tests/release/test_source_revision.py:155: in test_per_write_dry_run_mismatch_prevents_actual_mutation
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: ValueError not raised
+_ SourceRevisionTests.test_per_write_dry_run_mismatch_prevents_actual_mutation (field='image') _
+tests/release/test_source_revision.py:155: in test_per_write_dry_run_mismatch_prevents_actual_mutation
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: ValueError not raised
+_ SourceRevisionTests.test_per_write_dry_run_mismatch_prevents_actual_mutation (field='probe') _
+tests/release/test_source_revision.py:155: in test_per_write_dry_run_mismatch_prevents_actual_mutation
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: ValueError not raised
+=========================== short test summary info ============================
+SUBFAILED(field='source') tests/release/test_source_revision.py::SourceRevisionTests::test_per_write_dry_run_mismatch_prevents_actual_mutation
+SUBFAILED(field='image') tests/release/test_source_revision.py::SourceRevisionTests::test_per_write_dry_run_mismatch_prevents_actual_mutation
+SUBFAILED(field='probe') tests/release/test_source_revision.py::SourceRevisionTests::test_per_write_dry_run_mismatch_prevents_actual_mutation
+3 failed, 1 passed, 7 deselected in 0.05s

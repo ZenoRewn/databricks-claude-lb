@@ -1,0 +1,41 @@
+FFF.                                                                   [100%]
+=================================== FAILURES ===================================
+_ SourceRevisionTests.test_ack_readback_is_noop_only_when_image_and_source_both_match _
+tests/release/test_source_revision.py:63: in test_ack_readback_is_noop_only_when_image_and_source_both_match
+    self.assertTrue(backend._patch.called, 'A stale source annotation is not a completed update')
+E   AssertionError: False is not true : A stale source annotation is not a completed update
+_______ SourceRevisionTests.test_forward_handles_missing_annotation_map ________
+tests/release/test_source_revision.py:73: in test_forward_handles_missing_annotation_map
+    self.assertEqual(self.annotations(backend), {SOURCE: 'a' * 40})
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/release/test_source_revision.py:35: in annotations
+    self.assertEqual(len(matches), 1, 'Image and source annotation must share the same conditional patch')
+E   AssertionError: 0 != 1 : Image and source annotation must share the same conditional patch
+_ SourceRevisionTests.test_forward_sets_source_and_preserves_unrelated_metadata _
+tests/release/test_source_revision.py:41: in test_forward_sets_source_and_preserves_unrelated_metadata
+    self.assertEqual(self.annotations(backend), {'prometheus.io/scrape': 'true', SOURCE: 'a' * 40})
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/release/test_source_revision.py:35: in annotations
+    self.assertEqual(len(matches), 1, 'Image and source annotation must share the same conditional patch')
+E   AssertionError: 0 != 1 : Image and source annotation must share the same conditional patch
+_ SourceRevisionTests.test_rollback_restores_exact_previous_source_or_absence (previous='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') _
+tests/release/test_source_revision.py:57: in test_rollback_restores_exact_previous_source_or_absence
+    self.assertEqual(self.annotations(backend), expected)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/release/test_source_revision.py:35: in annotations
+    self.assertEqual(len(matches), 1, 'Image and source annotation must share the same conditional patch')
+E   AssertionError: 0 != 1 : Image and source annotation must share the same conditional patch
+_ SourceRevisionTests.test_rollback_restores_exact_previous_source_or_absence (previous=None) _
+tests/release/test_source_revision.py:57: in test_rollback_restores_exact_previous_source_or_absence
+    self.assertEqual(self.annotations(backend), expected)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/release/test_source_revision.py:35: in annotations
+    self.assertEqual(len(matches), 1, 'Image and source annotation must share the same conditional patch')
+E   AssertionError: 0 != 1 : Image and source annotation must share the same conditional patch
+=========================== short test summary info ============================
+FAILED tests/release/test_source_revision.py::SourceRevisionTests::test_ack_readback_is_noop_only_when_image_and_source_both_match
+FAILED tests/release/test_source_revision.py::SourceRevisionTests::test_forward_handles_missing_annotation_map
+FAILED tests/release/test_source_revision.py::SourceRevisionTests::test_forward_sets_source_and_preserves_unrelated_metadata
+SUBFAILED(previous='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') tests/release/test_source_revision.py::SourceRevisionTests::test_rollback_restores_exact_previous_source_or_absence
+SUBFAILED(previous=None) tests/release/test_source_revision.py::SourceRevisionTests::test_rollback_restores_exact_previous_source_or_absence
+5 failed, 1 passed in 0.08s

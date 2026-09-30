@@ -8,7 +8,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from .engine import OwnershipLost,PendingOperation,UnsafeState
-from .model import APP_FILES,CONTROL,EPOCH,FINALIZER,GATE,RECOVER,SPEC,digest,target_pod_spec
+from .model import APP_FILES,CONTROL,EPOCH,FINALIZER,GATE,RECOVER,SPEC,SOURCE,digest,target_pod_spec,source_annotations,verify_target_template
 from .snapshot import protected_spec,matches,verify_pod_image
 
 def escape(value):return value.replace('~','~0').replace('/','~1')
@@ -47,7 +47,7 @@ class Backend:
         if self._annotations(obj).get(CONTROL)!=self.release_id:
             raise UnsafeState('release_ownership_removed_or_changed')
         return self._claim(kind,obj)
-    def _patch(self,kind,obj,operations):
+    def _patch(self,kind,obj,operations,*,expected_template=None):
         self.check_owner()
         guards=[{'op':'test','path':'/metadata/annotations/'+escape(CONTROL),'value':self.release_id},
                 {'op':'test','path':'/metadata/annotations/'+escape(EPOCH),'value':str(self.epoch)}]
@@ -55,6 +55,7 @@ class Backend:
             preview=self.api.request('PATCH',kind,self.namespace,obj['metadata']['name'],
                 [{'op':'test','path':'/metadata/resourceVersion','value':obj['metadata']['resourceVersion']}]+guards+operations,
                 query={'dryRun':'All'},patch=True)
+            if expected_template is not None:verify_target_template(preview,*expected_template)
             operations=operations+[{'op':'add','path':'/metadata/annotations/'+escape(SPEC),'value':digest(preview['spec'])}]
         return self.api.patch(kind,self.namespace,obj,guards+operations)
     def _pods(self):
@@ -274,15 +275,22 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
         d=self._owned('deployment',self.deployment);pod=copy.deepcopy(d['spec']['template']['spec']);c=pod['containers'][0]
         if rollback:
             saved=self.snapshot['deployment']['spec']['template']['spec'];original=saved['containers'][0]
+            revision=(self.snapshot['deployment']['spec']['template'].get('metadata',{}).get('annotations') or {}).get(SOURCE)
             for key in ('image','livenessProbe','readinessProbe','startupProbe','lifecycle'):
                 if key in original:c[key]=copy.deepcopy(original[key])
                 else:c.pop(key,None)
             pod['terminationGracePeriodSeconds']=saved.get('terminationGracePeriodSeconds',30)
         else:
             pod=target_pod_spec(d,self.plan)
-        if d['spec']['template']['spec']==pod and d['spec'].get('replicas')==1:return
-        self._patch('deployment',d,[{'op':'replace','path':'/spec/template/spec','value':pod},
-                                   {'op':'replace','path':'/spec/replicas','value':1}])
+            revision=self.plan['source_revision']
+        annotations=source_annotations(d,revision)
+        if (d['spec']['template']['spec']==pod and d['spec'].get('replicas')==1
+                and (d['spec']['template'].get('metadata',{}).get('annotations') or {})==annotations):return
+        updated=self._patch('deployment',d,[{'op':'replace','path':'/spec/template/spec','value':pod},
+                                   {'op':'replace','path':'/spec/replicas','value':1},
+                                   {'op':'add','path':'/spec/template/metadata/annotations','value':annotations}],
+                            expected_template=(pod,annotations))
+        verify_target_template(updated,pod,annotations)
     def _restore_routes(self):
         self._routes()
         self._verify_references()
@@ -310,7 +318,9 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
             preview=self.api.request('PATCH','deployment',self.namespace,self.deployment,
                 [{'op':'test','path':'/metadata/uid','value':d['metadata']['uid']},
                  {'op':'test','path':'/metadata/resourceVersion','value':d['metadata']['resourceVersion']},
-                 {'op':'replace','path':'/spec/template/spec','value':target_pod_spec(d,self.plan)}],query={'dryRun':'All'},patch=True)
+                 {'op':'replace','path':'/spec/template/spec','value':target_pod_spec(d,self.plan)},
+                 {'op':'add','path':'/spec/template/metadata/annotations','value':source_annotations(d,self.plan['source_revision'])}],query={'dryRun':'All'},patch=True)
+            verify_target_template(preview,target_pod_spec(d,self.plan),source_annotations(d,self.plan['source_revision']))
             if protected_spec(preview,self.plan['container'])!=protected_spec(d,self.plan['container']):
                 raise UnsafeState('server_dry_run_changed_protected_fields')
             if any(h.get('spec',{}).get('scaleTargetRef',{}).get('name')==self.deployment for h in self.api.list('hpa',self.namespace)):
