@@ -30,6 +30,27 @@ const unknown = context.aggregateModels([{model_stats: {future: {requests: 1}}}]
 assert.equal(unknown.estimated_cost_usd, null);
 assert.equal(context.fmtModelCost(unknown), '未知');
 assert.equal(context.fmtModelCost({estimated_cost_usd: 0}), '$0');
+const ranged = {requests: 2, pricing_status: 'complete', estimated_cost_usd: null,
+  estimated_cost_min_usd: 3, estimated_cost_max_usd: 6, priced_requests: 2, unpriced_requests: 0};
+assert.equal(context.fmtModelCost(ranged), '$3.00–$6.00');
+const rangeSummary = context.pricingSummary({ranged, point: {estimated_cost_usd: 1}});
+assert.equal(rangeSummary.pricing_status, 'complete');
+assert.equal(rangeSummary.estimated_cost_min_usd, 4);
+assert.equal(rangeSummary.estimated_cost_max_usd, 7);
+assert.equal(context.fmtModelCost(rangeSummary), '$4.00–$7.00');
+const daily = context.dividePricing(rangeSummary, 2);
+assert.equal(context.fmtModelCost(daily), '$2.00–$3.50');
+const combined = context.aggregateModels([{model_stats: {ranged}}, {model_stats: {ranged}}]).ranged;
+assert.equal(combined.pricing_status, 'complete');
+assert.equal(combined.priced_requests, 4);
+assert.equal(combined.unpriced_requests, 0);
+assert.equal(context.fmtModelCost(combined), '$6.00–$12.00');
+const partialRange = context.pricingSummary({ranged, missing: {requests: 1}});
+assert.equal(context.fmtModelCost(partialRange), '$3.00–$6.00 + 未计价');
+assert.match(context.priceMarkup(partialRange), /\$3\.00–\$6\.00/);
+assert.match(context.priceMarkup(partialRange), /未计价/);
+assert.equal(context.fmtModelCost(context.pricingSummary({partialRange})), '$3.00–$6.00 + 未计价');
+assert.equal(context.fmtModelCost(ranged, true), '300.0000–600.0000');
 for (const modelName of ['constructor', '__proto__', 'toString']) {
   const modelStats = JSON.parse(JSON.stringify({[modelName]: {requests: 1, input_tokens: 100, estimated_cost_usd: .5}}));
   const unusual = context.aggregateModels([{model_stats: modelStats}]);

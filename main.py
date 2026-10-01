@@ -1,5 +1,6 @@
 from effort_compat import preserve_native_effort, effort_response_headers, databricks_parameter_drops
 from copilot_pricing import record_estimate as record_copilot_estimate, cost_view as copilot_cost_view, summarize_costs as copilot_cost_summary, get_metadata as copilot_pricing_metadata, PricingRefresh
+from copilot_pricing import estimate_history_reference
 from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_call,
                                note_admission, note_admission_end, note_generation,
                                note_json_result, note_candidate_selection, note_retry_decision,
@@ -1406,6 +1407,61 @@ def calculate_cost(model_name: str, input_tokens: int, output_tokens: int,
         cache_read_tokens * pricing["cache_read"] / 1_000_000
     )
     return round(cost, 6)
+
+
+def historical_model_cost(model, stats):
+    """Price a read-only aggregate view without claiming a provider or past tariff."""
+    # Anthropic input excludes caches; the OpenAI-style adapters report inclusive
+    # input. Daily storage has no provider column, so do not infer the provider.
+    anthropic = model.lower().startswith(('databricks-', 'claude-', 'opus-', 'sonnet-', 'haiku-'))
+    quote = None if anthropic else estimate_history_reference(model, stats)
+    requests = stats.get('requests', 0)
+    if quote is None:
+        normalized = re.sub(r'(?<=\d)\.(?=\d)', '-', model.lower())
+        for prefix in ('databricks-claude-', 'claude-'):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):]
+                break
+        # Explicit legacy IDs only: gpt-5.6-future must not inherit gpt-5 prices.
+        key = next((k for k in MODEL_PRICING if re.sub(r'(?<=\d)\.(?=\d)', '-', k) == normalized), None)
+        counts = tuple(stats.get(k, 0) for k in ('input_tokens', 'output_tokens', 'cache_creation_tokens', 'cache_read_tokens'))
+        valid = (all(type(v) is int and 0 <= v < 2**63 for v in (*counts, requests))
+                 and {'input_tokens', 'output_tokens'}.issubset(stats)
+                 and (requests > 0 or not any(counts)))
+        cost = None
+        if key is not None and valid:
+            if anthropic:
+                cost = calculate_cost(key, *counts)
+            elif counts[0] >= counts[2] + counts[3]:
+                rate = MODEL_PRICING[key]
+                cost = ((counts[0]-counts[2]-counts[3])*rate['input'] + counts[1]*rate['output']
+                        + counts[2]*(rate['cache_write'] or rate['input']) + counts[3]*rate['cache_read'])/1000000
+        quote = {'estimated_cost_usd': cost, 'estimated_cost_min_usd': cost, 'estimated_cost_max_usd': cost,
+                 'pricing_status': 'complete' if cost is not None else 'unknown',
+                 'pricing_basis': 'legacy_model_reference' if cost is not None else 'unknown',
+                 'estimate_kind': 'point' if cost is not None else 'unknown',
+                 'pricing_reason': 'legacy_reference' if cost is not None else 'no_valid_reference'}
+    known = quote['pricing_status'] == 'complete'
+    covered_requests = requests if type(requests) is int and requests >= 0 else 0
+    return {**stats, **quote, 'priced_requests': covered_requests if known else 0,
+            'unpriced_requests': 0 if known else covered_requests,
+            'known_cost_subtotal_usd': quote['estimated_cost_min_usd'] if known else 0,
+            'known_cost_subtotal_max_usd': quote['estimated_cost_max_usd'] if known else 0}
+
+
+def historical_cost_summary(models):
+    rows = list(models.values())
+    complete = all(s['pricing_status'] == 'complete' for s in rows)
+    known = any(s['pricing_status'] == 'complete' for s in rows)
+    lower = sum(s['known_cost_subtotal_usd'] for s in rows)
+    upper = sum(s['known_cost_subtotal_max_usd'] for s in rows)
+    return {'estimated_total_cost_usd': lower if complete and lower == upper else None,
+            'estimated_cost_min_usd': lower if complete else None,
+            'estimated_cost_max_usd': upper if complete else None,
+            'known_cost_subtotal_usd': lower, 'known_cost_subtotal_max_usd': upper,
+            'pricing_status': 'complete' if complete else 'partial' if known else 'unknown',
+            'priced_requests': sum(s['priced_requests'] for s in rows),
+            'unpriced_requests': sum(s['unpriced_requests'] for s in rows)}
 
 
 def supports_adaptive_thinking(databricks_model: str) -> bool:
@@ -8347,20 +8403,17 @@ async def stats_history(days: int = 7):
     current = start
     while current <= end:
         day_data = await usage_store.get_day_data(current)
-        if day_data and day_data.get("models"):
-            daily_cost = 0.0
-            for model_name, mstats in day_data["models"].items():
-                cost = calculate_cost(model_name, mstats.get("input_tokens", 0), mstats.get("output_tokens", 0),
-                                      mstats.get("cache_creation_tokens", 0), mstats.get("cache_read_tokens", 0))
-                if cost is not None:
-                    mstats["estimated_cost_usd"] = cost
-                    daily_cost += cost
-            day_data["estimated_total_cost_usd"] = round(daily_cost, 4)
-            history.append(day_data)
-        else:
-            history.append({"date": current.isoformat(), "models": {}, "totals": {}, "estimated_total_cost_usd": 0})
+        history.append(day_data or {"date": current.isoformat(), "models": {}, "totals": {}})
         current += timedelta(days=1)
-    return {"history": history, "days": days}
+    # No awaits while pricing the response: one catalog version covers all days.
+    # New dictionaries also prevent response prices leaking into JSON's cache.
+    priced_history = []
+    for day in history:
+        models = {name: historical_model_cost(name, values) for name, values in day.get('models', {}).items()}
+        priced_history.append({**day, 'models': models, **historical_cost_summary(models)})
+    return {"history": priced_history, "days": days,
+            "pricing": {"basis": "current_reference_rates_not_historical_invoice",
+                        "copilot": copilot_pricing_metadata(), "unknown_tiers": "bounded_range"}}
 
 
 @app.delete("/stats/history")

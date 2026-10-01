@@ -176,7 +176,7 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
       <section class="tab-panel" id="tab-copilot" role="tabpanel" aria-labelledby="nav-copilot"><div id="copilotContent"><div class="info-box">正在读取 GitHub Copilot…</div></div></section>
       <section class="tab-panel" id="tab-history" role="tabpanel" aria-labelledby="nav-history">
         <div class="history-toolbar"><label for="histDays">最近</label><input id="histDays" type="number" value="7" min="1" max="365"><span>天</span><button class="btn btn-primary" id="refreshHistory" type="button">更新用量</button></div>
-        <p class="scope-note">持久化历史跨进程保留；历史金额按模型参考价估算，不等同于 Copilot 或 Azure 的实际账单。</p>
+        <p class="scope-note">持久化历史跨进程保留；金额按当前公开参考价估算，长上下文档位不明时显示区间，不等同于历史账单。</p>
         <p class="feedback" id="historyStatus" role="status" hidden></p>
         <div id="historyContent"><div class="info-box">切换到此页后读取历史用量。</div></div>
         <details class="maintenance-panel"><summary>数据维护</summary><p>清理保留天数之前的持久化用量。删除后无法通过 Dashboard 撤销；请先确认备份。API Key 只用于本次清理请求，不保存在浏览器中。</p><form class="cleanup-form" id="cleanupForm"><label class="field" for="cleanDays">保留最近天数<input id="cleanDays" type="number" value="30" min="1" max="3650" required></label><label class="field field-key" for="managementKey">LB API Key<input id="managementKey" type="password" autocomplete="off" maxlength="4096" placeholder="仅用于这一次操作" required></label><button class="btn btn-danger" id="cleanupButton" type="submit">清理历史数据</button></form><div class="feedback" id="cleanupStatus" role="status"></div></details>
@@ -196,13 +196,28 @@ function circuitBadge(endpoint) {
   const [kind, label] = values[state] || ['trial','未知'];
   return '<span class="badge ' + kind + '">' + label + '</span>';
 }
+function referenceBounds(item) {
+  const lower = item.estimated_cost_min_usd ?? item.estimated_cost_usd;
+  const upper = item.estimated_cost_max_usd ?? item.estimated_cost_usd;
+  return Number.isFinite(lower) && Number.isFinite(upper) && lower >= 0 && upper >= lower ? [lower, upper] : null;
+}
 function pricingSummary(models) {
   const entries = Object.values(models || {});
-  const unknown = entries.some(item => item.estimated_cost_usd == null);
-  const known = entries.some(item => item.estimated_cost_usd != null || item.priced_requests > 0);
-  const subtotal = entries.reduce((sum, item) => sum + (item.known_cost_subtotal_usd ?? item.estimated_cost_usd ?? 0), 0);
-  return {estimated_cost_usd: unknown ? null : subtotal, known_cost_subtotal_usd: subtotal,
+  const unknown = entries.some(item => !referenceBounds(item) || ['partial','unknown'].includes(item.pricing_status));
+  const known = entries.some(item => referenceBounds(item) || item.priced_requests > 0 || item.pricing_status === 'partial');
+  const lower = entries.reduce((sum, item) => sum + (referenceBounds(item)?.[0] ?? item.known_cost_subtotal_usd ?? 0), 0);
+  const upper = entries.reduce((sum, item) => sum + (referenceBounds(item)?.[1] ?? item.known_cost_subtotal_max_usd ?? item.known_cost_subtotal_usd ?? 0), 0);
+  return {estimated_cost_usd: !unknown && lower === upper ? lower : null,
+    estimated_cost_min_usd: unknown ? null : lower, estimated_cost_max_usd: unknown ? null : upper,
+    known_cost_subtotal_usd: lower, known_cost_subtotal_max_usd: upper,
     pricing_status: unknown ? (known ? 'partial' : 'unknown') : 'complete'};
+}
+function dividePricing(pricing, divisor) {
+  const result = {...pricing};
+  for (const key of ['estimated_cost_usd','estimated_cost_min_usd','estimated_cost_max_usd','known_cost_subtotal_usd','known_cost_subtotal_max_usd']) {
+    if (Number.isFinite(result[key])) result[key] /= divisor;
+  }
+  return result;
 }
 function pricingRefreshText(pricing = {}) {
   const refresh = pricing.refresh || {};
@@ -224,13 +239,19 @@ function fmtTime(s) { s = +s || 0; if (s >= 86400) return (s/86400).toFixed(1)+'
 function fmtCost(v) { if (v == null) return '-'; v = +v; if (v >= 1) return '$'+v.toFixed(2); if (v >= 0.01) return '$'+v.toFixed(4); if (v > 0) return '$'+v.toFixed(6); return '$0'; }
 function fmtCredits(v) { return v == null ? '未知' : (+v).toFixed(4); }
 function fmtModelCost(s, credits = false) {
-  const format = credits ? fmtCredits : fmtCost;
-  if (s.pricing_status === 'partial') return format((s.known_cost_subtotal_usd || 0) * (credits ? 100 : 1)) + ' + 未计价';
-  if (s.estimated_cost_usd == null) return '未知';
-  return format(credits ? s.estimated_ai_credits : s.estimated_cost_usd);
+  const format = value => credits ? fmtCredits(value * 100) : fmtCost(value);
+  let bounds = referenceBounds(s);
+  if (s.pricing_status === 'partial') bounds = [s.known_cost_subtotal_usd || 0, s.known_cost_subtotal_max_usd ?? s.known_cost_subtotal_usd ?? 0];
+  if (!bounds) return '未知';
+  const value = bounds[0] === bounds[1] ? format(bounds[0]) : format(bounds[0]) + '–' + format(bounds[1]);
+  return value + (s.pricing_status === 'partial' ? ' + 未计价' : '');
 }
 function priceMarkup(summary) {
-  if (summary.pricing_status === 'partial') return escapeHtml(fmtCost(summary.known_cost_subtotal_usd || 0)) + ' <span class="value-qualifier">+ 未计价</span>';
+  if (summary.pricing_status === 'partial') {
+    const known = {estimated_cost_min_usd: summary.known_cost_subtotal_usd || 0,
+      estimated_cost_max_usd: summary.known_cost_subtotal_max_usd ?? summary.known_cost_subtotal_usd ?? 0};
+    return escapeHtml(fmtModelCost(known)) + ' <span class="value-qualifier">+ 未计价</span>';
+  }
   return escapeHtml(fmtModelCost(summary));
 }
 function fmtMs(v) { return (+v || 0).toFixed(0) + 'ms'; }
@@ -429,7 +450,8 @@ function ensureHistoryLine(canvasId) {
         { label: '输入', data: [], borderColor: chartColors[0], backgroundColor: chartColors[0], tension: 0.35, fill: false, yAxisID: 'y', pointRadius: 3, pointHoverRadius: 5, borderWidth: 2 },
         { label: '输出', data: [], borderColor: chartColors[1], backgroundColor: chartColors[1], tension: 0.35, fill: false, yAxisID: 'y', pointRadius: 3, pointHoverRadius: 5, borderWidth: 2 },
         { label: '缓存读取', data: [], borderColor: chartColors[2], backgroundColor: chartColors[2], tension: 0.35, fill: false, yAxisID: 'y', pointRadius: 3, pointHoverRadius: 5, borderWidth: 2, borderDash: [4, 4] },
-        { label: '参考费用 (USD)', data: [], borderColor: chartColors[3], backgroundColor: chartColors[3], tension: 0.35, fill: false, yAxisID: 'y1', pointRadius: 3, pointHoverRadius: 5, borderWidth: 2 }
+        { label: '参考费用下限 (USD)', data: [], borderColor: chartColors[3], backgroundColor: chartColors[3], tension: 0.35, fill: false, yAxisID: 'y1', pointRadius: 3, pointHoverRadius: 5, borderWidth: 2 },
+        { label: '参考费用上限 (USD)', data: [], borderColor: chartColors[4], backgroundColor: chartColors[4], tension: 0.35, fill: false, yAxisID: 'y1', pointRadius: 3, pointHoverRadius: 5, borderWidth: 2, borderDash: [5, 3] }
       ]
     },
     options: {
@@ -540,20 +562,20 @@ function aggregateModels(endpoints) {
   const models = Object.create(null);
   (endpoints || []).forEach(e => {
     Object.entries(e.model_stats || {}).forEach(([m, s]) => {
-      if (!models[m]) models[m] = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, requests: 0, estimated_cost_usd: 0, known_cost_subtotal_usd: 0, priced_requests: 0, unpriced_requests: 0 };
+      if (!models[m]) models[m] = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, requests: 0, priced_requests: 0, unpriced_requests: 0, priceRows: [] };
       models[m].input_tokens += s.input_tokens || 0;
       models[m].output_tokens += s.output_tokens || 0;
       models[m].cache_creation_tokens += s.cache_creation_tokens || 0;
       models[m].cache_read_tokens += s.cache_read_tokens || 0;
       models[m].requests += s.requests || 0;
-      models[m].known_cost_subtotal_usd += s.known_cost_subtotal_usd ?? s.estimated_cost_usd ?? 0;
-      models[m].priced_requests += s.priced_requests ?? (s.estimated_cost_usd != null ? (s.requests || 0) : 0);
-      models[m].unpriced_requests += s.unpriced_requests ?? (s.estimated_cost_usd == null ? (s.requests || 0) : 0);
-      models[m].estimated_cost_usd = models[m].estimated_cost_usd == null || s.estimated_cost_usd == null ? null : models[m].estimated_cost_usd + s.estimated_cost_usd;
+      models[m].priced_requests += s.priced_requests ?? (referenceBounds(s) ? (s.requests || 0) : 0);
+      models[m].unpriced_requests += s.unpriced_requests ?? (referenceBounds(s) ? 0 : (s.requests || 0));
+      models[m].priceRows.push(s);
     });
   });
   Object.values(models).forEach(s => {
-    s.pricing_status = s.unpriced_requests ? (s.priced_requests ? 'partial' : 'unknown') : 'complete';
+    Object.assign(s, pricingSummary(s.priceRows));
+    delete s.priceRows;
     s.estimated_ai_credits = s.estimated_cost_usd == null ? null : s.estimated_cost_usd * 100;
   });
   return models;
@@ -606,7 +628,7 @@ async function loadHistory(days = 7) {
       totalReq += t.requests || 0;
     });
     const divisor = d.history.length || 1;
-    const dailyPricing = {...totalPricing, estimated_cost_usd: totalPricing.estimated_cost_usd == null ? null : totalPricing.estimated_cost_usd / divisor, known_cost_subtotal_usd: totalPricing.known_cost_subtotal_usd / divisor};
+    const dailyPricing = dividePricing(totalPricing, divisor);
     hc.innerHTML =
       '<div class="global-grid history-summary">' +
       '<div class="card"><div class="label">时间范围</div><div class="value">' + days + ' 天</div></div>' +
@@ -615,6 +637,7 @@ async function loadHistory(days = 7) {
       '<div class="card"><div class="label">参考费用合计</div><div class="value">' + priceMarkup(totalPricing) + '</div></div>' +
       '<div class="card"><div class="label">日均参考费用</div><div class="value">' + priceMarkup(dailyPricing) + '</div></div>' +
       '</div>' +
+      '<p class="info-box">可匹配的 OpenAI 风格模型按当前 Copilot 公布价格估算（核对：' + escapeHtml(d.pricing?.copilot?.checked_on || '未知') + '）；其余采用模型参考价。每日汇总无法判断逐次长上下文档位时显示上下界，不把整天输入当成一次请求。</p>' +
       '<div class="grid-2">' +
       '<div class="chart-card" style="min-height:320px"><h3>每日 Token 与参考费用</h3><div class="canvas-wrap" style="height:280px"><canvas id="historyLineChart"></canvas></div></div>' +
       '<div class="chart-card" style="min-height:320px"><h3>模型汇总 (' + days + 'd)</h3><div class="canvas-wrap" style="height:280px"><canvas id="historyModelChart"></canvas></div></div>' +
@@ -650,12 +673,17 @@ async function loadHistory(days = 7) {
       const input = d.history.map(h => (h.totals || {}).input_tokens || 0);
       const output = d.history.map(h => (h.totals || {}).output_tokens || 0);
       const cacheRead = d.history.map(h => (h.totals || {}).cache_read_tokens || 0);
-      const cost = d.history.map(h => pricingSummary(h.models).estimated_cost_usd);
+      const cost = d.history.map(h => pricingSummary(h.models).estimated_cost_min_usd);
+      const upperCost = d.history.map(h => pricingSummary(h.models).estimated_cost_max_usd);
       lineChart.data.labels = labels;
       lineChart.data.datasets[0].data = input;
       lineChart.data.datasets[1].data = output;
       lineChart.data.datasets[2].data = cacheRead;
       lineChart.data.datasets[3].data = cost;
+      const hasRange = cost.some((value, i) => value != null && value !== upperCost[i]);
+      lineChart.data.datasets[3].label = hasRange ? '参考费用下限 (USD)' : '参考费用 (USD)';
+      lineChart.data.datasets[4].data = upperCost;
+      lineChart.data.datasets[4].hidden = !hasRange;
       lineChart.update();
     }
 

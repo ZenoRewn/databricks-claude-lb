@@ -100,9 +100,16 @@ def main():
                 for i in range(days):
                     models = {'databricks-claude-opus-5': model(320 + i * 50, 6.4 + i * .3), 'gpt-5.4': model(240, 3.2)}
                     if i == 1: models['demo-unpriced-model'] = model(1, None)
+                    if scenario['name'] == 'history-pricing':
+                        import sys
+                        sys.path.insert(0, str(root))
+                        from main import historical_model_cost
+                        names = ('databricks-claude-opus-5', 'gpt-6-astra', 'gemini-3.8-flash', 'grok-4.6', 'gpt-6-luna', 'gpt-6-sol')
+                        models = {name: historical_model_cost(name, model(100 + i, None)) for name in names}
                     history.append({'date': str(date(2026, 9, 30) - timedelta(days=days - i - 1)),
                                     'models': models, 'totals': totals(models)})
-                return self.reply(200, dict(history=history, days=days))
+                return self.reply(200, dict(history=history, days=days,
+                    pricing={'copilot': {'checked_on': '2026-10-01'}}))
             return self.reply(404, {})
 
         def do_DELETE(self):

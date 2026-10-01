@@ -124,6 +124,45 @@ def estimate_request(model,input_tokens,output_tokens,cache_creation_tokens=0,ca
     return {**pricing,'estimated_cost_usd':cost,'estimated_ai_credits':cost/AI_CREDIT_USD}
 
 
+def estimate_history_reference(model, stats, *, at=None):
+    """Current-rate reference for daily inclusive-input totals, not a past invoice.
+
+    A day can contain short and long requests. Without request boundaries, return
+    conservative component-wise price bounds rather than tiering the whole day.
+    None means the model is absent; an expired/invalid known model stays unknown.
+    """
+    aliases = _active['aliases'] if _active else ALIASES
+    if _normalize(model) not in aliases:
+        return None
+    unknown = {'pricing_status': 'unknown', 'estimated_cost_usd': None,
+               'estimated_cost_min_usd': None, 'estimated_cost_max_usd': None,
+               'pricing_basis': 'current_copilot_reference', 'pricing_source_url': SOURCE_URL}
+    counts = tuple(stats.get(k, 0) for k in ('input_tokens', 'output_tokens', 'cache_creation_tokens', 'cache_read_tokens'))
+    requests = stats.get('requests', 0)
+    if (not {'input_tokens', 'output_tokens'}.issubset(stats)
+            or not all(type(v) is int and 0 <= v < 2**63 for v in (*counts, requests))
+            or (not requests and any(counts)) or counts[2] + counts[3] > counts[0]):
+        return {**unknown, 'pricing_reason': 'invalid_usage_totals'}
+    default = get_pricing(model, 0, at=at)
+    if default is None:
+        return {**unknown, 'pricing_reason': 'price_expired'}
+    aggregate = get_pricing(model, counts[0], at=at)
+    uncertain = requests > 1 and aggregate['tier'] != 'default'
+    choices = [default, aggregate] if uncertain else [aggregate]
+    # N/A cache write is billed as normal input, including when bounding tiers.
+    rates = [{**r, 'cache_write': r['cache_write'] or r['input']} for r in choices]
+    weights = dict(zip(('input', 'output', 'cache_write', 'cache_read'),
+                       (counts[0] - counts[2] - counts[3], *counts[1:])))
+    lower = sum(v * min(r[k] for r in rates) for k, v in weights.items()) / 1000000
+    upper = sum(v * max(r[k] for r in rates) for k, v in weights.items()) / 1000000
+    return {**unknown, 'pricing_status': 'complete',
+            'estimated_cost_usd': lower if lower == upper else None,
+            'estimated_cost_min_usd': lower, 'estimated_cost_max_usd': upper,
+            'estimate_kind': 'range' if lower != upper else 'point',
+            'pricing_checked_on': default['checked_on'],
+            'pricing_reason': 'long_context_distribution_unknown' if uncertain else 'known_tier'}
+
+
 def record_estimate(stats,model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,usage_fields=None):
     tracker=stats.setdefault('_copilot_cost',{'priced_requests':0,'subtotal_usd':0.0,'tiers':{}})
     if usage_fields is not None and not {'input_tokens','output_tokens'}.issubset(usage_fields):return
