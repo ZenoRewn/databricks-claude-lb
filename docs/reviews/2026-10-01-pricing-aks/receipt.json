@@ -1,0 +1,150 @@
+{
+  "author": "Zeno Ren",
+  "date": "2026-10-01",
+  "result": "succeeded",
+  "application_pr": "https://github.com/ZenoRewn/databricks-claude-lb/pull/14",
+  "application_source_revision": "7b71cdb7a222cddaeb144086564c9216f86b54a3",
+  "registry_image": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:6b66730ed8149b505ad6d198a1a26806d585849301127e5f000616c2a86f2679",
+  "platform": "linux/amd64",
+  "runtime_files_verified": 21,
+  "restarts": 0,
+  "maintenance": {
+    "started_at": "2026-10-01T14:27:13+08:00",
+    "routes_restored_at": "2026-10-01T14:28:10+08:00",
+    "seconds": 57.117,
+    "markers_cleared": true,
+    "cleanup_errors": [],
+    "rolled_back": false
+  },
+  "ci": {
+    "pr": "https://github.com/ZenoRewn/databricks-claude-lb/actions/runs/36824107468",
+    "main": "https://github.com/ZenoRewn/databricks-claude-lb/actions/runs/36824375194",
+    "jobs_passed_each": 6
+  },
+  "image_tests": {
+    "passed": 52,
+    "subtests_passed": 55,
+    "python": "3.12"
+  },
+  "backup": {
+    "rows": {
+      "usage_batch_ledger": 6175,
+      "usage_daily": 334
+    },
+    "begin_utc": "2026-10-01T06:23:03.887992",
+    "end_utc": "2026-10-01T06:23:05.386023",
+    "consistent_read_only": true,
+    "restore_verified": true,
+    "historical_ledger_batches_preserved": 6175
+  },
+  "routes": {
+    "claude-lb": {
+      "selector": {
+        "app": "claude-lb"
+      },
+      "ready_endpoints": 1,
+      "new_pod_only": true
+    },
+    "claude-lb-internal": {
+      "selector": {
+        "app": "claude-lb"
+      },
+      "ready_endpoints": 1,
+      "new_pod_only": true
+    }
+  },
+  "business": [
+    {
+      "api": "messages",
+      "completed": true,
+      "marker_found": true,
+      "model": "databricks-claude-opus-5",
+      "stream": false,
+      "actual_provider": "databricks"
+    },
+    {
+      "api": "responses",
+      "completed": true,
+      "marker_found": true,
+      "model": "gpt-5.4",
+      "stream": true,
+      "actual_provider": "copilot"
+    },
+    {
+      "api": "chat",
+      "completed": true,
+      "marker_found": true,
+      "model": "gpt-5.6-luna",
+      "stream": true,
+      "actual_provider": "copilot"
+    }
+  ],
+  "public_version": {
+    "version": "7b71cdb",
+    "source_revision": "7b71cdb7a222cddaeb144086564c9216f86b54a3",
+    "verification": "matched",
+    "commit_url": "https://github.com/ZenoRewn/databricks-claude-lb/commit/7b71cdb7a222cddaeb144086564c9216f86b54a3",
+    "compare_url": "https://github.com/ZenoRewn/databricks-claude-lb/compare/7b71cdb7a222cddaeb144086564c9216f86b54a3...main"
+  },
+  "public_health": {
+    "/health/live": 200,
+    "/health/ready": 200,
+    "/health/accepting": 200
+  },
+  "authentication": {
+    "/v1/messages": 401,
+    "/v1/responses": 401,
+    "/v1/chat/completions": 401,
+    "/v1/messages/count_tokens": 401,
+    "/config/effective": 401
+  },
+  "dashboard_auth": {
+    "status": 302,
+    "redirect_host": "auth.zeno.ink",
+    "redirect_path": "/oauth2/sign_in"
+  },
+  "runtime_dashboard": {
+    "sha256": "68515cf162dd984be099729926a734d48ae532992ef1399f0ebbc06b1520f5e8",
+    "status": 200,
+    "cache_control": "no-store"
+  },
+  "copilot_pricing": {
+    "source_url": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+    "checked_on": "2026-10-01",
+    "unit": "USD per 1M tokens",
+    "ai_credit_usd": 0.01,
+    "scope": "process_lifetime_reported_usage",
+    "basis": "copilot_published_token_rates",
+    "actual_invoice": false,
+    "model_count": 35,
+    "source_sha256": "7c00c930939f1b14a312823f5e7a8ebac24649a8dc2ed21a0665e5406b0d1ea1",
+    "catalog_origin": "refreshed",
+    "refresh": {
+      "enabled": true,
+      "interval_days": 7,
+      "status": "ok",
+      "last_success_at": "2026-10-01T06:27:59.221076+00:00",
+      "last_attempt_at": "2026-10-01T06:27:59.163917+00:00",
+      "next_refresh_at": "2026-10-08T06:27:59.221076+00:00",
+      "stale": false,
+      "last_error": null
+    }
+  },
+  "review_scope": "primary-agent review and CI; previous independent reliability/release-engine reviews retained for unchanged code",
+  "not_verified": [
+    "all provider/endpoint combinations",
+    "real-client long sessions",
+    "production load testing",
+    "a full week of real scheduler elapsed time",
+    "authenticated browser visual acceptance"
+  ],
+  "cache_storage": "writable Pod filesystem, refetched after Pod recreation; no new PVC",
+  "public_observation": {
+    "after_completion_samples": 114,
+    "observed_seconds": 251.834,
+    "three_health_paths_per_sample": true,
+    "all_post_completion_200": true,
+    "post_collection_errors": 0,
+    "maintenance_503_observed": true
+  }
+}
