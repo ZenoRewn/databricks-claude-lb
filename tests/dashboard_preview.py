@@ -41,6 +41,9 @@ def stats():
             'github_copilot': {'global': {**summary, 'estimated_total_cost_usd': None,
                 'estimated_ai_credits': None, 'known_cost_subtotal_usd': 3.84, 'priced_requests': 240,
                 'unpriced_requests': 3, 'pricing_status': 'partial'},
+                'pricing': {'checked_on': '2026-10-01', 'model_count': 35, 'refresh': {
+                    'enabled': True, 'status': 'ok', 'last_success_at': '2026-10-01T09:00:00+00:00',
+                    'next_refresh_at': '2026-10-08T09:00:00+00:00', 'stale': False}},
                 'endpoints': [endpoint('demo-account', {'gpt-5.6-luna': model(240, 3.84), 'demo-unpriced-model': model(3, None)})],
                 'pool': dict(active_requests=8, max_connections=200, utilization_pct=4, pool_timeout_total=0,
                              stream_connections_active=3, stream_high_watermark=80, max_keepalive_connections=100,
@@ -75,6 +78,10 @@ def main():
             if url.path == '/stats':
                 if scenario['name'] == 'error': return self.reply(503, {'error': 'synthetic unavailable'})
                 data = stats()
+                if scenario['name'] == 'pricing-error':
+                    data['github_copilot']['pricing']['refresh'].update(status='error', stale=True)
+                if scenario['name'] == 'pricing-disabled':
+                    data['github_copilot']['pricing']['refresh'].update(status='disabled', enabled=False)
                 if scenario['name'] == 'empty':
                     data['endpoints'] = []; data['today_model_stats'] = {}
                     data.pop('azure_openai'); data.pop('github_copilot')

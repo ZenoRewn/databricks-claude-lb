@@ -2,9 +2,28 @@
 
 Author: Zeno Ren
 
-核对日期：2026-09-21。来源：[GitHub Models and pricing](https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing)。官方表目前按 token 定价，1 AI credit = 0.01 USD；之前“GHCP 无 per-token 计费”的页面说明已移除。
+随代码提供的基线核对日期：2026-10-01。来源：[GitHub Models and pricing](https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing)。官方表按 token 定价，1 AI credit = 0.01 USD。启用 Copilot 时，项目服务默认每 7 天后台获取、验证并更新官方价格。
 
-`copilot_pricing.py` 收录当日官方表的 29 个模型、37 行档位，包含 GPT-6 Astra、GPT-5.6 Sol/Terra/Luna、Claude Fable 5/5.1、Gemini 3.5～3.8 Flash、MAI-Code、Grok 和 Kimi。官方原始表格快照位于 `tests/fixtures/copilot-pricing-20260921.json`，回归逐行核对价格，不在推理路径请求外部价格站点。
+`copilot_pricing.py` 基线收录当日官方表的 35 个模型、47 行档位，在上一版基础上补齐 GPT-6 Luna、GPT-6 Sol、GPT-6.1 Sol、Claude Opus 5.5、Claude Sonnet 5.5、Grok 4.7。官方 HTML 表格与脚注摘录位于 `tests/fixtures/copilot-pricing-20261001.html`；9 月 21 日 JSON 快照保留用于回归。后台获取与推理请求相互独立，不向 GitHub Docs 发送模型凭据、用户输入或用量记录。
+
+## 每周自动更新
+
+- 随 Copilot 的应用生命周期启动；没有可用缓存时先用内置基线，后台立即尝试获取。有效缓存从上次成功抓取时间起满 7 天刷新，重启不重置此时间。服务停机期间不执行任务，重启后补做已到期检查。
+- 只读取上述固定 HTTPS 官方地址，验证 TLS，不跟随重定向。下载总预算 45 秒，HTTP 阶段超时 20 秒，解码后正文上限 2 MiB；不在推理热路径下载价格。
+- 验证完整 provider 表、列名、价格数字、唯一模型映射、成对长上下文阈值、AI credit 换算和促销脚注。当前明确识别官方 Gemini 促销脚注格式；新的条件价、无法识别的脚注、缺表或结构变化会拒绝整个新快照，等待适配解析器。
+- 成功后先用临时文件、fsync 和原子替换保存缓存，再一次性切换内存价格。缓存包含来源 URL、UTC 获取时间、正文及 SHA-256；重启重新校验和解析，不执行网页脚本。
+- 失败时保留上次有效价格，1 小时后重试；后台失败不影响推理。缓存损坏、来源不符、时间来自未来或早于内置基线时不加载。价格核对超过 7 天显示过期提示；旧表中已到期的促销仍返回未知。
+- 新价格仅用于更新之后记录的 Copilot 用量估算，不重新推理、不改写用量账本、不重算已累计的估算。此前未计价的调用保持未计价，不能凭累计 tokens 推测单次档位。
+- 关闭应用时取消网络任务并等待缓存写入结束。机制是应用内后台任务，无需 Codex 自动化或 GitHub Actions；不自动提交价格到 Git、不重新构建或部署应用。
+
+| 环境变量 | 默认值 | 用途 |
+|---|---|---|
+| `COPILOT_PRICING_AUTO_REFRESH` | `true` | `false`、`0`、`no` 关闭网络刷新；仍可加载有效缓存 |
+| `COPILOT_PRICING_CACHE_PATH` | JSON 用量目录下的 `copilot-pricing.json`；MySQL 后端为 `./usage_data/copilot-pricing.json` | 可写缓存位置；建议放在已有持久卷中，每个实例使用自己的文件 |
+
+多副本各自每周检查，允许短暂的价格版本差异；本机制不承诺跨实例原子刷新。无持久卷时进程内刷新仍可工作，但容器重建后会丢失缓存并重新获取。只读/不可写缓存目录会使刷新失败并保留现有价格，Dashboard 可见失败状态。
+
+`/stats.github_copilot.pricing` 提供 `checked_on`、`model_count`、`source_sha256`、`catalog_origin` 与 `refresh`（启用状态、上次尝试、最近成功、下次检查、过期状态和安全错误类型）。Dashboard 的 Copilot 页同步显示核对日期和更新状态。界面的秒级自动刷新仍仅指统计刷新，与每 7 天价格更新分开。
 
 | 模型 | 输入 | 输出 | 缓存读取 | 缓存写入 |
 |---|---:|---:|---:|---:|
@@ -12,9 +31,15 @@ Author: Zeno Ren
 | GPT-5.6 Sol | $4.00 | $20.00 | $0.40 | $5.00 |
 | GPT-5.6 Terra | $2.00 | $12.00 | $0.20 | $2.50 |
 | GPT-6 Astra | $10.00 | $50.00 | $1.00 | $12.50 |
+| GPT-6 Luna | $0.10 | $0.50 | $0.01 | $0.125 |
+| GPT-6 Sol | $2.00 | $10.00 | $0.20 | $2.50 |
+| GPT-6.1 Sol | $2.00 | $10.00 | $0.10 | $2.50 |
+| Claude Opus 5.5 | $4.00 | $20.00 | $0.20 | $5.00 |
+| Claude Sonnet 5.5 | $2.00 | $10.00 | $0.20 | $2.50 |
+| Grok 4.7 | $2.00 | $6.00 | $0.50 | 不适用 |
 | Claude Fable 5.1 | $10.00 | $50.00 | $0.25 | $12.50 |
 
-表中单位均为 USD / 100 万 tokens，列出默认档；模块包含官方长上下文档。Luna 和 Grok 的阈值为 200,000 输入 tokens；GPT-5.4/5.5、Sol/Terra、Astra 为 272,000。严格超过阈值才使用长上下文档，按每条上游已报告 usage 分别计算，再累加费用，不能把多次短请求的累计输入当成长上下文请求。
+表中单位均为 USD / 100 万 tokens，列出默认档；模块包含官方长上下文档。GPT-5.6 Luna 和 Grok 的阈值为 200,000 输入 tokens；GPT-5.4/5.5、GPT-5.6 Sol/Terra、GPT-6 Astra/Luna/Sol 和 GPT-6.1 Sol 为 272,000。严格超过阈值才使用长上下文档，按每条上游已报告 usage 分别计算，再累加费用，不能把多次短请求的累计输入当成长上下文请求。
 
 Copilot 的 Chat/Responses 输入统计是包含缓存细分的总输入，因此普通输入计费量为 `input_tokens - cache_read_tokens - cache_creation_tokens`。缓存读取与写入分别应用官方价格；未设置独立缓存写入费的模型，其写入 tokens 仍按普通输入价估算，不视为免费。计费估算不改变原始 token 统计或追加账本。负数、不完整的必需 usage 或不一致的缓存总量不生成完整费用估计。
 
@@ -30,6 +55,10 @@ Copilot 的 Chat/Responses 输入统计是包含缓存细分的总输入，因�
 
 本轮只更新代码与本地验证。服务环境只有在后续部署新镜像后才会显示这些变化。
 
-## 验证
+## 2026-10-01 更新验证
+
+本轮本地完整回归、应用镜像定向测试、真实官方价格抓取及 Dashboard 明暗主题渲染结果见 [验证回执](reviews/2026-10-01-pricing-refresh/VALIDATION.md)。
+
+## 2026-09-21 历史验证
 
 完整本地回归 634 passed、598 subtests passed；6 个隔离 MySQL 用例未在本轮重复执行。候选应用镜像无源码挂载验证 59 passed、49 subtests passed，1 个可选 OTel 用例跳过。价格表逐行核对、独立只读 QA、前端未知/部分费用断言和桌面浏览器合成数据渲染检查均通过，详见 [验证回执](reviews/2026-09-21-copilot-pricing/validation.json)。未调用真实模型或核对实际 GitHub 账单。
