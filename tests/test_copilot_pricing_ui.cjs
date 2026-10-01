@@ -11,6 +11,12 @@ const context = {};
 vm.createContext(context);
 vm.runInContext(formatters + tables, context);
 const model = 'gpt-6-astra';
+assert.match(context.pricingRefreshText({checked_on: '2026-10-01', model_count: 35,
+  refresh: {enabled: true, status: 'ok', last_success_at: '2026-10-01T09:00:00+00:00'}}), /每 7 天/);
+assert.match(context.pricingRefreshText({refresh: {enabled: true, status: 'error', stale: true}}), /保留上次有效价格/);
+assert.match(context.pricingRefreshText({refresh: {enabled: true, status: 'error', stale: true}}), /超过 7 天/);
+assert.match(context.pricingRefreshText({refresh: {enabled: false, status: 'disabled'}}), /已关闭/);
+assert.match(context.pricingRefreshText(), /尚未启动/);
 const summary = context.aggregateModels([
   {model_stats: {[model]: {requests: 1, input_tokens: 100, estimated_cost_usd: .5, priced_requests: 1, unpriced_requests: 0, known_cost_subtotal_usd: .5}}},
   {model_stats: {[model]: {requests: 1, input_tokens: 100, estimated_cost_usd: null, priced_requests: 0, unpriced_requests: 1, known_cost_subtotal_usd: 0}}}

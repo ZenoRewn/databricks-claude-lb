@@ -1,5 +1,5 @@
 from effort_compat import preserve_native_effort, effort_response_headers, databricks_parameter_drops
-from copilot_pricing import record_estimate as record_copilot_estimate, cost_view as copilot_cost_view, summarize_costs as copilot_cost_summary, METADATA as COPILOT_PRICING_METADATA
+from copilot_pricing import record_estimate as record_copilot_estimate, cost_view as copilot_cost_view, summarize_costs as copilot_cost_summary, get_metadata as copilot_pricing_metadata, PricingRefresh
 from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_call,
                                note_admission, note_admission_end, note_generation,
                                note_json_result, note_candidate_selection, note_retry_decision,
@@ -6247,7 +6247,7 @@ class CopilotProxy:
         total_active = sum(ep.active_requests for ep in self.load_balancer.endpoints)
         costs=copilot_cost_summary(model for ep in endpoints_stats for model in ep["model_stats"].values())
         return {
-            "pricing": dict(COPILOT_PRICING_METADATA),
+            "pricing": copilot_pricing_metadata(),
             "global": {
                 **costs,
                 "uptime_seconds": round(uptime, 1),
@@ -6642,7 +6642,12 @@ async def lifespan(app: FastAPI):
     copilot_bg_task: Optional[asyncio.Task] = None
     copilot_connection_monitor_task: Optional[asyncio.Task] = None
     copilot_warmup_task: Optional[asyncio.Task] = None
+    copilot_pricing_task: Optional[asyncio.Task] = None
     if copilot_proxy:
+        price_cache_root = storage_config.get('path', './usage_data') if storage_config.get('type', 'json') == 'json' else './usage_data'
+        price_cache = os.getenv('COPILOT_PRICING_CACHE_PATH', str(Path(price_cache_root) / 'copilot-pricing.json'))
+        price_refresh = PricingRefresh(price_cache, enabled=os.getenv('COPILOT_PRICING_AUTO_REFRESH', 'true').lower() not in ('false', '0', 'no'))
+        copilot_pricing_task = asyncio.create_task(price_refresh.run(), name='copilot-pricing-refresh')
         logger.info(f"GitHub Copilot proxy enabled with {len(copilot_proxy.load_balancer.endpoints)} endpoints")
         # 后台预热 token，避免阻塞启动；token 无效会在日志中暴露
         copilot_warmup_task = asyncio.create_task(copilot_proxy.warmup())
@@ -6655,7 +6660,7 @@ async def lifespan(app: FastAPI):
         copilot_connection_monitor_task = asyncio.create_task(
             copilot_proxy.connection_monitor_loop()
         )
-    tasks = (copilot_warmup_task,copilot_bg_task,copilot_connection_monitor_task)
+    tasks = (copilot_warmup_task,copilot_bg_task,copilot_connection_monitor_task,copilot_pricing_task)
     clients = (proxy,azure_proxy,copilot_proxy)
     store = usage_store
     app.state.lb_initialized = True
