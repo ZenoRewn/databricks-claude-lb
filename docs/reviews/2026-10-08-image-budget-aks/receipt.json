@@ -1,0 +1,112 @@
+{
+  "author": "Zeno Ren",
+  "release_id": "lb-20261008-images-e47541",
+  "release_result": "succeeded",
+  "application_revision": "284ca53ec94b0dbb0d31325c09684bf1aa12fc02",
+  "registry_image": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:2b0e273e26f181ad7258c9ead871a86242d91151122f85c4630eb38a0161b9c6",
+  "runtime_files_verified": 21,
+  "restarts": 0,
+  "source_and_image_identity_verified": true,
+  "scope_only_image_and_source_annotation": true,
+  "maintenance_started_at": 1791447348.4797359,
+  "maintenance_finished_at": 1791447446.6903472,
+  "maintenance_seconds": 98.211,
+  "rollback_performed": false,
+  "maintenance_cleared": true,
+  "cleanup_errors": [],
+  "routes": {
+    "claude-lb": {
+      "selector": {
+        "app": "claude-lb"
+      },
+      "ready_endpoints": 1,
+      "new_pod_only": true
+    },
+    "claude-lb-internal": {
+      "selector": {
+        "app": "claude-lb"
+      },
+      "ready_endpoints": 1,
+      "new_pod_only": true
+    }
+  },
+  "business_probes": [
+    {
+      "api": "messages",
+      "model": "databricks-claude-opus-5",
+      "stream": false,
+      "completed": true,
+      "marker_found": true,
+      "actual_provider": "databricks"
+    },
+    {
+      "api": "responses",
+      "model": "gpt-5.4",
+      "stream": true,
+      "completed": true,
+      "marker_found": true,
+      "actual_provider": "copilot"
+    },
+    {
+      "api": "chat",
+      "model": "gpt-5.6-luna",
+      "stream": true,
+      "completed": true,
+      "marker_found": true,
+      "actual_provider": "copilot"
+    }
+  ],
+  "business_probe_persistence_verified": true,
+  "prior_ledger_batches_preserved": 8102,
+  "backup": {
+    "consistent_read_only": true,
+    "tls_and_hostname_verified": true,
+    "restored_in_isolated_mysql": true,
+    "rows": {
+      "usage_batch_ledger": 8102,
+      "usage_daily": 368
+    }
+  },
+  "public_observation": {
+    "author": "Zeno Ren",
+    "after_maintenance_rounds": 114,
+    "observed_seconds": 240.051,
+    "unhealthy_rounds": 0,
+    "collection_errors": 0,
+    "paths": [
+      "/health/live",
+      "/health/ready",
+      "/health/accepting"
+    ],
+    "last_observation_utc": "2026-10-08T08:21:26.800651+00:00"
+  },
+  "large_image_probe": {
+    "model": "gpt-6-astra",
+    "source_pixels": 108000000,
+    "images_sent": 9,
+    "max_output_tokens": 512,
+    "lb_pixel_admission_verified": true,
+    "images_preserved_at_route": 9,
+    "transformed_parameters": [
+      "images.compressed"
+    ],
+    "dropped_parameters": [],
+    "provider": "copilot",
+    "upstream_sends": 1,
+    "upstream_http_status": 503,
+    "downstream_http_status": 200,
+    "response_content_type": "text/event-stream",
+    "successful_terminal": false,
+    "end_to_end_generation_verified": false,
+    "result": "failed_upstream_503",
+    "replayed": false,
+    "upstream_execution_certainty": "unknown",
+    "billing_not_inferred": true
+  },
+  "github": {
+    "implementation_pr": "https://github.com/ZenoRewn/databricks-claude-lb/pull/17",
+    "pr_ci": "https://github.com/ZenoRewn/databricks-claude-lb/actions/runs/37747393532",
+    "main_ci": "https://github.com/ZenoRewn/databricks-claude-lb/actions/runs/37747733634",
+    "all_six_checks_passed": true
+  }
+}
