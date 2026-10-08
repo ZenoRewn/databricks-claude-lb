@@ -1,0 +1,14 @@
+{
+  "author": "Zeno Ren",
+  "synthetic": true,
+  "provider_calls": 0,
+  "source_count": 14,
+  "source_dimensions": [
+    3840,
+    2160
+  ],
+  "source_pixels": 116121600,
+  "before_body_bytes": 2059189,
+  "result": "rejected",
+  "message": "Total image pixels exceed budget (~100M px). Images are too large/too many for LB to process safely. Please downscale or remove images."
+}

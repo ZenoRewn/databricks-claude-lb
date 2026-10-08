@@ -1,0 +1,83 @@
+{
+  "author": "Zeno Ren",
+  "synthetic": true,
+  "provider_calls": 0,
+  "source_count": 14,
+  "source_dimensions": [
+    3840,
+    2160
+  ],
+  "source_pixels": 116121600,
+  "output_count": 14,
+  "output_dimensions": [
+    [
+      1280,
+      720
+    ],
+    [
+      1280,
+      720
+    ],
+    [
+      1280,
+      720
+    ],
+    [
+      1280,
+      720
+    ],
+    [
+      1280,
+      720
+    ],
+    [
+      1280,
+      720
+    ],
+    [
+      1280,
+      720
+    ],
+    [
+      1280,
+      720
+    ],
+    [
+      1280,
+      720
+    ],
+    [
+      1280,
+      720
+    ],
+    [
+      1280,
+      720
+    ],
+    [
+      1280,
+      720
+    ],
+    [
+      1280,
+      720
+    ],
+    [
+      1280,
+      720
+    ]
+  ],
+  "output_pixels": 12902400,
+  "before_body_bytes": 2059189,
+  "after_body_bytes": 632827,
+  "duration_seconds": 2.902,
+  "stats": {
+    "count": 14,
+    "before": 1543668,
+    "after": 473886,
+    "trimmed": 0,
+    "source_pixels": 116121600,
+    "output_pixels": 12902400
+  },
+  "process_peak_rss_mib": 127.96
+}

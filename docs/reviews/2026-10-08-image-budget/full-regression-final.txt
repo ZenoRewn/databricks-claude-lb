@@ -1,0 +1,16 @@
+ssssss......................................................................................................................................................................... [ 21%]
+............................................................................................ [ 33%]
+........................................................................................................ [ 46%]
+.............................................. [ 52%]
+...................................................................................................................................................................................... [ 75%]
+................................................................................ [ 85%]
+............................................................................................ [ 96%]
+..........................                                               [100%]
+=========================== short test summary info ============================
+SKIPPED [1] tests/integration/test_mysql_usage.py:122: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:96: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:113: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:88: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:131: requires disposable loopback MySQL test server
+SKIPPED [1] tests/integration/test_mysql_usage.py:104: requires disposable loopback MySQL test server
+791 passed, 6 skipped, 741 subtests passed in 52.45s

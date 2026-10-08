@@ -642,7 +642,8 @@ class LBSettingsTests(unittest.TestCase):
             "STREAM_HEARTBEAT_INTERVAL", "COPILOT_HTML_SOFT_COOLDOWN",
             "COPILOT_POOL_ACQUIRE_TIMEOUT", "COPILOT_POOL_MAX_CONNECTIONS",
             "COPILOT_STREAM_HIGH_WATERMARK", "COPILOT_HTTP2",
-            "IMG_COMPRESS_CONCURRENCY", "IMG_MAX_COUNT",
+            "IMG_COMPRESS_CONCURRENCY", "IMG_MAX_COUNT", "IMG_MAX_TOTAL_PIXELS",
+            "IMG_MAX_SINGLE_PIXELS", "IMG_MAX_SOURCE_PIXELS",
         ]
         saved = {k: os.environ.pop(k, None) for k in keys}
         try:
@@ -656,6 +657,8 @@ class LBSettingsTests(unittest.TestCase):
             self.assertEqual(s.img_compress_concurrency, 2)
             self.assertEqual(s.img_max_count, 50)
             self.assertEqual(s.img_max_total_pixels, 100_000_000)
+            self.assertEqual(s.img_max_single_pixels, 40_000_000)
+            self.assertEqual(s.img_max_source_pixels, 400_000_000)
         finally:
             for k, v in saved.items():
                 if v is not None:
@@ -679,6 +682,8 @@ class LBSettingsTests(unittest.TestCase):
             ("IMG_COMPRESS_CONCURRENCY", "_IMG_COMPRESS_CONCURRENCY", "img_compress_concurrency"),
             ("IMG_MAX_COUNT", "_IMG_MAX_COUNT", "img_max_count"),
             ("IMG_MAX_TOTAL_PIXELS", "_IMG_MAX_TOTAL_PIXELS", "img_max_total_pixels"),
+            ("IMG_MAX_SINGLE_PIXELS", "_IMG_MAX_SINGLE_PIXELS", "img_max_single_pixels"),
+            ("IMG_MAX_SOURCE_PIXELS", "_IMG_MAX_SOURCE_PIXELS", "img_max_source_pixels"),
         ]
         saved = {env: os.environ.pop(env, None) for env, _, _ in pairs}
         try:

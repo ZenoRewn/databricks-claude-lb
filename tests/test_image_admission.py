@@ -1,18 +1,17 @@
 """图片准入门（`check_image_admission`）的行为覆盖。
 
-为什么单独一个文件：这道门是**防 Pod OOM 的唯一屏障**，而历史上真的因为多张高分辨率
-图同时 PIL 解码把 Pod 打爆过（字节数上限管不住位图 —— 一张 4000×3000 图 base64 才
-~2MB，解码成位图要 ~48MB）。在此之前它只有 env 名字出现在配置 introspection 测试里，
-**零行为覆盖**。
+字节数上限管不住位图：一张 4000×3000 图 base64 才 ~2MB，解码和重采样却需要几十 MB。
+此文件保留默认总像素/张数准入契约；有界缩图及取消所有权见 test_image_normalization.py。
 
 设计要点（测试即契约）：
   - 只 peek header 拿 `(w, h)`，不 `.load()`，所以门本身几乎不占内存
   - 张数与总像素两道预算，任一超限抛 `ImageAdmissionError` → 客户端拿 JSON 413
-  - 与压缩共用 200KB 门槛：低于门槛时 PIL 根本不解码，所以跳过准入是自洽的
-  - 必须在压缩**之前**跑，否则位图已经materialize了，门就白设了
+  - 源图单图/累计预算必须在压缩前检查，默认总像素预算在压缩后仍须满足
+  - 小于 200KB 的图片仍检查尺寸，纯色大图也须受预算保护
 """
 import base64
 import io
+import inspect
 import os
 import pathlib
 import sys
@@ -220,7 +219,7 @@ class TrimExcessImagesTests(unittest.TestCase):
 
 @unittest.skipUnless(_PIL, "Pillow 不可用时压缩自动跳过")
 class CompressionTests(unittest.TestCase):
-    """压缩链路：>200KB 才动手、等比缩到 ≤1280px、转 JPEG、压不小就保留原图。"""
+    """压缩链路：按字节或尺寸触发，缩到 ≤1280px；安全缩图允许编码变大。"""
 
     @staticmethod
     def _photo_b64(w, h):
@@ -282,36 +281,27 @@ class CompressionTests(unittest.TestCase):
 
 
 class AdmissionWiringTests(unittest.TestCase):
-    """结构守卫：准入必须在压缩**之前**被调用，三个入口都要有。
-
-    顺序错了这道门就白设 —— 位图已经 materialize 完了才检查预算。用源码顺序断言
-    而不是跑 HTTP，是因为要锁的正是「调用点存在且在前面」这个结构事实。
-    """
+    """三个入口共用同一源预算/压缩/输出复核，不能因请求体较小绕过。"""
 
     def setUp(self):
         self.src = pathlib.Path(main.__file__).read_text(encoding="utf-8")
 
-    def test_all_three_entry_points_gate_before_compressing(self):
-        # 每个入口两处：初次准入 + trim 之后的重跑（降级路径不得绕过预算）
-        self.assertEqual(self.src.count("check_image_admission(body)"), 6,
-                         "三个入口各两处：初次准入 + trim 后重跑")
-        self.assertEqual(self.src.count("trim_excess_images(body)"), 3)
-        for entry in ('"/v1/messages"', '"/v1/responses"', '"/v1/chat/completions"'):
-            with self.subTest(entry=entry):
-                # 从该入口的日志/路由标记往后找，准入必须先于压缩出现
-                start = self.src.index(entry)
-                window = self.src[start:start + 6000]
-                gate = window.find("check_image_admission(body)")
-                comp = window.find("compress_images")
-                self.assertNotEqual(gate, -1, "该入口缺少准入调用")
-                self.assertNotEqual(comp, -1, "该入口缺少压缩调用")
-                self.assertLess(gate, comp, "准入必须在压缩之前")
+    def test_all_three_entry_points_use_shared_preparation(self):
+        for route in ("/v1/messages", "/v1/responses", "/v1/chat/completions"):
+            with self.subTest(route=route):
+                self.assertEqual(self.src.count(f'prepare_images_async(body, route="{route}")'), 1)
 
-    def test_admission_error_maps_to_json_413(self):
-        """客户端必须拿到 JSON 413（区别于 ingress 的 HTML 413，见 TROUBLESHOOTING §3）。"""
-        self.assertEqual(self.src.count("except ImageAdmissionError as e:"), 3)
-        for marker in ('"request_too_large"',):
-            self.assertIn(marker, self.src)
+    def test_preparation_gates_before_decode_and_rechecks_output(self):
+        source = inspect.getsource(main.prepare_images_async)
+        initial = source.index("check_image_admission(payload, source=True)")
+        trim = source.index("trim_excess_images(payload)")
+        trimmed = source.index("check_image_admission(payload, source=True)", initial + 1)
+        compression = source.index("await compress_images_async(payload)")
+        output = source.index("check_image_admission(payload)")
+        self.assertLess(initial, trim)
+        self.assertLess(trim, trimmed)
+        self.assertLess(trimmed, compression)
+        self.assertLess(compression, output)
 
 
 if __name__ == "__main__":
