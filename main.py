@@ -57,7 +57,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
-from contextlib import aclosing, closing, asynccontextmanager
+from contextlib import ExitStack, aclosing, closing, asynccontextmanager
 import contextvars
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -140,6 +140,8 @@ class LBSettings:
     img_compress_concurrency: int      # IMG_COMPRESS_CONCURRENCY=2
     img_max_count: int                 # IMG_MAX_COUNT=50
     img_max_total_pixels: int          # IMG_MAX_TOTAL_PIXELS
+    img_max_single_pixels: int         # IMG_MAX_SINGLE_PIXELS
+    img_max_source_pixels: int         # IMG_MAX_SOURCE_PIXELS
     # ---- Copilot headers ----
     copilot_editor_version: str        # COPILOT_EDITOR_VERSION=vscode/1.104.0
     copilot_editor_plugin_version: str # COPILOT_EDITOR_PLUGIN_VERSION=copilot-chat/0.30.0
@@ -219,6 +221,8 @@ class LBSettings:
             # tests/test_databricks_payload_compat.py::LBSettingsTests
             #   ::test_no_dual_sourced_env_default_drift
             img_max_total_pixels=_env_int("IMG_MAX_TOTAL_PIXELS", 100_000_000),
+            img_max_single_pixels=_env_int("IMG_MAX_SINGLE_PIXELS", 40_000_000),
+            img_max_source_pixels=_env_int("IMG_MAX_SOURCE_PIXELS", 400_000_000),
             copilot_editor_version=_env_str("COPILOT_EDITOR_VERSION", "vscode/1.104.0"),
             copilot_editor_plugin_version=_env_str("COPILOT_EDITOR_PLUGIN_VERSION", "copilot-chat/0.30.0"),
             copilot_user_agent=_env_str("COPILOT_USER_AGENT", "GitHubCopilotChat/0.30.0"),
@@ -1641,29 +1645,31 @@ def strip_cache_control_extras(body: dict) -> int:
 
 
 # ==================== Image Auto-Compression ====================
-# 大图自动压缩：超过 200KB 的 base64 图片缩到 ≤1280px JPEG q=82，让 30MB 的 Chrome
+# 大图自动压缩：超过 200KB 或长边超过 1280px 的内联图片缩到 ≤1280px JPEG q=82。
+# 原图先受单图/累计解码工作量预算约束，压缩后复核总像素，保留全部图片节点。
+# 让 30MB 的 Chrome
 # fullPage 截图能塞进 ADB / GHCP 上游。仅压缩 messages 内容里的图，对其他字段无副作用。
 # 同时支持两种载荷格式：
 #   - Anthropic: {"type":"image","source":{"type":"base64","media_type":...,"data":"<b64>"}}
 #   - OpenAI / Responses: 任意值为 "data:image/...;base64,..." 的字符串
-_IMG_COMPRESS_THRESHOLD = 200 * 1024  # 解码后 < 200KB 不压
+_IMG_COMPRESS_THRESHOLD = 200 * 1024  # 小于此字节数且尺寸合规时不压
 _IMG_MAX_DIM = 1280
 _IMG_JPEG_QUALITY = 82
 _DATA_URL_RE = re.compile(r"^data:image/([a-zA-Z0-9+.\-]+);base64,(.+)$", re.DOTALL)
 
-# ---- 图片准入软上限：在 PIL 解码（内存放大真凶）之前拦截异常请求 ----
-# 背景：base64 体积 ≠ 解码后内存。一张 4000x3000 图 base64 才 ~2MB，PIL 解码成
-# 位图却要 ~48MB。多张高分辨率图同时解码 = OOM。RAW/REQUEST 字节上限管不住
-# "张数 x 单图像素" 这个维度，故在此加三层软保护，全部在解码前生效。
+# 源图单张预算限制解码峰值；源图累计预算限制 CPU 工作量；输出预算限制转发像素。
+# 这些不是进程 RSS 的硬上限：Pillow 仍有源位图、重采样和颜色转换临时缓冲。
 _IMG_MAX_COUNT = int(os.environ.get("IMG_MAX_COUNT", "50"))          # 单请求图片张数上限
-_IMG_MAX_TOTAL_PIXELS = int(os.environ.get("IMG_MAX_TOTAL_PIXELS", str(100_000_000)))  # 总像素预算 ~= 8 张 4K
+_IMG_MAX_TOTAL_PIXELS = int(os.environ.get("IMG_MAX_TOTAL_PIXELS", str(100_000_000)))
+_IMG_MAX_SINGLE_PIXELS = int(os.environ.get("IMG_MAX_SINGLE_PIXELS", str(40_000_000)))
+_IMG_MAX_SOURCE_PIXELS = int(os.environ.get("IMG_MAX_SOURCE_PIXELS", str(400_000_000)))
 _IMG_COMPRESS_CONCURRENCY = int(os.environ.get("IMG_COMPRESS_CONCURRENCY", "2"))       # 同时解码张数（削峰）
 _IMG_ADMISSION_ENABLED = os.environ.get("IMG_ADMISSION_ENABLED", "1") not in ("0", "false", "False")
 
-# 单图解码前的像素护栏：防 decompression-bomb（PIL 默认 ~178M px 会告警但仍解）
+# Pillow 的 bomb 阈值与累计预算解耦；显式单图检查在任何全量解码之前执行。
 if _PIL_AVAILABLE:
     try:
-        Image.MAX_IMAGE_PIXELS = _IMG_MAX_TOTAL_PIXELS
+        Image.MAX_IMAGE_PIXELS = _IMG_MAX_SINGLE_PIXELS
     except Exception:
         pass
 
@@ -1672,9 +1678,17 @@ _img_compress_sem = None  # 延迟到事件循环内创建
 
 class ImageAdmissionError(Exception):
     """图片准入超限，携带面向客户端的报错信息。"""
-    def __init__(self, message: str):
+    def __init__(self, message: str, *, reason: str = "pixels"):
         super().__init__(message)
         self.message = message
+        self.reason = reason
+
+
+def _check_single_image_size(size) -> None:
+    if size and size[0] * size[1] > _IMG_MAX_SINGLE_PIXELS:
+        raise ImageAdmissionError(
+            f"Single image pixels exceed decode budget (~{_IMG_MAX_SINGLE_PIXELS/1e6:g}M px). "
+            "Please downscale this image before sending it.", reason="single_pixels")
 
 
 def _peek_image_size(raw: bytes):
@@ -1684,6 +1698,11 @@ def _peek_image_size(raw: bytes):
     try:
         with Image.open(BytesIO(raw)) as im:
             return im.size  # (w, h)，此时尚未解码像素
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise ImageAdmissionError(
+            f"Single image pixels exceed decode budget (~{_IMG_MAX_SINGLE_PIXELS/1e6:g}M px). "
+            "Image decompression safety limit exceeded; please downscale it.",
+            reason="single_pixels") from exc
     except Exception:
         return None
 
@@ -1696,13 +1715,14 @@ def _try_b64(data: str) -> Optional[bytes]:
         return None
 
 
-def check_image_admission(payload) -> None:
+def check_image_admission(payload, *, source: bool = False) -> Optional[dict]:
     """解码前遍历 payload 统计图片张数与总像素，超限抛 ImageAdmissionError。
     仅 peek header，不触发全量解码，本身内存开销极小。"""
     if not _IMG_ADMISSION_ENABLED or not _PIL_AVAILABLE:
-        return
+        return None
     count = 0
     total_px = 0
+    limit = _IMG_MAX_SOURCE_PIXELS if source else _IMG_MAX_TOTAL_PIXELS
 
     def account(raw: Optional[bytes]):
         """记一张图。``raw=None`` 表示 base64 解不开 —— 仍然计入张数。
@@ -1717,18 +1737,21 @@ def check_image_admission(payload) -> None:
         if count > _IMG_MAX_COUNT:
             raise ImageAdmissionError(
                 f"Too many images in request: >{_IMG_MAX_COUNT} (limit for LB memory safety). "
-                f"Please split the request or remove images."
+                f"Please split the request or remove images.", reason="count"
             )
         if raw is None:
             return
         size = _peek_image_size(raw)
         if size:
+            _check_single_image_size(size)
             total_px += size[0] * size[1]
-            if total_px > _IMG_MAX_TOTAL_PIXELS:
+            if total_px > limit:
+                label = "Source image pixels exceed processing budget" if source else "Total image pixels exceed budget"
                 raise ImageAdmissionError(
-                    f"Total image pixels exceed budget (~{_IMG_MAX_TOTAL_PIXELS/1e6:.0f}M px). "
+                    f"{label} (~{limit/1e6:g}M px). "
                     f"Images are too large/too many for LB to process safely. "
-                    f"Please downscale or remove images."
+                    f"Please downscale or remove images.",
+                    reason="source_pixels" if source else "pixels"
                 )
 
     def visit(node):
@@ -1755,6 +1778,7 @@ def check_image_admission(payload) -> None:
             account(_try_b64(m.group(2)))
 
     visit(payload)
+    return {"count": count, "pixels": total_px}
 
 
 def trim_excess_images(payload, max_count: Optional[int] = None) -> int:
@@ -1836,35 +1860,47 @@ def trim_excess_images(payload, max_count: Optional[int] = None) -> int:
 
 
 def _compress_image_bytes(raw: bytes) -> Optional[bytes]:
-    """解码 → 等比缩到 ≤1280px → JPEG q=82 重编码。压不小或失败返回 None（保留原图）。"""
-    if len(raw) < _IMG_COMPRESS_THRESHOLD:
-        return None
+    """先核实单图预算，再缩图；尺寸超限时即使编码字节变大也保留缩图。"""
     if not _PIL_AVAILABLE:
         return None
     try:
-        img = Image.open(BytesIO(raw))
-        try:
-            img = ImageOps.exif_transpose(img) or img
-        except Exception:
-            pass
-        img.thumbnail((_IMG_MAX_DIM, _IMG_MAX_DIM), Image.Resampling.LANCZOS)
-        if img.mode in ("RGBA", "LA"):
-            bg = Image.new("RGB", img.size, (255, 255, 255))
-            bg.paste(img, mask=img.split()[-1])
-            img = bg
-        elif img.mode == "P":
-            img = img.convert("RGBA")
-            bg = Image.new("RGB", img.size, (255, 255, 255))
-            bg.paste(img, mask=img.split()[-1])
-            img = bg
-        elif img.mode != "RGB":
-            img = img.convert("RGB")
-        out = BytesIO()
-        img.save(out, format="JPEG", quality=_IMG_JPEG_QUALITY, optimize=True)
-        compressed = out.getvalue()
-        if len(compressed) >= len(raw):
-            return None
-        return compressed
+        with ExitStack() as images:
+            img = images.enter_context(closing(Image.open(BytesIO(raw))))
+            _check_single_image_size(img.size)
+            must_resize = max(img.size) > _IMG_MAX_DIM
+            if len(raw) < _IMG_COMPRESS_THRESHOLD and not must_resize:
+                return None
+            # thumbnail may use JPEG draft decoding. EXIF transpose happens only
+            # after shrinking, avoiding a full-resolution transpose copy.
+            img.thumbnail((_IMG_MAX_DIM, _IMG_MAX_DIM), Image.Resampling.LANCZOS)
+            try:
+                transposed = ImageOps.exif_transpose(img)
+                if transposed is not None and transposed is not img:
+                    img = images.enter_context(closing(transposed))
+            except Exception:
+                pass
+            if img.mode == "P":
+                img = images.enter_context(closing(img.convert("RGBA")))
+            if img.mode in ("RGBA", "LA"):
+                bg = images.enter_context(closing(Image.new("RGB", img.size, (255, 255, 255))))
+                with closing(img.getchannel("A")) as alpha:
+                    bg.paste(img, mask=alpha)
+                img = bg
+            elif img.mode != "RGB":
+                img = images.enter_context(closing(img.convert("RGB")))
+            with BytesIO() as out:
+                img.save(out, format="JPEG", quality=_IMG_JPEG_QUALITY, optimize=True)
+                compressed = out.getvalue()
+            if not must_resize and len(compressed) >= len(raw):
+                return None
+            return compressed
+    except ImageAdmissionError:
+        raise
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise ImageAdmissionError(
+            f"Single image pixels exceed decode budget (~{_IMG_MAX_SINGLE_PIXELS/1e6:g}M px). "
+            "Image decompression safety limit exceeded; please downscale it.",
+            reason="single_pixels") from exc
     except Exception as e:
         # 压坏不抛错，原图过路即可
         try:
@@ -1900,7 +1936,7 @@ def compress_images_in_payload(payload) -> dict:
             if node.get("type") == "image" and isinstance(node.get("source"), dict):
                 src = node["source"]
                 data = src.get("data") if src.get("type") == "base64" else None
-                if isinstance(data, str) and len(data) >= _IMG_COMPRESS_THRESHOLD:
+                if isinstance(data, str) and data:
                     try:
                         raw = base64.b64decode(data, validate=False)
                     except Exception:
@@ -1923,9 +1959,6 @@ def compress_images_in_payload(payload) -> dict:
                 visit(node[i], node, i)
             return
         if isinstance(node, str):
-            # 粗筛：data URL 串至少要有 ~270KB 才可能解出 200KB 原图
-            if len(node) < _IMG_COMPRESS_THRESHOLD:
-                return
             if not node.startswith("data:image/"):
                 return
             new = _compress_data_url(node)
@@ -1947,13 +1980,9 @@ def compress_images_in_payload(payload) -> dict:
 async def compress_images_async(payload) -> dict:
     """在线程池执行压缩，避免阻塞 event loop。无图片时近乎零开销。
 
-    内存上界怎么来的（容易看错，写清）：``compress_images_in_payload`` 在单线程里
-    **逐张**解码，每张位图在 ``_compress_image_bytes`` 返回后即释放，所以单个请求的
-    峰值是「一张位图」而不是「N 张」。这里的 Semaphore 限的是**并发压缩的请求数**，
-    于是全局峰值 ≈ ``IMG_COMPRESS_CONCURRENCY`` 张位图。
-
-    也就是说防 OOM 靠的是「顺序解码 + 这个请求级限流」，**不是** IMG_MAX_TOTAL_PIXELS
-    —— 后者约束的是累计解码工作量（延迟/CPU），两者目的不同，别混用来调参。
+    每个请求逐张处理，单图和源累计预算分别约束解码尺寸及 CPU 工作量。Pillow
+    仍可能同时保留源位图和重采样临时缓冲，不能把单张像素预算等同于 RSS 硬上限。
+    取消不会停止底层线程，必须等实际线程结束后才释放 semaphore 和请求所有权。
     """
     if not _PIL_AVAILABLE:
         return {"count": 0, "before": 0, "after": 0}
@@ -1961,7 +1990,54 @@ async def compress_images_async(payload) -> dict:
     if _img_compress_sem is None:
         _img_compress_sem = asyncio.Semaphore(max(1, _IMG_COMPRESS_CONCURRENCY))
     async with _img_compress_sem:
-        return await asyncio.to_thread(compress_images_in_payload, payload)
+        worker = asyncio.create_task(asyncio.to_thread(compress_images_in_payload, payload))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            try:
+                await _join_cleanup_task(worker)
+            except Exception:
+                # Consume a worker error, but preserve the caller's cancellation.
+                pass
+            raise
+
+
+async def prepare_images_async(payload, *, route: str) -> dict:
+    """Bound source decode work, retain image nodes, and recheck normalized pixels.
+
+    Only the existing explicit image-trim policy permits replacing old images.
+    Source or single-image safety failures never trigger automatic trimming.
+    """
+    trimmed = 0
+    try:
+        try:
+            source = check_image_admission(payload, source=True)
+        except ImageAdmissionError as exc:
+            if exc.reason != "count":
+                raise
+            trimmed = trim_excess_images(payload)
+            if not trimmed:
+                raise
+            source = check_image_admission(payload, source=True)
+            logger.warning(f"[image-trim] {route}: explicitly permitted removal of {trimmed} oldest images")
+        if source is not None and not source["count"]:
+            return {"count": 0, "before": 0, "after": 0, "trimmed": trimmed,
+                    "source_pixels": 0, "output_pixels": 0}
+        stats = await compress_images_async(payload)
+        output = check_image_admission(payload)
+    except ImageAdmissionError as exc:
+        logger.warning(f"[image-admission] {route} rejected: {exc.message}")
+        raise HTTPException(status_code=413, detail={"error": {
+            "type": "request_too_large", "message": exc.message}}) from exc
+    stats.update(trimmed=trimmed, source_pixels=source["pixels"] if source else None,
+                 output_pixels=output["pixels"] if output else None)
+    if stats["count"]:
+        note_parameter_transforms({'images.compressed'})
+        logger.info(
+            f"[image-compress] {route}: {stats['count']} imgs "
+            f"{stats['before']/1024:.0f}KB -> {stats['after']/1024:.0f}KB "
+            f"pixels={stats['source_pixels']}->{stats['output_pixels']}")
+    return stats
 
 
 # ==================== Load Balancer ====================
@@ -6856,38 +6932,10 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
         raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
 
     note_request_context(body.get("model"), stream=body.get("stream", False), body_size=body_size)
-    # 大请求先尝试压缩图片（小请求跳过节省 CPU）
-    if body_size > _IMG_COMPRESS_THRESHOLD:
-        try:
-            check_image_admission(body)
-        except ImageAdmissionError as e:
-            # 优雅降级：丢掉最早的图再试一次。**必须重跑准入** —— 只按张数 trim 到
-            # 上限并不保证像素预算也满足（50 张 4K 仍远超预算），不重跑等于让降级
-            # 路径把预算整个绕过去。仍超则按原始原因 413，与「无图可 trim」一致。
-            trimmed = trim_excess_images(body)
-            if trimmed:
-                try:
-                    check_image_admission(body)
-                except ImageAdmissionError as still:
-                    logger.warning(
-                        f"[image-admission] /v1/messages rejected after trimming "
-                        f"{trimmed} images: {still.message}")
-                    raise HTTPException(status_code=413, detail={"error": {
-                        "type": "request_too_large", "message": still.message}})
-                logger.warning(f"[image-trim] /v1/messages: auto-trimmed {trimmed} oldest images (was: {e.message})")
-            else:
-                logger.warning(f"[image-admission] /v1/messages rejected: {e.message}")
-                raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
-        stats = await compress_images_async(body)
-        if stats["count"] > 0:
-            note_parameter_transforms({'images.compressed'})
-            saved_kb = (stats["before"] - stats["after"]) / 1024
-            logger.info(
-                f"[image-compress] /v1/messages: {stats['count']} imgs "
-                f"{stats['before']/1024:.0f}KB -> {stats['after']/1024:.0f}KB (saved {saved_kb:.0f}KB)"
-            )
-            body_bytes = json.dumps(body).encode("utf-8")
-            body_size = len(body_bytes)
+    stats = await prepare_images_async(body, route="/v1/messages")
+    if stats["count"] or stats["trimmed"]:
+        body_bytes = json.dumps(body).encode("utf-8")
+        body_size = len(body_bytes)
 
     if body_size > MAX_REQUEST_SIZE:
         size_mb = body_size / (1024 * 1024)
@@ -7732,34 +7780,7 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
     stream = body.get("stream", False)
     note_request_context(body.get("model"), stream=stream, body_size=len(body_bytes))
     _log_openai_request(request_id, "/v1/responses", request, body, len(body_bytes), stream)
-    if len(body_bytes) > _IMG_COMPRESS_THRESHOLD:
-        try:
-            check_image_admission(body)
-        except ImageAdmissionError as e:
-            # 优雅降级：丢掉最早的图再试一次。**必须重跑准入** —— 只按张数 trim 到
-            # 上限并不保证像素预算也满足（50 张 4K 仍远超预算），不重跑等于让降级
-            # 路径把预算整个绕过去。仍超则按原始原因 413，与「无图可 trim」一致。
-            trimmed = trim_excess_images(body)
-            if trimmed:
-                try:
-                    check_image_admission(body)
-                except ImageAdmissionError as still:
-                    logger.warning(
-                        f"[image-admission] /v1/responses rejected after trimming "
-                        f"{trimmed} images: {still.message}")
-                    raise HTTPException(status_code=413, detail={"error": {
-                        "type": "request_too_large", "message": still.message}})
-                logger.warning(f"[image-trim] /v1/responses: auto-trimmed {trimmed} oldest images (was: {e.message})")
-            else:
-                logger.warning(f"[image-admission] /v1/responses rejected: {e.message}")
-                raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
-        stats = await compress_images_async(body)
-        if stats["count"] > 0:
-            note_parameter_transforms({'images.compressed'})
-            logger.info(
-                f"[image-compress] /v1/responses: {stats['count']} imgs "
-                f"{stats['before']/1024:.0f}KB -> {stats['after']/1024:.0f}KB"
-            )
+    await prepare_images_async(body, route="/v1/responses")
     logger.info(f"[Responses] model={body.get('model')}, stream={stream}")
     return await _route_openai_responses(
         body, stream=stream, request_id=request_id,
@@ -7805,34 +7826,7 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
     stream = body.get("stream", False)
     note_request_context(body.get("model"), stream=stream, body_size=len(body_bytes))
     _log_openai_request(request_id, "/v1/chat/completions", request, body, len(body_bytes), stream)
-    if len(body_bytes) > _IMG_COMPRESS_THRESHOLD:
-        try:
-            check_image_admission(body)
-        except ImageAdmissionError as e:
-            # 优雅降级：丢掉最早的图再试一次。**必须重跑准入** —— 只按张数 trim 到
-            # 上限并不保证像素预算也满足（50 张 4K 仍远超预算），不重跑等于让降级
-            # 路径把预算整个绕过去。仍超则按原始原因 413，与「无图可 trim」一致。
-            trimmed = trim_excess_images(body)
-            if trimmed:
-                try:
-                    check_image_admission(body)
-                except ImageAdmissionError as still:
-                    logger.warning(
-                        f"[image-admission] /v1/chat/completions rejected after trimming "
-                        f"{trimmed} images: {still.message}")
-                    raise HTTPException(status_code=413, detail={"error": {
-                        "type": "request_too_large", "message": still.message}})
-                logger.warning(f"[image-trim] /v1/chat/completions: auto-trimmed {trimmed} oldest images (was: {e.message})")
-            else:
-                logger.warning(f"[image-admission] /v1/chat/completions rejected: {e.message}")
-                raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large", "message": e.message}})
-        stats = await compress_images_async(body)
-        if stats["count"] > 0:
-            note_parameter_transforms({'images.compressed'})
-            logger.info(
-                f"[image-compress] /v1/chat/completions: {stats['count']} imgs "
-                f"{stats['before']/1024:.0f}KB -> {stats['after']/1024:.0f}KB"
-            )
+    await prepare_images_async(body, route="/v1/chat/completions")
     removed_token_fields = _drop_nonpositive_token_limits(body)
     if removed_token_fields:
         note_parameter_drops(removed_token_fields)

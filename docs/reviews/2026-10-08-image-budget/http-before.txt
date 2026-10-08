@@ -1,0 +1,64 @@
+...                                                          [100%]
+=================================== FAILURES ===================================
+_ ImageNormalizationHttpTests.test_failed_normalization_cannot_forward_over_budget_images (protocol='messages') _
+tests/test_image_http_normalization.py:104: in test_failed_normalization_cannot_forward_over_budget_images
+    self.assertEqual(response.status_code, 413, response.text)
+E   AssertionError: 200 != 413 : {"synthetic":true}
+_ ImageNormalizationHttpTests.test_failed_normalization_cannot_forward_over_budget_images (protocol='responses') _
+tests/test_image_http_normalization.py:104: in test_failed_normalization_cannot_forward_over_budget_images
+    self.assertEqual(response.status_code, 413, response.text)
+E   AssertionError: 200 != 413 : {"synthetic":true}
+_ ImageNormalizationHttpTests.test_failed_normalization_cannot_forward_over_budget_images (protocol='chat') _
+tests/test_image_http_normalization.py:104: in test_failed_normalization_cannot_forward_over_budget_images
+    self.assertEqual(response.status_code, 413, response.text)
+E   AssertionError: 200 != 413 : {"synthetic":true}
+_ ImageNormalizationHttpTests.test_small_encoded_body_still_enforces_single_image_and_count_limits (protocol='messages', reason='single') _
+tests/test_image_http_normalization.py:93: in test_small_encoded_body_still_enforces_single_image_and_count_limits
+    self.assertEqual(response.status_code, 413, response.text)
+E   AssertionError: 200 != 413 : {"synthetic":true}
+_ ImageNormalizationHttpTests.test_small_encoded_body_still_enforces_single_image_and_count_limits (protocol='messages', reason='count') _
+tests/test_image_http_normalization.py:93: in test_small_encoded_body_still_enforces_single_image_and_count_limits
+    self.assertEqual(response.status_code, 413, response.text)
+E   AssertionError: 200 != 413 : {"synthetic":true}
+_ ImageNormalizationHttpTests.test_small_encoded_body_still_enforces_single_image_and_count_limits (protocol='responses', reason='single') _
+tests/test_image_http_normalization.py:93: in test_small_encoded_body_still_enforces_single_image_and_count_limits
+    self.assertEqual(response.status_code, 413, response.text)
+E   AssertionError: 200 != 413 : {"synthetic":true}
+_ ImageNormalizationHttpTests.test_small_encoded_body_still_enforces_single_image_and_count_limits (protocol='responses', reason='count') _
+tests/test_image_http_normalization.py:93: in test_small_encoded_body_still_enforces_single_image_and_count_limits
+    self.assertEqual(response.status_code, 413, response.text)
+E   AssertionError: 200 != 413 : {"synthetic":true}
+_ ImageNormalizationHttpTests.test_small_encoded_body_still_enforces_single_image_and_count_limits (protocol='chat', reason='single') _
+tests/test_image_http_normalization.py:93: in test_small_encoded_body_still_enforces_single_image_and_count_limits
+    self.assertEqual(response.status_code, 413, response.text)
+E   AssertionError: 200 != 413 : {"synthetic":true}
+_ ImageNormalizationHttpTests.test_small_encoded_body_still_enforces_single_image_and_count_limits (protocol='chat', reason='count') _
+tests/test_image_http_normalization.py:93: in test_small_encoded_body_still_enforces_single_image_and_count_limits
+    self.assertEqual(response.status_code, 413, response.text)
+E   AssertionError: 200 != 413 : {"synthetic":true}
+_ ImageNormalizationHttpTests.test_source_over_output_budget_is_resized_without_omitting_images (protocol='messages') _
+tests/test_image_http_normalization.py:73: in test_source_over_output_budget_is_resized_without_omitting_images
+    self.assertEqual(response.status_code, 200, response.text)
+E   AssertionError: 413 != 200 : {"detail":{"error":{"type":"request_too_large","message":"Total image pixels exceed budget (~0.025M px). Images are too large/too many for LB to process safely. Please downscale or remove images."}}}
+_ ImageNormalizationHttpTests.test_source_over_output_budget_is_resized_without_omitting_images (protocol='responses') _
+tests/test_image_http_normalization.py:73: in test_source_over_output_budget_is_resized_without_omitting_images
+    self.assertEqual(response.status_code, 200, response.text)
+E   AssertionError: 413 != 200 : {"detail":{"error":{"type":"request_too_large","message":"Total image pixels exceed budget (~0.025M px). Images are too large/too many for LB to process safely. Please downscale or remove images."}}}
+_ ImageNormalizationHttpTests.test_source_over_output_budget_is_resized_without_omitting_images (protocol='chat') _
+tests/test_image_http_normalization.py:73: in test_source_over_output_budget_is_resized_without_omitting_images
+    self.assertEqual(response.status_code, 200, response.text)
+E   AssertionError: 413 != 200 : {"detail":{"error":{"type":"request_too_large","message":"Total image pixels exceed budget (~0.025M px). Images are too large/too many for LB to process safely. Please downscale or remove images."}}}
+=========================== short test summary info ============================
+SUBFAILED(protocol='messages') tests/test_image_http_normalization.py::ImageNormalizationHttpTests::test_failed_normalization_cannot_forward_over_budget_images
+SUBFAILED(protocol='responses') tests/test_image_http_normalization.py::ImageNormalizationHttpTests::test_failed_normalization_cannot_forward_over_budget_images
+SUBFAILED(protocol='chat') tests/test_image_http_normalization.py::ImageNormalizationHttpTests::test_failed_normalization_cannot_forward_over_budget_images
+SUBFAILED(protocol='messages', reason='single') tests/test_image_http_normalization.py::ImageNormalizationHttpTests::test_small_encoded_body_still_enforces_single_image_and_count_limits
+SUBFAILED(protocol='messages', reason='count') tests/test_image_http_normalization.py::ImageNormalizationHttpTests::test_small_encoded_body_still_enforces_single_image_and_count_limits
+SUBFAILED(protocol='responses', reason='single') tests/test_image_http_normalization.py::ImageNormalizationHttpTests::test_small_encoded_body_still_enforces_single_image_and_count_limits
+SUBFAILED(protocol='responses', reason='count') tests/test_image_http_normalization.py::ImageNormalizationHttpTests::test_small_encoded_body_still_enforces_single_image_and_count_limits
+SUBFAILED(protocol='chat', reason='single') tests/test_image_http_normalization.py::ImageNormalizationHttpTests::test_small_encoded_body_still_enforces_single_image_and_count_limits
+SUBFAILED(protocol='chat', reason='count') tests/test_image_http_normalization.py::ImageNormalizationHttpTests::test_small_encoded_body_still_enforces_single_image_and_count_limits
+SUBFAILED(protocol='messages') tests/test_image_http_normalization.py::ImageNormalizationHttpTests::test_source_over_output_budget_is_resized_without_omitting_images
+SUBFAILED(protocol='responses') tests/test_image_http_normalization.py::ImageNormalizationHttpTests::test_source_over_output_budget_is_resized_without_omitting_images
+SUBFAILED(protocol='chat') tests/test_image_http_normalization.py::ImageNormalizationHttpTests::test_source_over_output_budget_is_resized_without_omitting_images
+12 failed, 3 passed in 0.42s

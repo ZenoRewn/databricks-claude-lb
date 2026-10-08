@@ -1,0 +1,38 @@
+Author: Zeno Ren
+Purpose: offline production-runtime comparison for cancelled image worker exceptions.
+Scope: local candidate container only; no AKS, provider call, or user-request replay.
+Application source is baked into the image; only qa-cancellation.py is mounted read-only.
+Time: 2026-10-08T15:46:22.997313+08:00
+Image: claude-lb:image-budget-20261008
+Image identity: sha256:cc41bf524e7761ee319c7105df321d34b7c3a2b80ad98e42496814645e4fcf23 linux/amd64
+Command: docker run --rm --network none --platform linux/amd64 --mount type=bind,src=/Users/zenoren/Desktop/ClaudeCode/databricks-claude-lb/docs/reviews/2026-10-08-image-budget/qa-cancellation.py,dst=/qa-cancellation.py,readonly --entrypoint python claude-lb:image-budget-20261008 /qa-cancellation.py
+Exit code: 0
+
+STDOUT:
+{
+  "author": "Zeno Ren",
+  "python": "3.12.14",
+  "platform": "Linux",
+  "architecture": "x86_64",
+  "application_path": "/app/main.py",
+  "main_sha256": "2dbd73d9db841043b52f9d6b308fbdd511e0488f0d2e829b369d3acf46032a57",
+  "cases": [
+    {
+      "mode": "repeated_task_cancel",
+      "functional_checks": "passed",
+      "active": 0,
+      "body_bytes": 0
+    },
+    {
+      "mode": "anyio_level_cancel",
+      "functional_checks": "passed",
+      "active": 0,
+      "body_bytes": 0
+    }
+  ],
+  "shield_diagnostics": [],
+  "diagnostic_check": "passed"
+}
+
+STDERR:
+(empty)
