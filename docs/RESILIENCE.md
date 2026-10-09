@@ -302,10 +302,39 @@ cancelled. Same-request pinning is retained. Set
 `COPILOT_RECOVERY_PREFERENCE_SECONDS=0` to disable this preference and
 `COPILOT_SCOPED_CIRCUITS=false` to retain endpoint-only protection.
 
-The historic 120-second disconnect has no retained typed protocol code; it
-cannot be reclassified retroactively. Do not suppress unknown EOF failures or
-blacklist prompts. VS Code/Mac/provider equivalence and production acceptance
-remain unverified.
+The historic 120-second disconnect itself retained no typed protocol code and
+cannot be reclassified retroactively. A 2026-10-09 production incident did
+capture typed codes for the same shape, recorded in
+[stream forensics](reviews/2026-10-09-stream-forensics/REPORT.md): upstream
+answered 200 and then sent `RST_STREAM` with `CANCEL(8)` at
+`upstream_idle_seconds` of 120.000004, 120.000406, 120.000871, 120.000985 and
+120.103448. Four readings within one millisecond of each other indicate a timer,
+not jitter. Every one of them carried a body over 365 KB. This locates a
+stream-scoped upstream cancellation correlated with request size; it does not
+prove which component owns the timer, and a correlation over five samples is not
+a size threshold. Do not derive an admission limit from it.
+
+That incident also showed the limits of the two protections above. The dominant
+failure was `REFUSED_STREAM(7)`, which by design retains shared protection, so
+the shared endpoint circuit opened while three sibling models sat at zero
+errors — scoped circuits did not isolate this shape. Meanwhile the preference
+window re-armed on every HALF_OPEN transition, and a workload consisting only
+of 2.2 MB sessions was deferred in each one; the "window expires" guarantee
+holds per window, not across a circuit that keeps reopening.
+
+The preference is therefore gated on evidence: it applies only when a request
+with a complete estimate at or below `COPILOT_RECOVERY_SMALL_INPUT_BYTES`
+actually arrived during the current cooldown. Evidence is recorded on the real
+rejection path, keyed to the circuit generation that observed it, so a new
+cooldown never inherits it and an administrative reset discards it. Readiness
+probes never record evidence, and an incomplete estimate never counts as small.
+A workload with no small requests now claims the trial directly rather than
+waiting for a window that nothing can satisfy. This does not widen replay, and
+it does not make a large request preferred — it only stops penalising it when
+there is no small alternative.
+
+Do not suppress unknown EOF failures or blacklist prompts.
+VS Code/Mac/provider equivalence and production acceptance remain unverified.
 
 ## Multi-replica semantics
 
