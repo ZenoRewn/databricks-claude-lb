@@ -28,7 +28,8 @@ NUMBERS = set('schema_version upstream_status upstream_http_status http_status d
               'startup_budget_seconds total_budget_seconds diagnostic_dropped_events source_line estimated_input_tokens '
               'reserved_output_tokens input_limit context_limit output_limit age_seconds text_bytes image_count started_at_unix '
               'circuit_generation consecutive_errors'.split())
-NUMBERS.update(('http2_error_code', 'http2_stream_id', 'http2_last_stream_id', 'upstream_idle_seconds'))
+NUMBERS.update(('http2_error_code', 'http2_stream_id', 'http2_last_stream_id', 'upstream_idle_seconds',
+                'seconds_since_headers', 'threshold_seconds'))
 BOOLEANS = set('retry retry_allowed retryable retry_after_present downstream_headers_sent downstream_content_started '
                'downstream_body_completed draining_at_finish saw_completion terminal_seen terminal_valid has_image '
                'sent_any_chunk account_neutral read_timeout probe_ok httpx_pool_observed_full upstream_headers_received '

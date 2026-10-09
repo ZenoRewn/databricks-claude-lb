@@ -279,7 +279,26 @@ kubectl -n YOUR_NS logs -l app=claude-lb --since=1h | grep copilot_stream_networ
 | `protocol_error_kind=http2_stream_reset` + `http2_error_code` | 远端只重置了这一个流 | 1/2/8 进入 endpoint/model/API 局部熔断；据错误码重新评估该路由，不扩大到整个账户 |
 | `protocol_error_kind=remote_protocol_error` + `protocol_scope=unknown` | 裸 EOF，没有 typed h2 事件 | 无法归因，保守保留共享熔断。要再进一步只能抓包 |
 | `upstream_headers_received=false` | 连响应头都没拿到 | 偏建连/握手侧 |
-| `upstream_headers_received=true` + `upstream_idle_seconds` 很大 | 200 之后长时间无正文再断 | 偏上游生成侧或中间层 idle 回收；该值是「最近响应头或正文 delivery 到异常」的间隔，不是抓包的 TCP 空闲时间，本地 heartbeat 不刷新它 |
+| `upstream_headers_received=true` + `upstream_idle_seconds` ≈ **120.000** | 200 之后约 120 秒无正文，流被取消 | **已在生产确认的形态**，见下方专条 |
+| `upstream_headers_received=true` + `upstream_idle_seconds` 其他大值 | 200 之后长时间无正文再断 | 偏上游生成侧或中间层 idle 回收；该值是「最近响应头或正文 delivery 到异常」的间隔，不是抓包的 TCP 空闲时间，本地 heartbeat 不刷新它 |
+
+#### `CANCEL(8)` + `upstream_idle_seconds≈120.000`：上游定时取消
+
+2026-10-09 生产事件捕获到 5 次 `http2_stream_reset` + `http2_error_code=8`，`upstream_idle_seconds` 为 120.103448 / 120.000985 / 120.000871 / 120.000406 / 120.000004。四个读数落在同一毫秒内 —— 这是定时器，不是网络抖动。全部 `upstream_headers_received=true`、`chunks_yielded=0`，即上游返回了 200 但 120 秒内一个字节正文都没有。对应请求体积分别为 365 KB、770 KB、2.20 MB、2.20 MB、2.20 MB。
+
+`protocol_scope=stream` 说明重置只影响该流。**但不要据此断定定时器属于谁** —— GHCP 服务端和支持 HTTP/2 的中间代理都能发 `RST_STREAM(CANCEL)`。体积相关性只有 5 个样本，**不是**体积阈值，不要用它设准入上限。
+
+实践影响：大请求首字节本来就慢（同期观测 `send_to_headers` 有 21–26 秒的样本），越接近 120 秒越容易中。同窗口内 >1 MB 请求成功率 57.5%（103/179），≤1 MB 为 83.0%（494/595）—— 同一时间窗的观测对比，样本不独立（大请求多来自同一个重试会话），不构成因果。
+
+遇到这个形态时：上游侧不可控，LB 侧没有能修掉它的开关。可做的是减小单次请求的语义输入，并用下面的停滞信号提前发现。完整证据见 [流取证](reviews/2026-10-09-stream-forensics/REPORT.md)。
+
+#### 首个内容前的停滞信号
+
+`copilot_stream_prefirst_content_stall_total` 与 `kind=copilot_stream_prefirst_content_stall` 在「已收到响应头、但超过 `COPILOT_STREAM_PREFIRST_CONTENT_WARN_SECONDS`（默认 90 秒）仍无正文」时各发一次。它**纯观测** —— 不中止流、不触发重试、不影响熔断。设计目的是在撞上上游 120 秒取消**之前**就能看到，而不是事后从 `CANCEL(8)` 倒推。每条流最多发一次。
+
+#### `REFUSED_STREAM(7)` 会打开共享熔断
+
+`REFUSED_STREAM` 作为账户级过载信号**保留共享保护**，不进局部层。所以一个模型的大请求触发 GHCP 限流时，共享 endpoint 熔断会打开并挡住同账户其他模型 —— 2026-10-09 事件里 `gpt-6.1-sol` 局部层 HALF_OPEN，而零错误的 `gpt-5.4` / `gpt-5.6-luna` / `gpt-6-astra` 一并被挡。用 `/stats` 的 `model_api_circuits` 对照 `circuit_open` 可以分辨是哪一层在拦。这是有意的取舍，不是 bug；若要退回 endpoint-only 保护用 `COPILOT_SCOPED_CIRCUITS=false`。
 
 缺少 `h2` 包时上述字段全部降级为 `unknown`。`requirements.lock` 固定 `h2==4.4.1`，发布前应确认镜像内存在；见 [部署回执](reviews/2026-10-09-stream-aks/REPORT.md)。局部熔断范围可用 `lb_circuit_transition` 的 `circuit_scope` 和 `/stats` 的 `model_api_circuits` 读回。另注意 `outcome=client_disconnected` + `error_origin=client` 是**下游客户端自己断开**，与本节的上游协议错误不是同一回事，不要混在一起统计。
 
