@@ -18,7 +18,7 @@ from fastapi import HTTPException
 from request_budget import startup_budget, startup_seconds, UpstreamStartupTimeout, remaining_seconds
 from request_timing import CURRENT as CURRENT_TIMING, Timeline, PhaseMetrics, observe_event
 from response_semantics import REASONS, assess_json, exception_reason, failure_reason
-from safe_diagnostics import safe_fields, safe_identifier, DIAGNOSTIC_DROPS
+from safe_diagnostics import safe_fields, safe_identifier, DIAGNOSTIC_DROPS, transport_details
 
 logger = logging.getLogger('main')
 ROUTES = {'/v1/messages':'messages', '/v1/responses':'responses', '/v1/chat/completions':'chat'}
@@ -44,6 +44,26 @@ if IMAGE_TRIM_POLICY not in ('reject', 'allow'):
 
 def safe_id(value):
     return value if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', value) else None
+
+
+def context_hint_headers(summary):
+    """Only scalar estimates and bounded enums; no content or invented limits."""
+    headers = {}
+    for key, suffix in (('estimated_input_tokens', 'estimated-input-tokens'), ('text_bytes', 'text-bytes'),
+                        ('input_limit', 'input-limit'), ('context_limit', 'context-limit')):
+        value = summary.get(key)
+        if type(value) is int:
+            headers['X-LB-Context-' + suffix] = str(value)
+    for key, suffix in (('estimate_confidence', 'estimate-confidence'), ('context_advice', 'advice')):
+        value = safe_identifier(summary.get(key), None)
+        if value is not None:
+            headers['X-LB-Context-' + suffix] = value
+    if type(summary.get('estimate_complete')) is bool:
+        headers['X-LB-Context-Estimate-Complete'] = str(summary['estimate_complete']).lower()
+    known = {'images', 'opaque_state', 'prior_state', 'files', 'audio', 'traversal_limit', 'unsupported_content'}
+    if isinstance(summary.get('unknown_components'), list):
+        headers['X-LB-Context-Unknown-Components'] = ','.join(sorted(known.intersection(summary['unknown_components'])))
+    return headers
 
 
 def log_event(fields):
@@ -203,7 +223,8 @@ def note_failure(reason, *, origin='unknown', status=None, exception=None):
     log_event({'kind': 'lb_upstream_error', 'reason': record.failure_reason,
                'error_origin': origin, 'upstream_http_status': status,
                'upstream_code_class': record.failure_reason,
-               'exc_type': type(exception).__name__ if exception else None})
+               'exc_type': type(exception).__name__ if exception else None,
+               **(transport_details(exception) if exception is not None else {})})
 
 
 def note_exception(exc):
@@ -379,6 +400,7 @@ async def inference_call(awaitable, provider, api_type, *, model=None, endpoint=
     started = time.monotonic()
     result = 'transport_error'
     status = None
+    http_version = 'unknown'
     budget = startup_seconds(provider, api_type, model)
     timeline = CURRENT_TIMING.get()
     timing = timeline.begin_attempt(budget) if timeline is not None else None
@@ -386,6 +408,7 @@ async def inference_call(awaitable, provider, api_type, *, model=None, endpoint=
         async with startup_budget(budget):
             response = await awaitable
         status = getattr(response,'status_code',None)
+        http_version = transport_details(None, http_version=getattr(response,'http_version','unknown'))['http_version']
         result = f'http_{status//100}xx' if type(status) is int and 100 <= status < 600 else 'unknown'
         return response
     except asyncio.CancelledError:
@@ -405,6 +428,7 @@ async def inference_call(awaitable, provider, api_type, *, model=None, endpoint=
         fields={**context,'kind':'lb_upstream_send_end','lb_request_id':record.request_id if record else None,
                 'upstream_attempt_id':attempt_id,'provider':provider,'api_type':api_type,
                 'result':result,'upstream_status':status if type(status) is int else None,
+                'http_version': http_version,
                 'duration_seconds':round(time.monotonic()-started,6)}
         fields.update(startup_budget_seconds=budget,
                       upstream_headers_received=timing.header_seconds is not None if timing else None,
@@ -444,7 +468,8 @@ class RequestTelemetryMiddleware:
                 status=message['status']
                 headers=[(k,v) for k,v in message.get('headers',[]) if k.lower() not in
                          (b'x-lb-request-id',b'x-lb-parameter-policy',b'x-lb-dropped-parameters',
-                          b'x-lb-transformed-parameters',b'x-lb-image-trim')]
+                          b'x-lb-transformed-parameters',b'x-lb-image-trim')
+                         and not k.lower().startswith(b'x-lb-context-')]
                 headers.extend([(b'x-lb-request-id',record.request_id.encode('ascii')),
                                 (b'x-lb-parameter-policy',record.parameter_policy.encode('ascii')),
                                 (b'x-lb-image-trim',record.image_trim_policy.encode('ascii'))])
@@ -455,6 +480,8 @@ class RequestTelemetryMiddleware:
                 if record.context_budget:
                     headers.extend([(b'x-lb-context-policy',record.context_budget['budget_mode'].encode('ascii')),
                                     (b'x-lb-capability-status',record.context_budget['capability_status'].encode('ascii'))])
+                    headers.extend((k.lower().encode('ascii'), v.encode('ascii'))
+                                   for k, v in context_hint_headers(record.context_budget).items())
                 message={**message,'headers':headers}
             try:
                 await send(message)

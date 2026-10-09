@@ -19,6 +19,7 @@ IDENTIFIERS = set('kind lb_request_id request_id req operation_id upstream_attem
                   'error_type exc_type source classification http_version upstream_code_class deadline_phase '
                   'body_size_bucket client_class capability_status estimate_method estimate_confidence context_status '
                   'budget_mode route image_trim_policy previous_state circuit_state transition_reason'.split())
+IDENTIFIERS.update(('protocol_error_kind', 'protocol_scope', 'circuit_scope', 'context_advice'))
 NUMBERS = set('schema_version upstream_status upstream_http_status http_status duration_seconds attempt admissions '
               'upstream_sends input_bytes body_size_bytes input_tokens output_tokens cache_read_tokens chunks '
               'chunks_yielded decoded_bytes decoded_deliveries frames pending_eof_bytes peak_pending_bytes '
@@ -27,6 +28,7 @@ NUMBERS = set('schema_version upstream_status upstream_http_status http_status d
               'startup_budget_seconds total_budget_seconds diagnostic_dropped_events source_line estimated_input_tokens '
               'reserved_output_tokens input_limit context_limit output_limit age_seconds text_bytes image_count started_at_unix '
               'circuit_generation consecutive_errors'.split())
+NUMBERS.update(('http2_error_code', 'http2_stream_id', 'http2_last_stream_id', 'upstream_idle_seconds'))
 BOOLEANS = set('retry retry_allowed retryable retry_after_present downstream_headers_sent downstream_content_started '
                'downstream_body_completed draining_at_finish saw_completion terminal_seen terminal_valid has_image '
                'sent_any_chunk account_neutral read_timeout probe_ok httpx_pool_observed_full upstream_headers_received '
@@ -43,7 +45,7 @@ REASON_VALUES = set('none unknown context_window_exceeded invalid_input rate_lim
     'upstream_unavailable invalid_protocol upstream_failure output_limit transport_protocol_error startup_timeout '
     'read_timeout write_timeout connection_error pool_timeout upstream_truncated request_deadline_exceeded '
     'client_disconnected cancelled local_resource_limit local_observer_error internal_error local_overload request_body_timeout retry_429 '
-    'upstream_cooldown attempt_budget_exhausted status_not_retryable pool_acquire_timeout'.split())
+    'upstream_cooldown attempt_budget_exhausted status_not_retryable pool_acquire_timeout recovery_preference'.split())
 EVENT_NAMES = set('error ping message_start message_delta message_stop content_block_start content_block_delta '
     'content_block_stop response.created response.in_progress response.completed response.failed response.incomplete '
     'response.output_item.added response.output_item.done response.content_part.added response.content_part.done '
@@ -51,6 +53,50 @@ EVENT_NAMES = set('error ping message_start message_delta message_stop content_b
     'response.function_call_arguments.delta response.function_call_arguments.done response.refusal.delta '
     'response.refusal.done response.reasoning_summary_part.added response.reasoning_summary_part.done '
     'response.reasoning_summary_text.delta response.reasoning_summary_text.done -'.split())
+ENUM_FIELDS = {
+    'http_version': {'HTTP/1.0', 'HTTP/1.1', 'HTTP/2', 'HTTP/3', 'unknown'},
+    'protocol_error_kind': {'http2_stream_reset', 'http2_goaway', 'remote_protocol_error', 'unknown'},
+    'protocol_scope': {'stream', 'connection', 'unknown'},
+    'circuit_scope': {'endpoint', 'model_api'},
+    'context_advice': {'none', 'large_input', 'estimated_near_limit', 'estimated_over_limit'},
+}
+
+
+def transport_details(exc, *, http_version='unknown'):
+    """Inspect typed h2 causes only; never serialize exception/debug text.
+
+    HTTPX retains httpcore as its cause, whose args carry the actual h2 event.
+    A string resembling an event is insufficient evidence for failure isolation.
+    Bounded traversal also handles wrappers, cycles and absent optional h2.
+    """
+    result = {'http_version': http_version if http_version in ENUM_FIELDS['http_version'] else 'unknown',
+              'protocol_error_kind': 'remote_protocol_error' if type(exc).__name__ == 'RemoteProtocolError' else 'unknown',
+              'protocol_scope': 'unknown'}
+    try:
+        from h2.events import StreamReset, ConnectionTerminated
+    except ImportError:
+        return result
+    seen = set()
+    for _ in range(6):
+        if not isinstance(exc, BaseException) or id(exc) in seen:
+            break
+        seen.add(id(exc))
+        event = exc.args[0] if exc.args else None
+        if isinstance(event, (StreamReset, ConnectionTerminated)):
+            code = event.error_code
+            # IntEnum is safe numeric protocol evidence; booleans are not.
+            if isinstance(code, int) and not isinstance(code, bool) and 0 <= code < 2**32:
+                result['http2_error_code'] = int(code)
+                result['http_version'] = 'HTTP/2'
+                if isinstance(event, StreamReset) and event.remote_reset is True:
+                    result.update(protocol_error_kind='http2_stream_reset', protocol_scope='stream')
+                    result['http2_stream_id'] = event.stream_id
+                elif isinstance(event, ConnectionTerminated):
+                    result.update(protocol_error_kind='http2_goaway', protocol_scope='connection')
+                    result['http2_last_stream_id'] = event.last_stream_id
+                return safe_fields(result)
+        exc = exc.__cause__ if exc.__cause__ is not None else exc.__context__
+    return result
 REQUEST_FUNCTIONS = {'stream_generator', 'stream_with_heartbeat', '_stream_response', '_stream_request',
     '_normal_request', '_proxy_request', 'proxy_request', 'proxy_responses', 'proxy_chat', '_proxy',
     '_log_openai_request', '_route_openai', '_route_openai_responses', '_route_chat_via_responses',
@@ -80,6 +126,8 @@ def safe_fields(fields):
         result[key] = safe_identifier(fields[key], None if fields[key] is None else 'unknown')
         allowed = REASON_VALUES if key in ('reason', 'failure_reason', 'upstream_code_class') else EVENT_NAMES if key in ('first_event', 'last_event') else None
         if allowed is not None and result[key] is not None and result[key] not in allowed:
+            result[key] = 'unknown'
+        if key in ENUM_FIELDS and result[key] not in ENUM_FIELDS[key]:
             result[key] = 'unknown'
     for key in NUMBERS & fields.keys():
         result[key] = safe_number(fields[key])
