@@ -116,7 +116,7 @@ python -m operations.build_identity \
 
 AKS 操作从 [部署指南](docs/AKS.md) 和 [受控发布工具](docs/RELEASE_TOOL.md) 开始。`deploy/k8s/` 是示例形态，**不能整份 apply 覆盖现有生产环境**。单副本发布可能产生维护窗口；需要预先完成备份、排空、恢复材料和业务验收。
 
-最近一次已记录的 AKS 发布为 [2026-10-08 图片像素修复](docs/reviews/2026-10-08-image-budget-aks/REPORT.md)，应用源码 `284ca53`。三个常规业务与账本验收通过；额外 108M 大图通过 LB 准入，但上游 Copilot 503，生成未完成。后续文档或代码提交不自动表示线上更新。历次验证与部署结果集中在 [验证索引](docs/reviews/README.md)。
+最近一次已记录的 AKS 发布为 [2026-10-09 流协议取证与分层保护](docs/reviews/2026-10-09-stream-aks/REPORT.md)，应用源码 `fea7d60`。三个常规业务与账本验收通过；本次上线取证与局部保护，不是对断流故障的修复，观察期未复现原故障。后续文档或代码提交不自动表示线上更新。历次验证与部署结果集中在 [验证索引](docs/reviews/README.md)。
 
 ## 开发
 

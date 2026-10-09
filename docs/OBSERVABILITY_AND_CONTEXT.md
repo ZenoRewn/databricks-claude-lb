@@ -2,7 +2,7 @@
 
 Author: Zeno Ren
 
-2026-10-09 本地候选补充下述协议诊断与上下文提示；[本轮验证](reviews/2026-10-09-stream-reliability/REPORT.md) 不代表已发布到 AKS。
+2026-10-09 补充下述协议诊断与上下文提示，见 [本轮验证](reviews/2026-10-09-stream-reliability/REPORT.md)。已随源码 `fea7d60` 发布到 AKS，见 [部署回执](reviews/2026-10-09-stream-aks/REPORT.md)；后续是否仍运行此版本应读回现场，只更新本仓库不会修改线上服务。
 
 日期：2026-09-30。本页描述仓库实现；生产是否启用以实际镜像、文件 hash、配置及验收回执为准。[本轮验证](reviews/2026-09-30-lb-contracts/VALIDATION.md) 单列本地、镜像、数据库、独立复核和 GitHub 状态。
 

@@ -2,7 +2,7 @@
 
 Author: Zeno Ren
 
-日期：2026-10-09（北京时间）。本页记录仓库实现、合成故障注入、本地回归和 Linux/amd64 镜像验收。GitHub 同步以对应 PR 和 CI 状态为准；未部署 AKS，未调用真实付费模型。
+日期：2026-10-09（北京时间）。本页记录仓库实现、合成故障注入、本地回归和 Linux/amd64 镜像验收，当时未部署 AKS，未调用真实付费模型。该候选随后以 [PR #19](https://github.com/ZenoRewn/databricks-claude-lb/pull/19) 合并为 `fea7d60` 并发布到 AKS，发布与真实流量观察见 [部署回执](../2026-10-09-stream-aks/REPORT.md)。
 
 ## 结果与证据边界
 

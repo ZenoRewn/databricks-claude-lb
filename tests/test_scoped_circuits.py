@@ -12,8 +12,13 @@ from tests.test_protocol_diagnostics import reset_error
 
 
 class ScopedCircuitTests(unittest.IsolatedAsyncioTestCase):
+    # Exact integer base: see the note in tests/test_recovery_preference.py. A real
+    # monotonic reading makes cooldown arithmetic drift by one float ulp, so the
+    # Retry-After assertion below would intermittently see 31 instead of 30.
+    BASE_MONOTONIC = 1_000_000.0
+
     async def asyncSetUp(self):
-        self.now = time.monotonic()
+        self.now = self.BASE_MONOTONIC
         self.clock = patch.object(main, 'time', SimpleNamespace(monotonic=lambda:self.now, time=time.time))
         self.clock.start()
         self.ep = main.CopilotEndpoint('synthetic', '', models=['a','b'])

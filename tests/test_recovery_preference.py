@@ -8,8 +8,15 @@ import main
 
 
 class RecoveryPreferenceTests(unittest.IsolatedAsyncioTestCase):
+    # The clock is fully mocked, so the base must be an exact integer rather than
+    # a real monotonic reading. With an arbitrary float base, (base+30+10+30) minus
+    # (base+30+10) is not exactly 30.0, and math.ceil in retry_after then yields 31.
+    # That made cooldown assertions depend on the host's uptime. Ceil itself is the
+    # correct conservative behaviour for Retry-After; only the base was at fault.
+    BASE_MONOTONIC=1_000_000.0
+
     async def asyncSetUp(self):
-        self.now=time.monotonic()
+        self.now=self.BASE_MONOTONIC
         self.clock=patch.object(main,'time',SimpleNamespace(monotonic=lambda:self.now,time=time.time))
         self.clock.start()
         self.ep=main.CopilotEndpoint('synthetic','',models=['a'])
