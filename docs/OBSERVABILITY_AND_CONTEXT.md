@@ -2,6 +2,8 @@
 
 Author: Zeno Ren
 
+2026-10-09 本地候选补充下述协议诊断与上下文提示；[本轮验证](reviews/2026-10-09-stream-reliability/REPORT.md) 不代表已发布到 AKS。
+
 日期：2026-09-30。本页描述仓库实现；生产是否启用以实际镜像、文件 hash、配置及验收回执为准。[本轮验证](reviews/2026-09-30-lb-contracts/VALIDATION.md) 单列本地、镜像、数据库、独立复核和 GitHub 状态。
 
 本轮补齐安全诊断、分阶段时间、Chat→Responses 语义和渠道能力观测。推理 POST 重放白名单、账户 pinning/会话亲和、默认 startup/total timeout、副本数与生产入口均未放宽。
@@ -29,6 +31,10 @@ Author: Zeno Ren
 HTTP 200、发送返回、有效生成终态、用量落盘和客户端业务成功仍是不同事实。`downstream_content_started` 表示生成器已提供可识别的文本、工具参数或 refusal 内容，不证明用户收到。旧 Copilot `saw_completion` 保留；新增 `terminal_seen` 明确表示看见终态，failed/incomplete 也可以为 true。
 
 ## 2. 日志出口与隐私
+
+协议诊断保留实际 `http_version`、`protocol_error_kind`、`protocol_scope` 及数值 `http2_error_code` / `http2_stream_id` / `http2_last_stream_id`。仅从有限深度的真实 h2 异常原因对象提取；看似 StreamReset 的异常字符串不能成为隔离证据。GOAWAY debug data、异常原文和请求正文均不进入日志。
+
+Copilot network/stream summary 新增 `upstream_headers_received` 与 `upstream_idle_seconds`。后者是从最近响应头或解码正文 delivery 到异常捕获的间隔，不是抓包得到的 TCP 空闲时间，也不包含错误后的 DNS/TCP 探测耗时；只发本地 heartbeat 不刷新它。分层熔断日志的 `circuit_scope=endpoint|model_api` 与 `/stats` 中的 `model_api_circuits` 解释实际阻断范围。
 
 诊断只保留允许字段，外部标识限制字符和长度；原始 UA 仅归类，不能当可信租户。异常仅保留类型，错误 body、正文、工具参数/结果、完整 schema、图片和 opaque 内容不进入请求诊断。旧非结构化推理日志仅保留来源位置与级别；排障应查询结构化事件，而非依赖原始错误片段。
 
@@ -101,6 +107,12 @@ DNS/TCP/TLS/pool 没有可靠独立 hook，保持 null。阶段可能嵌套，�
 映射依据：[OpenAI 官方迁移说明](https://developers.openai.com/api/docs/guides/migrate-to-responses)、[Prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)。这些是 API 形态依据，不是 Copilot 渠道能力认证。
 
 ## 6. 图片与 token 估算
+
+推理 JSON/SSE 响应头现在提供 `X-LB-Context-Estimated-Input-Tokens`、`X-LB-Context-Text-Bytes`、`X-LB-Context-Estimate-Confidence`、`X-LB-Context-Estimate-Complete`、`X-LB-Context-Unknown-Components` 和 `X-LB-Context-Advice`。未知限额不返回数值；有当前已核验目录时才返回 `X-LB-Context-Input-Limit` / `X-LB-Context-Context-Limit`。所有字段为估算或目录元数据，不含正文。流式响应头只反映提交头部时已观察到的路由，不能宣称后续重试目标的限额。
+
+建议值为 `none`、`large_input`、`estimated_near_limit` 或 `estimated_over_limit`。语义输入默认达到 256 KiB 时提示 large_input；已核验限额的低可信度估算达到 80% / 超过 100% 时给出 near / over 提示，始终不据此硬拒绝输入、不摘要或删除历史。调用方可主动整理会话、工具输出或图片；Codex 是否显示这些自定义响应头尚未验收。`LB_CONTEXT_BUDGET_MODE=off` 关闭推理上下文提示，受保护的本地 count_tokens 接口仍提供其估算头。
+
+`LB_CONTEXT_LARGE_INPUT_BYTES=262144` 可配置规模提示阈值，范围 1 B～64 MiB；这不是模型上下文容量或服务拒绝阈值。
 
 图片数量超过预算时，`LB_IMAGE_TRIM_POLICY=reject` 默认保留原输入并返回 413。调用方可用 `X-LB-Image-Trim: allow` 明确允许旧图替换，或由管理员设置全局 allow；响应头显示实际策略和 `images.trimmed`。strict 模式仍在任何裁剪前返回 400。允许裁剪后必须重跑图片准入，不绕过像素/内存限制。
 

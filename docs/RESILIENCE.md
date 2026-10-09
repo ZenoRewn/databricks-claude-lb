@@ -2,6 +2,8 @@
 
 Author: Zeno Ren
 
+2026-10-09 的候选增加协议取证、Copilot 模型/API 局部熔断与有界恢复优先窗口，见 [本轮实现与验证](reviews/2026-10-09-stream-reliability/REPORT.md)。尚未部署 AKS。下文早期 endpoint-only 状态机保留为共享账户保护层的说明。
+
 2026-09-30 adds safe circuit transition evidence and [offline experiment gates](OPERATIONS_EXPERIMENTS.md), without widening the replay allowlist or changing endpoint thresholds. [Request diagnostics](OBSERVABILITY_AND_CONTEXT.md) distinguish local overload, transport/protocol failures and recovered attempts. The independent review gate below remains applicable.
 
 ## Scope and invariants
@@ -273,12 +275,37 @@ As a consequence, a sufficiently long eligible failure streak can still trip an
 endpoint shared by sibling models. This stage is **not** the final solution to
 request/model-specific failure isolation.
 
-Parent coordination must choose after protocol forensics: (1) separate
-endpoint/model/API circuits with parent endpoint protection for shared transport,
-auth and overload failures; or (2) a narrowly proven request-local classification
-that records truncation but does not trip the endpoint. Do not silently select
-an arbitrary body-size cutoff, suppress all EOF failures, or blacklist request
-fingerprints/prompts. VS Code and Mac client equivalence is unverified.
+The 2026-10-09 local candidate adds endpoint/model/API circuits underneath the
+shared endpoint circuit. Only typed remote h2 RST_STREAM with PROTOCOL_ERROR,
+INTERNAL_ERROR or CANCEL (1, 2, 8), or a classified invalid buffered protocol
+response, counts toward the local circuit. This confines protection to the
+observed stream/route; it does not establish why the provider reset it.
+GOAWAY, REFUSED_STREAM, ENHANCE_YOUR_CALM, unknown protocol failures, EOF without
+a terminal, auth, overload and HTTP server failures retain shared protection.
+HTML challenge failures remain shared. No new POST replay is permitted.
+
+Each layer retains atomic trial claims and independent generations. A local
+failure during a shared recovery trial is inconclusive for shared recovery and
+rearms its cooldown. Administrative circuit reset covers both layers. Route
+state is bounded to 128 entries per balancer; only idle, fully healthy entries
+may be evicted. Cache exhaustion falls back to shared protection. Scoped state
+appears in endpoint statistics and transition logs; existing metrics remain.
+
+After either layer's cooldown, a ten-second window prefers existing real
+requests with complete size estimates and at most 64 KiB of semantic input.
+Unknown image/opaque/prior-state size is not considered small. A deferred request
+gets 503 `recovery_prefers_small_request` and Retry-After; it consumes no trial,
+makes no inference/auth call and authorizes no cross-provider fallback. Once
+the window expires any eligible request can claim the trial, avoiding indefinite
+large-request starvation. Readiness remains pure; no trial is expired or forcibly
+cancelled. Same-request pinning is retained. Set
+`COPILOT_RECOVERY_PREFERENCE_SECONDS=0` to disable this preference and
+`COPILOT_SCOPED_CIRCUITS=false` to retain endpoint-only protection.
+
+The historic 120-second disconnect has no retained typed protocol code; it
+cannot be reclassified retroactively. Do not suppress unknown EOF failures or
+blacklist prompts. VS Code/Mac/provider equivalence and production acceptance
+remain unverified.
 
 ## Multi-replica semantics
 

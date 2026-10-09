@@ -20,6 +20,9 @@ from safe_diagnostics import safe_identifier
 MODE = os.getenv('LB_CONTEXT_BUDGET_MODE', 'observe')
 if MODE not in ('off', 'observe', 'enforce'):
     raise ValueError('LB_CONTEXT_BUDGET_MODE must be off, observe or enforce')
+LARGE_INPUT_BYTES = int(os.getenv('LB_CONTEXT_LARGE_INPUT_BYTES', '262144'))
+if not 1 <= LARGE_INPUT_BYTES <= 64 * 1024 * 1024:
+    raise ValueError('LB_CONTEXT_LARGE_INPUT_BYTES must be between 1 and 67108864')
 LIMITS = ('input_tokens', 'context_tokens', 'output_tokens')
 FEATURES = ('tools', 'images', 'structured_output', 'opaque_state')
 SEMANTIC_FIELDS = {'messages', 'input', 'system', 'instructions', 'tools', 'tool_choice',
@@ -195,6 +198,21 @@ def output_budget(payload, api_type):
     return None
 
 
+def context_advice(estimate, limits=None, reserved=None):
+    """Advisory size/estimated utilization; never an input admission decision."""
+    limits = limits or {}
+    ratios = []
+    if limits.get('input_tokens'):
+        ratios.append(estimate['estimated_input_tokens'] / limits['input_tokens'])
+    if limits.get('context_tokens'):
+        ratios.append((estimate['estimated_input_tokens'] + (reserved or 0)) / limits['context_tokens'])
+    if any(ratio > 1 for ratio in ratios):
+        return 'estimated_over_limit'
+    if any(ratio >= .8 for ratio in ratios):
+        return 'estimated_near_limit'
+    return 'large_input' if estimate['text_bytes'] >= LARGE_INPUT_BYTES else 'none'
+
+
 def requested_features(payload):
     """Inspect protocol positions, never treat schema examples as live input."""
     images = False
@@ -237,6 +255,7 @@ def evaluate_budget(catalog, provider, api_type, model, payload, *, endpoint_ali
               'context_status': 'estimated_over' if over else 'observed' if verified else 'unknown',
               'reserved_output_tokens': reserved, 'input_limit': limits['input_tokens'],
               'context_limit': limits['context_tokens'], 'output_limit': limits['output_tokens']}
+    result['context_advice'] = context_advice(estimate, limits, reserved)
     if mode == 'enforce' and verified:
         present = requested_features(payload)
         unsupported = [name for name in FEATURES if present[name] and capability['features'][name] is False]

@@ -8,13 +8,13 @@ from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_
                                set_parameter_policy, note_parameter_drops,
                                log_context, note_request_context, note_exception,
                                note_local_terminal, note_failure, log_event, note_content_offered)
-from request_telemetry import note_parameter_transforms, require_image_trim_consent, note_reported_model, safe_id, note_stream_end
+from request_telemetry import note_parameter_transforms, require_image_trim_consent, note_reported_model, safe_id, note_stream_end, context_hint_headers
 from chat_adapter import build_payload as build_chat_payload, messages_to_items, tools_to_items, content as chat_content
 import model_capabilities
 from model_capabilities import observe_route_budget, estimate_payload
 from build_metadata import runtime_identity, release_identity
 from safe_diagnostics import (DiagnosticFilter, DiagnosticStreamHandler, DiagnosticTextFormatter, default_handler,
-                              render_metrics as diagnostic_metrics, EVENT_NAMES)
+                              render_metrics as diagnostic_metrics, EVENT_NAMES, transport_details)
 from request_timing import (observed_phase, begin_stream as timing_begin_stream,
                             end_stream as timing_end_stream, observe_event)
 from upstream_body import (read_error_body, render_metrics as error_body_metrics,
@@ -168,6 +168,9 @@ class LBSettings:
     # prompt_cache_key）的每一轮钉在同一个账户上。**单账户下是完全的 no-op**
     # （只有一个合格端点时压根不走亲和分支），所以默认开对现状零影响。
     copilot_session_affinity: bool
+    copilot_scoped_circuits: bool
+    copilot_recovery_small_input_bytes: int
+    copilot_recovery_preference_seconds: float
     # ---- Copilot HTTP client / pool ----
     copilot_http2: bool                # COPILOT_HTTP2 default true
     copilot_pool_max_connections: int  # COPILOT_POOL_MAX_CONNECTIONS
@@ -190,6 +193,12 @@ class LBSettings:
     otel_enabled: bool                 # OTEL_ENABLED default false
     otel_service_name: str             # OTEL_SERVICE_NAME
     otel_exporter_otlp_endpoint: str   # empty = ConsoleSpanExporter
+
+    def __post_init__(self):
+        if not 1 <= self.copilot_recovery_small_input_bytes <= 4 * 1024 * 1024:
+            raise ValueError('COPILOT_RECOVERY_SMALL_INPUT_BYTES must be between 1 and 4194304')
+        if not math.isfinite(self.copilot_recovery_preference_seconds) or not 0 <= self.copilot_recovery_preference_seconds <= 60:
+            raise ValueError('COPILOT_RECOVERY_PREFERENCE_SECONDS must be finite and between 0 and 60')
 
     @classmethod
     def load(cls) -> "LBSettings":
@@ -231,6 +240,9 @@ class LBSettings:
             copilot_stateful_401_neutral=_env_bool("COPILOT_STATEFUL_401_NEUTRAL", True),
             copilot_opaque_state_recovery=_env_bool("COPILOT_OPAQUE_STATE_RECOVERY", True),
             copilot_session_affinity=_env_bool("COPILOT_SESSION_AFFINITY", True),
+            copilot_scoped_circuits=_env_bool("COPILOT_SCOPED_CIRCUITS", True),
+            copilot_recovery_small_input_bytes=_env_int("COPILOT_RECOVERY_SMALL_INPUT_BYTES", 65536),
+            copilot_recovery_preference_seconds=_env_float("COPILOT_RECOVERY_PREFERENCE_SECONDS", 10.0),
             copilot_http2=_env_bool("COPILOT_HTTP2", True),
             copilot_pool_max_connections=_env_int("COPILOT_POOL_MAX_CONNECTIONS", 500),
             copilot_pool_max_keepalive=_env_int("COPILOT_POOL_MAX_KEEPALIVE", 200),
@@ -264,6 +276,7 @@ class LBSettings:
                 'image_trim_policy': IMAGE_TRIM_POLICY, 'chat_adapter_contract': MODE,
                 'chat_adapter_preserve_models': sorted(PRESERVE_MODELS) if PRESERVE_MODELS is not None else None,
                 'context_budget_mode': model_capabilities.MODE,
+                'context_large_input_bytes': model_capabilities.LARGE_INPUT_BYTES,
                 'capability_catalog_sha256': model_capabilities.CATALOG.sha256,
                 'capability_catalog_entries': len(model_capabilities.CATALOG.entries)}
 
@@ -2426,6 +2439,19 @@ def _replay_safe_transport_failure(exc):
     return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
 
 
+def _copilot_failure_scope(*, exception=None, reason=None):
+    # Typed RST_STREAM confines the failure to one stream; REFUSED_STREAM and
+    # ENHANCE_YOUR_CALM are overload signals, so retain shared account protection.
+    # Generic EOF/protocol exceptions have no such evidence. Never infer scope
+    # from size, elapsed time, prompt, or an exception string.
+    details = transport_details(exception)
+    if details['protocol_scope'] == 'stream' and details.get('http2_error_code') in (1, 2, 8):
+        return 'model_api'
+    if reason == 'invalid_protocol':
+        return 'model_api'
+    return 'endpoint'
+
+
 def _retry_rejected_response(response, attempt, max_attempts):
     # Only explicit admission rejection is safe. If upstream supplies Retry-After,
     # return it rather than holding a request or shortening its requested cooldown.
@@ -2525,6 +2551,26 @@ class RequestAttempt:
     generation: int
     probe: bool = False
     ended: bool = False
+    route_circuit: object = field(default=None, repr=False)
+    route_generation: int = 0
+    route_probe: bool = False
+
+
+@dataclass(eq=False)
+class ModelAPICircuit:
+    owner: object = field(repr=False)
+    model: str
+    api_type: str
+    circuit_open: bool = False
+    circuit_generation: int = 0
+    circuit_retry_at: float = 0.0
+    half_open_in_flight: bool = False
+    consecutive_errors: int = 0
+    active_requests: int = 0
+
+    @property
+    def name(self):
+        return self.owner.name
 
 
 class LoadBalancer:
@@ -2541,38 +2587,90 @@ class LoadBalancer:
         self.circuit_breaker_timeout = circuit_breaker_timeout
         self._rr_index = 0  # round_robin 计数器
         self._attempts = {}
+        self._route_circuits = {}
+
+    def _route_circuit(self, ep, model, api_type, *, create=False):
+        if (not LB_SETTINGS.copilot_scoped_circuits or not isinstance(ep, CopilotEndpoint) or api_type not in ep.api_types
+                or safe_id(model) is None or not ep.supports(model, api_type)):
+            return None
+        key = (id(ep), model, api_type)
+        state = self._route_circuits.get(key)
+        if state is None and create:
+            if len(self._route_circuits) >= 128:
+                discard = next((k for k, v in self._route_circuits.items()
+                                if not v.circuit_open and not v.active_requests and not v.consecutive_errors), None)
+                if discard is None:
+                    return None  # Bounded cache full: retain shared protection.
+                del self._route_circuits[discard]
+            state = self._route_circuits[key] = ModelAPICircuit(ep, model, api_type)
+        return state
 
     def circuit_state(self, ep) -> str:
         if not ep.circuit_open:
             return "CLOSED"
         return "HALF_OPEN" if time.monotonic() >= ep.circuit_retry_at else "OPEN"
 
-    def is_available(self, ep, *, readiness=False) -> bool:
+    def _trial_preference_wait(self, state, payload):
+        owner = state.owner if isinstance(state, ModelAPICircuit) else state
+        if (not isinstance(owner, CopilotEndpoint) or payload is None
+                or self.circuit_state(state) != 'HALF_OPEN' or state.half_open_in_flight):
+            return 0
+        wait = state.circuit_retry_at + LB_SETTINGS.copilot_recovery_preference_seconds - time.monotonic()
+        if wait <= 0:
+            return 0
+        estimate = estimate_payload(payload)
+        small = estimate['estimate_complete'] and estimate['text_bytes'] <= LB_SETTINGS.copilot_recovery_small_input_bytes
+        return 0 if small else max(1, math.ceil(wait))
+
+    def is_available(self, ep, *, readiness=False, model=None, api_type=None, payload=None) -> bool:
         # Read-only eligibility: health/routing checks never consume the trial slot.
+        if isinstance(ep, CopilotEndpoint) and model is not None and api_type is None:
+            return any(self.is_available(ep, readiness=readiness, model=model, api_type=api, payload=payload)
+                       for api in ep.api_types)
         state = self.circuit_state(ep)
-        return state == "CLOSED" or (state == "HALF_OPEN" and
-                                     (readiness or not ep.half_open_in_flight))
+        available = state == "CLOSED" or (state == "HALF_OPEN" and
+                                         (readiness or not ep.half_open_in_flight))
+        route = self._route_circuit(ep, model, api_type)
+        return (available and (readiness or not self._trial_preference_wait(ep, payload))
+                and (route is None or self.is_available(route, readiness=readiness, payload=payload)))
 
-    def get_available_endpoints(self) -> list[WorkspaceEndpoint]:
-        return [ep for ep in self.endpoints if self.is_available(ep)]
+    def get_available_endpoints(self, *, model=None, api_type=None, payload=None) -> list[WorkspaceEndpoint]:
+        return [ep for ep in self.endpoints if self.is_available(ep, model=model, api_type=api_type, payload=payload)]
 
-    def retry_after(self, endpoints=None) -> int:
+    def retry_after(self, endpoints=None, *, model=None, api_type=None, payload=None) -> int:
         candidates = self.endpoints if endpoints is None else endpoints
-        waits = [max(1, math.ceil(ep.circuit_retry_at - time.monotonic()))
-                 for ep in candidates if ep.circuit_open]
+        waits = []
+        for ep in candidates:
+            states = [s for s in (ep, self._route_circuit(ep, model, api_type)) if s is not None and s.circuit_open]
+            if states:
+                waits.append(max(max(1, math.ceil(s.circuit_retry_at - time.monotonic()),
+                                      self._trial_preference_wait(s, payload)) for s in states))
         return min(waits, default=1)
 
-    def unavailable(self, endpoints=None):
-        return HTTPException(status_code=503, headers={"Retry-After": str(self.retry_after(endpoints))},
-                             detail={"error": {"code": "endpoint_unavailable",
-                                               "message": "Configured upstream temporarily unavailable; retry after cooldown."}})
+    def unavailable(self, endpoints=None, *, model=None, api_type=None, payload=None):
+        candidates = self.endpoints if endpoints is None else endpoints
+        deferred = any(self.is_available(ep, model=model, api_type=api_type)
+                       and not self.is_available(ep, model=model, api_type=api_type, payload=payload)
+                       for ep in candidates)
+        if deferred:
+            note_failure('recovery_preference', origin='local')
+            log_event({'kind': 'lb_recovery_deferred', 'provider': 'copilot', 'api_type': api_type,
+                       'forwarded_model': model, 'reason': 'recovery_preference',
+                       'retry_after_seconds': self.retry_after(candidates, model=model, api_type=api_type, payload=payload)})
+        return HTTPException(status_code=503, headers={"Retry-After": str(self.retry_after(endpoints, model=model, api_type=api_type, payload=payload))},
+                             detail={"error": {"code": "recovery_prefers_small_request" if deferred else "endpoint_unavailable",
+                                               "message": "Recovery briefly prefers small complete-input requests; retry after the preference window."
+                                               if deferred else "Configured upstream temporarily unavailable; retry after cooldown."}})
 
     def _circuit_event(self, ep, previous, reason):
-        provider = 'copilot' if isinstance(ep, CopilotEndpoint) else 'azure_openai' if isinstance(ep, AzureOpenAIEndpoint) else 'databricks'
+        provider = 'copilot' if isinstance(ep, (CopilotEndpoint, ModelAPICircuit)) else 'azure_openai' if isinstance(ep, AzureOpenAIEndpoint) else 'databricks'
         fields = {'kind': 'lb_circuit_transition', 'provider': provider, 'endpoint_alias': ep.name,
+                  'circuit_scope': 'model_api' if isinstance(ep, ModelAPICircuit) else 'endpoint',
                   'previous_state': previous, 'circuit_state': self.circuit_state(ep),
                   'transition_reason': reason, 'circuit_generation': ep.circuit_generation,
                   'consecutive_errors': ep.consecutive_errors}
+        if isinstance(ep, ModelAPICircuit):
+            fields.update(forwarded_model=ep.model, api_type=ep.api_type)
         if reason in ('trial_admitted', 'administrative_reset'):
             fields['upstream_attempt_id'] = None
         log_event(fields)
@@ -2587,6 +2685,12 @@ class LoadBalancer:
         logger.warning("Circuit breaker opened for %s", ep.name)
 
     def reset_circuit(self, ep):
+        self._reset_circuit(ep)
+        for state in self._route_circuits.values():
+            if state.owner is ep:
+                self._reset_circuit(state)
+
+    def _reset_circuit(self, ep):
         # Administrative reset invalidates old admission generations, not their ownership.
         previous = self.circuit_state(ep)
         ep.circuit_open = False
@@ -2699,16 +2803,25 @@ class LoadBalancer:
             weights = [ep.weight for ep in matched]
             return random.choices(matched, weights=weights, k=1)[0]
 
-    async def on_request_start(self, endpoint: WorkspaceEndpoint):
+    async def on_request_start(self, endpoint: WorkspaceEndpoint, *, model=None, api_type=None, payload=None):
         # No await between check and claim: atomic within the application's event loop.
-        if not self.is_available(endpoint):
+        if not self.is_available(endpoint, model=model, api_type=api_type, payload=payload):
             endpoint.rejected_requests += 1
-            raise self.unavailable([endpoint])
+            raise self.unavailable([endpoint], model=model, api_type=api_type, payload=payload)
+        route = self._route_circuit(endpoint, model, api_type, create=True)
         probe = endpoint.circuit_open
         if probe:
             endpoint.half_open_in_flight = True
             self._circuit_event(endpoint, 'OPEN', 'trial_admitted')
         lease = RequestAttempt(endpoint, endpoint.circuit_generation, probe)
+        if route is not None:
+            lease.route_circuit = route
+            lease.route_generation = route.circuit_generation
+            lease.route_probe = route.circuit_open
+            route.active_requests += 1
+            if lease.route_probe:
+                route.half_open_in_flight = True
+                self._circuit_event(route, 'OPEN', 'trial_admitted')
         self._attempts.setdefault(id(endpoint), {})[id(lease)] = lease
         endpoint.active_requests += 1
         endpoint.total_requests += 1
@@ -2716,7 +2829,7 @@ class LoadBalancer:
         return lease
 
     async def on_request_end(self, endpoint: WorkspaceEndpoint, success: bool,
-                             is_client_error: bool = False, *, lease=None, cancelled=False):
+                             is_client_error: bool = False, *, lease=None, cancelled=False, failure_scope='endpoint'):
         lease = lease if lease is not None else self.current_attempt(endpoint)
         if lease.endpoint is not endpoint:
             raise RuntimeError("Request attempt endpoint mismatch")
@@ -2736,10 +2849,19 @@ class LoadBalancer:
             endpoint.last_error_time = time.time()
         else:
             endpoint.neutral_requests += 1
+        route = lease.route_circuit
+        if route is not None:
+            route.active_requests = max(0, route.active_requests - 1)
+            self._settle_circuit(route, lease.route_generation, lease.route_probe, success,
+                                 failed and failure_scope == 'model_api')
+        self._settle_circuit(endpoint, lease.generation, lease.probe, success,
+                             failed and (failure_scope != 'model_api' or route is None))
+
+    def _settle_circuit(self, endpoint, generation, probe, success, failed):
         # Old in-flight results still count in telemetry, never override a newer trip/trial.
-        if lease.generation != endpoint.circuit_generation:
+        if generation != endpoint.circuit_generation:
             return
-        if lease.probe:
+        if probe:
             endpoint.half_open_in_flight = False
             if success:
                 endpoint.circuit_open = False
@@ -2769,7 +2891,12 @@ class LoadBalancer:
                 "neutral_requests": ep.neutral_requests,
                 "completed_requests": ep.completed_requests,
                 "rejected_requests": ep.rejected_requests,
-                "usage_record_errors": ep.usage_record_errors}
+                "usage_record_errors": ep.usage_record_errors,
+                "model_api_circuits": [{'model': v.model, 'api_type': v.api_type,
+                    'circuit_state': self.circuit_state(v), 'consecutive_errors': v.consecutive_errors,
+                    'half_open_in_flight': v.half_open_in_flight,
+                    'retry_after_seconds': self.retry_after([v]) if v.circuit_open else 0}
+                    for v in self._route_circuits.values() if v.owner is ep]}
 
     def get_stats(self) -> dict:
         endpoints_stats = []
@@ -4798,7 +4925,7 @@ class CopilotProxy:
 
     def _select_endpoint(self, model: str, api_type: Optional[str] = None,
                           *, pinned: Optional[CopilotEndpoint] = None,
-                          session_key: Optional[str] = None, tried=None) -> Optional[CopilotEndpoint]:
+                          session_key: Optional[str] = None, tried=None, body=None) -> Optional[CopilotEndpoint]:
         """从可用端点中筛选支持指定模型的端点。空 models = 通配。
 
         ``api_type``（e390237 引入）：按上游 API 类型过滤——账户可能只启用
@@ -4815,7 +4942,7 @@ class CopilotProxy:
         揭示的 401 风险高于让同一 endpoint 再踩一次 CDN 挑战页的代价，等 30s
         冷却或跨请求才会由外层重路由。
         """
-        available = self.load_balancer.get_available_endpoints()
+        available = self.load_balancer.get_available_endpoints(model=model, api_type=api_type, payload=body)
         matched = [ep for ep in available if ep.supports(model, api_type)]
         if not matched:
             return None
@@ -4875,7 +5002,7 @@ class CopilotProxy:
 
     def can_handle(self, model: str, api_type: Optional[str] = None) -> bool:
         """是否有任何健康端点可服务该模型（路由层用来决定是否优先 Copilot）"""
-        return any(ep.supports(model, api_type) and self.load_balancer.is_available(ep)
+        return any(ep.supports(model, api_type) and self.load_balancer.is_available(ep, model=model, api_type=api_type)
                    for ep in self.load_balancer.endpoints)
 
     def supports_model(self, model: str, api_type: Optional[str] = None) -> bool:
@@ -5396,7 +5523,7 @@ class CopilotProxy:
             endpoint = self._select_endpoint(
                 model, api_type,
                 pinned=pinned_endpoint if is_stateful else None,
-                session_key=session_key, tried=tried)
+                session_key=session_key, tried=tried, body=body)
             if not endpoint:
                 if is_stateful and pinned_endpoint is not None:
                     # pinned endpoint 掉线 → 直接抛 503，让客户端知道要重新构造会话
@@ -5417,19 +5544,19 @@ class CopilotProxy:
                     )
                 if self.supports_model(model, api_type):
                     # 模型已配置但所有 endpoint 处于 circuit OPEN/HALF_OPEN busy → 503 + Retry-After
-                    raise self.load_balancer.unavailable([ep for ep in self.load_balancer.endpoints if ep.supports(model, api_type)])
+                    raise self.load_balancer.unavailable([ep for ep in self.load_balancer.endpoints if ep.supports(model, api_type)], model=model, api_type=api_type, payload=body)
                 raise HTTPException(status_code=404, detail={"error": {"code": "unsupported_model", "message": "No configured Copilot route for this model"}})
             if is_stateful and pinned_endpoint is None:
                 pinned_endpoint = endpoint
             tried.add(endpoint.name)
 
             observe_route_budget('copilot', api_type, model, body, endpoint.name)
-            attempt_lease = await self.load_balancer.on_request_start(endpoint)
+            attempt_lease = await self.load_balancer.on_request_start(endpoint, model=model, api_type=api_type, payload=body)
             attempt_ended = False
             attempt_transferred = False
             attempt_cancelled = False
 
-            async def end_attempt(success: bool, is_client_error: bool = False, *, cancelled=False):
+            async def end_attempt(success: bool, is_client_error: bool = False, *, cancelled=False, failure_scope="endpoint"):
                 nonlocal attempt_ended
                 if attempt_ended:
                     return
@@ -5437,7 +5564,7 @@ class CopilotProxy:
                 try:
                     await _finish_cleanup(self.load_balancer.on_request_end(
                         endpoint, success=success, is_client_error=is_client_error,
-                        lease=attempt_lease, cancelled=cancelled
+                        lease=attempt_lease, cancelled=cancelled, failure_scope=failure_scope
                     ))
                 finally:
                     attempt_ended = attempt_lease.ended
@@ -5511,7 +5638,9 @@ class CopilotProxy:
                     await end_attempt(success=False, is_client_error=True)
                     raise
                 except _SemanticResponseError as exc:
-                    await end_attempt(success=False,is_client_error=exc.neutral)
+                    await end_attempt(success=False,is_client_error=exc.neutral,
+                        failure_scope=_copilot_failure_scope(reason="invalid_protocol")
+                        if exc.detail.get("error",{}).get("code") == "invalid_upstream_response" else "endpoint")
                     raise
                 except httpx.HTTPStatusError as e:
                     last_error = e
@@ -5589,7 +5718,8 @@ class CopilotProxy:
                     last_error = e
                     self.global_stats.total_errors += 1
                     logger.error(f"[Copilot] {endpoint.name} failed: {e}")
-                    await end_attempt(success=False, is_client_error=isinstance(e, httpx.PoolTimeout))
+                    await end_attempt(success=False, is_client_error=isinstance(e, httpx.PoolTimeout),
+                                      failure_scope=_copilot_failure_scope(exception=e))
                     if _replay_safe_transport_failure(e) and attempt < max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         continue
@@ -5764,13 +5894,13 @@ class CopilotProxy:
                 md["request_id"] = request_id
             return md
 
-        async def end_current_request(success: bool, is_client_error: bool = False, *, cancelled=False):
+        async def end_current_request(success: bool, is_client_error: bool = False, *, cancelled=False, failure_scope="endpoint"):
             if not request_lease["active"]:
                 return
             current = request_lease["endpoint"]
             await proxy_self.load_balancer.on_request_end(
                 current, success=success, is_client_error=is_client_error,
-                lease=request_lease["lease"], cancelled=cancelled
+                lease=request_lease["lease"], cancelled=cancelled, failure_scope=failure_scope
             )
             request_lease["active"] = False
 
@@ -5783,7 +5913,7 @@ class CopilotProxy:
                 return rejection
             request_lease["endpoint"] = current
             tried.add(current.name)
-            request_lease["lease"] = await proxy_self.load_balancer.on_request_start(current)
+            request_lease["lease"] = await proxy_self.load_balancer.on_request_start(current, model=model, api_type=api_type, payload=body)
             request_lease["active"] = True
             if connection_id and connection_id in proxy_self._stream_connections:
                 proxy_self._stream_connections[connection_id]["endpoint"] = current.name
@@ -5895,6 +6025,13 @@ class CopilotProxy:
                 response = None
                 observation = None
                 pump_task = None
+                protocol_metrics.clear()
+                last_upstream_activity = None
+
+                def record_activity():
+                    nonlocal last_upstream_activity
+                    last_upstream_activity = time.monotonic()
+                    proxy_self._touch_stream(connection_id)
 
                 try:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
@@ -5907,7 +6044,8 @@ class CopilotProxy:
                                 yield wire_output.heartbeat(payload)
                             else:
                                 response = payload
-                                proxy_self._touch_stream(connection_id)
+                                record_activity()
+                                protocol_metrics['http_version'] = transport_details(None, http_version=getattr(response, 'http_version', 'unknown'))['http_version']
                                 # Record whatever the TLS ALPN actually negotiated for this
                                 # socket. This is the authoritative signal: "the CDN is
                                 # serving HTTP/2" vs "CDN downgraded us to HTTP/1.1 despite
@@ -6042,7 +6180,7 @@ class CopilotProxy:
                             logger.warning(f"[Copilot] {current_endpoint.name} returned {response.status_code}, retrying stream...")
                             await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                             new_endpoint = proxy_self._select_endpoint(model, api_type, pinned=stateful_pin,
-                                                                 session_key=session_key, tried=tried)
+                                                                 session_key=session_key, tried=tried, body=body)
                             # stateful 请求且 pinned 已 unavailable → new_endpoint 为 None → 跳过 retry
                             if is_stateful and new_endpoint is None:
                                 proxy_self._note_stateful_pin("http_5xx")
@@ -6086,7 +6224,7 @@ class CopilotProxy:
                     def queue_full():
                         proxy_self.stream_pump_queue_full_events_total += 1
                     async with aclosing(_framed_sse(
-                        response, on_pump=own_pump, metrics=protocol_metrics, on_activity=lambda: proxy_self._touch_stream(connection_id),
+                        response, on_pump=own_pump, metrics=protocol_metrics, on_activity=record_activity,
                         on_queue_full=queue_full,
                     )) as frames:
                         async for frame in frames:
@@ -6177,7 +6315,7 @@ class CopilotProxy:
                     ):
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         new_endpoint = proxy_self._select_endpoint(model, api_type, pinned=stateful_pin,
-                                                                 session_key=session_key, tried=tried)
+                                                                 session_key=session_key, tried=tried, body=body)
                         if is_stateful and new_endpoint is None:
                             proxy_self._note_stateful_pin("pool_acquire_timeout")
                             logger.warning(
@@ -6218,6 +6356,10 @@ class CopilotProxy:
                         httpx.ConnectError, httpx.RemoteProtocolError,
                         httpx.ReadError, httpx.WriteError) as e:
                     note_exception(e)
+                    protocol_metrics.update(transport_details(e, http_version=protocol_metrics.get('http_version', 'unknown')))
+                    protocol_metrics['upstream_headers_received'] = response is not None
+                    protocol_metrics['upstream_idle_seconds'] = (round(time.monotonic() - last_upstream_activity, 6)
+                                                                if last_upstream_activity is not None else None)
                     is_read_timeout = isinstance(e, httpx.ReadTimeout)
                     if is_read_timeout:
                         # Independent counter so `read=None` regressions become
@@ -6258,14 +6400,14 @@ class CopilotProxy:
                             "upstream_probe": probe_snapshot,
                         },
                     )
-                    await end_current_request(success=False)
+                    await end_current_request(success=False, failure_scope=_copilot_failure_scope(exception=e))
 
                     # POST replay 只在 connect/pool 类瞬时失败允许（不 replay read/write timeout、协议错）
                     # 且 response 必须是 None（未拿到任何响应字节）
                     if response is None and not sent_any_chunk and _replay_safe_transport_failure(e) and attempt < max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         new_endpoint = proxy_self._select_endpoint(model, api_type, pinned=stateful_pin,
-                                                                 session_key=session_key, tried=tried)
+                                                                 session_key=session_key, tried=tried, body=body)
                         if is_stateful and new_endpoint is None:
                             proxy_self._note_stateful_pin("network_error")
                             logger.warning(
@@ -6981,7 +7123,8 @@ async def count_tokens(request: Request):
             'X-LB-Token-Count-Method': estimate['estimate_method'],
             'X-LB-Token-Count-Confidence': estimate['estimate_confidence'],
             'X-LB-Token-Count-Complete': str(estimate['estimate_complete']).lower(),
-            'X-LB-Unknown-Components': ','.join(estimate['unknown_components'])})
+            'X-LB-Unknown-Components': ','.join(estimate['unknown_components']),
+            **context_hint_headers({**estimate, 'context_advice': model_capabilities.context_advice(estimate)})})
     finally:
         CURRENT_LEASE.reset(token)
         lease.release()
@@ -7447,7 +7590,7 @@ def _copilot_endpoint_diagnostics(model: str, api_type: Optional[str] = None) ->
             "model_allowed": (not ep.models or model in ep.models),
             "api_allowed": api_type is None or api_type in ep.api_types,
             "api_types": list(ep.api_types),
-            "available": load_balancer.is_available(ep),
+            "available": load_balancer.is_available(ep, model=model, api_type=api_type),
             "models_mode": "wildcard" if not ep.models else "allowlist",
             "has_session_token": bool(ep.session_token),
             "session_token_remaining_seconds": max(0, remaining),
@@ -7529,7 +7672,8 @@ async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Opt
     if not copilot_can and not azure_supports:
         if copilot_proxy and copilot_proxy.supports_model(model, api_type):
             raise copilot_proxy.load_balancer.unavailable(
-                [ep for ep in copilot_proxy.load_balancer.endpoints if ep.supports(model, api_type)])
+                [ep for ep in copilot_proxy.load_balancer.endpoints if ep.supports(model, api_type)],
+                model=model, api_type=api_type, payload=body)
         msg = _build_no_provider_message(model, api_type)
         raise HTTPException(status_code=404, detail={"error": {"message": msg}})
 
