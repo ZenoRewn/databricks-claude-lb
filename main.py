@@ -171,6 +171,7 @@ class LBSettings:
     copilot_scoped_circuits: bool
     copilot_recovery_small_input_bytes: int
     copilot_recovery_preference_seconds: float
+    copilot_stream_prefirst_content_warn_seconds: int
     # ---- Copilot HTTP client / pool ----
     copilot_http2: bool                # COPILOT_HTTP2 default true
     copilot_pool_max_connections: int  # COPILOT_POOL_MAX_CONNECTIONS
@@ -199,6 +200,8 @@ class LBSettings:
             raise ValueError('COPILOT_RECOVERY_SMALL_INPUT_BYTES must be between 1 and 4194304')
         if not math.isfinite(self.copilot_recovery_preference_seconds) or not 0 <= self.copilot_recovery_preference_seconds <= 60:
             raise ValueError('COPILOT_RECOVERY_PREFERENCE_SECONDS must be finite and between 0 and 60')
+        if not 0 <= self.copilot_stream_prefirst_content_warn_seconds <= 3600:
+            raise ValueError('COPILOT_STREAM_PREFIRST_CONTENT_WARN_SECONDS must be between 0 and 3600')
 
     @classmethod
     def load(cls) -> "LBSettings":
@@ -243,6 +246,9 @@ class LBSettings:
             copilot_scoped_circuits=_env_bool("COPILOT_SCOPED_CIRCUITS", True),
             copilot_recovery_small_input_bytes=_env_int("COPILOT_RECOVERY_SMALL_INPUT_BYTES", 65536),
             copilot_recovery_preference_seconds=_env_float("COPILOT_RECOVERY_PREFERENCE_SECONDS", 10.0),
+            # Default 90s sits below the ~120s upstream cancellation observed on
+            # 2026-10-09, so the stall is visible before that timer fires. 0 disables.
+            copilot_stream_prefirst_content_warn_seconds=_env_int("COPILOT_STREAM_PREFIRST_CONTENT_WARN_SECONDS", 90),
             copilot_http2=_env_bool("COPILOT_HTTP2", True),
             copilot_pool_max_connections=_env_int("COPILOT_POOL_MAX_CONNECTIONS", 500),
             copilot_pool_max_keepalive=_env_int("COPILOT_POOL_MAX_KEEPALIVE", 200),
@@ -2588,6 +2594,9 @@ class LoadBalancer:
         self._rr_index = 0  # round_robin 计数器
         self._attempts = {}
         self._route_circuits = {}
+        # id(state) -> circuit_generation that saw a qualifying small request.
+        # Keyed on generation so a new cooldown never inherits stale evidence.
+        self._small_input_evidence = {}
 
     def _route_circuit(self, ep, model, api_type, *, create=False):
         if (not LB_SETTINGS.copilot_scoped_circuits or not isinstance(ep, CopilotEndpoint) or api_type not in ep.api_types
@@ -2601,6 +2610,8 @@ class LoadBalancer:
                                 if not v.circuit_open and not v.active_requests and not v.consecutive_errors), None)
                 if discard is None:
                     return None  # Bounded cache full: retain shared protection.
+                # Drop the evidence with the state so a reused id() cannot revive it.
+                self._small_input_evidence.pop(id(self._route_circuits[discard]), None)
                 del self._route_circuits[discard]
             state = self._route_circuits[key] = ModelAPICircuit(ep, model, api_type)
         return state
@@ -2610,17 +2621,38 @@ class LoadBalancer:
             return "CLOSED"
         return "HALF_OPEN" if time.monotonic() >= ep.circuit_retry_at else "OPEN"
 
+    def _is_small_input(self, payload):
+        # Unknown image/opaque/prior-state size is never small: an incomplete
+        # estimate cannot establish that the request is cheap to trial with.
+        estimate = estimate_payload(payload)
+        return bool(estimate['estimate_complete']
+                    and estimate['text_bytes'] <= LB_SETTINGS.copilot_recovery_small_input_bytes)
+
+    def _note_small_input(self, state, payload):
+        """Record that a qualifying small request arrived during this cooldown.
+
+        Deferring a large request only buys something when a small one actually
+        arrives. A workload of exclusively large requests would otherwise be
+        deferred in every HALF_OPEN window of a repeatedly reopening circuit.
+        """
+        if payload is None or not state.circuit_open:
+            return
+        if self._is_small_input(payload):
+            self._small_input_evidence[id(state)] = state.circuit_generation
+
+    def _has_small_input_evidence(self, state):
+        return self._small_input_evidence.get(id(state)) == state.circuit_generation
+
     def _trial_preference_wait(self, state, payload):
         owner = state.owner if isinstance(state, ModelAPICircuit) else state
         if (not isinstance(owner, CopilotEndpoint) or payload is None
-                or self.circuit_state(state) != 'HALF_OPEN' or state.half_open_in_flight):
+                or self.circuit_state(state) != 'HALF_OPEN' or state.half_open_in_flight
+                or not self._has_small_input_evidence(state)):
             return 0
         wait = state.circuit_retry_at + LB_SETTINGS.copilot_recovery_preference_seconds - time.monotonic()
         if wait <= 0:
             return 0
-        estimate = estimate_payload(payload)
-        small = estimate['estimate_complete'] and estimate['text_bytes'] <= LB_SETTINGS.copilot_recovery_small_input_bytes
-        return 0 if small else max(1, math.ceil(wait))
+        return 0 if self._is_small_input(payload) else max(1, math.ceil(wait))
 
     def is_available(self, ep, *, readiness=False, model=None, api_type=None, payload=None) -> bool:
         # Read-only eligibility: health/routing checks never consume the trial slot.
@@ -2649,6 +2681,13 @@ class LoadBalancer:
 
     def unavailable(self, endpoints=None, *, model=None, api_type=None, payload=None):
         candidates = self.endpoints if endpoints is None else endpoints
+        # Every rejection path funnels through here, so this is where a cooldown
+        # observes the workload. Readiness probes never reach it.
+        for ep in candidates:
+            self._note_small_input(ep, payload)
+            route = self._route_circuit(ep, model, api_type)
+            if route is not None:
+                self._note_small_input(route, payload)
         deferred = any(self.is_available(ep, model=model, api_type=api_type)
                        and not self.is_available(ep, model=model, api_type=api_type, payload=payload)
                        for ep in candidates)
@@ -4242,6 +4281,11 @@ class CopilotProxy:
         self._stream_overload_since: dict[str, float] = {}
         self.stream_disconnects_detected_total = 0
         self.stream_forced_releases_total = 0
+        # Streams that received upstream headers but produced no content within
+        # COPILOT_STREAM_PREFIRST_CONTENT_WARN_SECONDS. Observation only: it makes
+        # the ~120s upstream cancellation visible while still in progress instead
+        # of only afterwards via RST_STREAM(CANCEL). At most one per stream.
+        self.stream_prefirst_content_stall_total = 0
         self.pool_timeout_total = 0
         # Keep legacy metric keys for compatibility. Saturation records only an
         # observed full HTTPX pool; the deprecated upstream-stall counter remains
@@ -4346,12 +4390,58 @@ class CopilotProxy:
             "started_at": now,
             "last_upstream_activity_at": now,
             "disconnected_since": None,
+            # Response headers and first decoded content are tracked separately:
+            # "200 then silence" is a different condition from "no headers yet",
+            # and only the former can hit the upstream pre-content timer.
+            "headers_at": None,
+            "content_at": None,
+            "prefirst_stall_reported": False,
         }
         return connection_id
 
     def _touch_stream(self, connection_id: Optional[str]):
         if connection_id and connection_id in self._stream_connections:
             self._stream_connections[connection_id]["last_upstream_activity_at"] = time.monotonic()
+
+    def _note_stream_headers(self, connection_id: Optional[str]):
+        item = self._stream_connections.get(connection_id) if connection_id else None
+        if item is not None and item["headers_at"] is None:
+            item["headers_at"] = time.monotonic()
+
+    def _note_stream_content(self, connection_id: Optional[str]):
+        item = self._stream_connections.get(connection_id) if connection_id else None
+        if item is not None and item["content_at"] is None:
+            item["content_at"] = time.monotonic()
+
+    def _note_prefirst_content_stall(self, connection_id: Optional[str], threshold) -> int:
+        """Report a stream stalled after headers but before any content.
+
+        Diagnostic only: never cancels the stream, retries, or moves a circuit.
+        Reported at most once per stream so a long stall cannot flood the sink.
+        Returns the number of signals emitted so callers can aggregate.
+        """
+        item = self._stream_connections.get(connection_id) if connection_id else None
+        if item is None or not threshold or item.get("prefirst_stall_reported"):
+            return 0
+        # Tolerate entries without the tracking keys: a stream registered by an
+        # older code path must degrade to "no signal", never to a monitor crash.
+        if item.get("headers_at") is None or item.get("content_at") is not None:
+            return 0
+        waited = time.monotonic() - item["headers_at"]
+        if waited < threshold:
+            return 0
+        item["prefirst_stall_reported"] = True
+        self.stream_prefirst_content_stall_total = getattr(self, 'stream_prefirst_content_stall_total', 0) + 1
+        logger.warning(
+            "[Copilot] stream has produced no content %.1fs after upstream headers on %s",
+            waited, item.get("endpoint"),
+            extra={"kind": "copilot_stream_prefirst_content_stall",
+                   "endpoint": item.get("endpoint"), "connection_id": connection_id,
+                   "upstream_headers_received": True,
+                   "seconds_since_headers": round(waited, 3),
+                   "threshold_seconds": threshold},
+        )
+        return 1
 
     def _unregister_stream(self, connection_id: Optional[str]):
         if connection_id:
@@ -4647,7 +4737,11 @@ class CopilotProxy:
                     else:
                         self._stream_overload_since.pop("shared_pool", None)
 
+                    stall_threshold = LB_SETTINGS.copilot_stream_prefirst_content_warn_seconds
                     for connection_id, item in list(self._stream_connections.items()):
+                        # Pure observation, evaluated regardless of pool pressure: a
+                        # stream silent after headers is interesting on an idle pod too.
+                        self._note_prefirst_content_stall(connection_id, stall_threshold)
                         overload_since = self._stream_overload_since.get("shared_pool")
                         if overload_since is None or now - overload_since < overload_grace:
                             item["disconnected_since"] = None
@@ -6045,6 +6139,7 @@ class CopilotProxy:
                             else:
                                 response = payload
                                 record_activity()
+                                proxy_self._note_stream_headers(connection_id)
                                 protocol_metrics['http_version'] = transport_details(None, http_version=getattr(response, 'http_version', 'unknown'))['http_version']
                                 # Record whatever the TLS ALPN actually negotiated for this
                                 # socket. This is the authoritative signal: "the CDN is
@@ -6233,6 +6328,7 @@ class CopilotProxy:
                                 continue
                             sent_any_chunk = True
                             chunks_yielded_count += 1
+                            proxy_self._note_stream_content(connection_id)
                             observation.observe(frame)
                             first_event_name = observation.first_event
                             last_event_name = observation.last_event
@@ -6550,6 +6646,7 @@ class CopilotProxy:
                     for (model, api_type), count in self.stream_truncated_no_completion_by_model.items()
                 },
                 "stream_read_timeout_total": self.stream_read_timeout_total,
+                "stream_prefirst_content_stall_total": self.stream_prefirst_content_stall_total,
                 "stream_pump_queue_full_events_total": self.stream_pump_queue_full_events_total,
                 "stream_high_watermark": COPILOT_STREAM_HIGH_WATERMARK,
                 "stream_connections_active": len(self._stream_connections),
@@ -8260,6 +8357,12 @@ async def metrics(schema: str = 'lb-metrics-v2'):
              "httpx.ReadTimeout events hitting the Copilot stream pump. With POOL_READ_TIMEOUT=None this stays at 0.",
              "counter",
              [f"copilot_stream_read_timeout_total {copilot_proxy.stream_read_timeout_total}"])
+        emit("copilot_stream_prefirst_content_stall_total",
+             "Streams that received upstream headers but produced no content within "
+             "COPILOT_STREAM_PREFIRST_CONTENT_WARN_SECONDS. Diagnostic only; at most one per stream. "
+             "Makes the ~120s upstream cancellation observable before it fires.",
+             "counter",
+             [f"copilot_stream_prefirst_content_stall_total {copilot_proxy.stream_prefirst_content_stall_total}"])
         emit("copilot_stream_pump_queue_full_events_total",
              "Times the pump task hit a full internal queue before put; useful for tuning maxsize.",
              "counter",

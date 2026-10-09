@@ -115,6 +115,7 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         proxy.stream_retry_budget_exhausted_total = 0
         proxy.stream_truncated_no_completion_by_model = {}
         proxy.stream_read_timeout_total = 0
+        proxy.stream_prefirst_content_stall_total = 0
         proxy.stream_pump_queue_full_events_total = 0
         # HTML 上游诊断 —— 与 CopilotProxy.__init__ 保持一致
         proxy.upstream_html_events_total = 0
@@ -1275,6 +1276,7 @@ class CopilotRequestLifecycleTests(unittest.IsolatedAsyncioTestCase):
         # Newly exposed counters must be present with 0 baseline.
         self.assertIn("copilot_stream_truncated_no_completion_total 0", body)
         self.assertIn("copilot_stream_read_timeout_total 0", body)
+        self.assertIn("copilot_stream_prefirst_content_stall_total 0", body)
         self.assertIn("copilot_stream_pump_queue_full_events_total 0", body)
         # read_timeout gauge exports -1 sentinel for unlimited (default: None).
         self.assertRegex(body, r"copilot_pool_read_timeout_seconds -1|copilot_pool_read_timeout_seconds \d")

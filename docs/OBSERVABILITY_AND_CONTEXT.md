@@ -34,6 +34,8 @@ HTTP 200、发送返回、有效生成终态、用量落盘和客户端业务成
 
 协议诊断保留实际 `http_version`、`protocol_error_kind`、`protocol_scope` 及数值 `http2_error_code` / `http2_stream_id` / `http2_last_stream_id`。仅从有限深度的真实 h2 异常原因对象提取；看似 StreamReset 的异常字符串不能成为隔离证据。GOAWAY debug data、异常原文和请求正文均不进入日志。
 
+`copilot_stream_prefirst_content_stall` 在已收到响应头、但超过 `COPILOT_STREAM_PREFIRST_CONTENT_WARN_SECONDS`（默认 90，范围 0～3600，0 关闭）仍无任何正文时发出，每条流最多一次，对应计数器 `copilot_stream_prefirst_content_stall_total`。它纯观测：不中止流、不触发重试、不影响熔断，也不改变重放白名单。默认值低于 2026-10-09 观测到的约 120 秒上游取消，目的是在该定时器触发前就能看到停滞，而不是事后从 `CANCEL(8)` 倒推。阈值不是 SLA，也不代表上游真实超时值。
+
 Copilot network/stream summary 新增 `upstream_headers_received` 与 `upstream_idle_seconds`。后者是从最近响应头或解码正文 delivery 到异常捕获的间隔，不是抓包得到的 TCP 空闲时间，也不包含错误后的 DNS/TCP 探测耗时；只发本地 heartbeat 不刷新它。分层熔断日志的 `circuit_scope=endpoint|model_api` 与 `/stats` 中的 `model_api_circuits` 解释实际阻断范围。
 
 诊断只保留允许字段，外部标识限制字符和长度；原始 UA 仅归类，不能当可信租户。异常仅保留类型，错误 body、正文、工具参数/结果、完整 schema、图片和 opaque 内容不进入请求诊断。旧非结构化推理日志仅保留来源位置与级别；排障应查询结构化事件，而非依赖原始错误片段。

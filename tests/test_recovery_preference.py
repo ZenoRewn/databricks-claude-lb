@@ -24,9 +24,21 @@ class RecoveryPreferenceTests(unittest.IsolatedAsyncioTestCase):
         self.small={'model':'a','input':'small'}
         self.large={'model':'a','input':'large'*20000}
         self.lb._open(self.ep)
+        await self._observe_small_input()
         self.now+=30
 
     async def asyncTearDown(self):self.clock.stop()
+
+    async def _observe_small_input(self):
+        """Drive the real rejection path so the cooldown records small-input evidence.
+
+        The preference only applies when a small request actually arrived during
+        the cooldown; see tests/test_recovery_workload_evidence.py. These cases
+        assert what the preference does once it applies, so they establish the
+        evidence through the same path production uses rather than poking state.
+        """
+        with self.assertRaises(main.HTTPException):
+            await self.lb.on_request_start(self.ep,model='a',api_type='responses',payload=self.small)
 
     async def test_large_request_waits_but_small_real_request_can_recover(self):
         with self.assertRaises(main.HTTPException) as caught:
