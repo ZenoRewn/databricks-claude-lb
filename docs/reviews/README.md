@@ -6,6 +6,7 @@ Author: Zeno Ren
 
 | 日期 | 范围 | 入口 |
 |---|---|---|
+| 2026-10-09 | 流协议取证与分层保护 AKS 发布；原故障未复现、未归因 | [部署回执](2026-10-09-stream-aks/REPORT.md)、[本地验证](2026-10-09-stream-reliability/REPORT.md) |
 | 2026-10-08 | 图片像素修复 AKS 发布；额外大图上游 503 边界 | [部署回执](2026-10-08-image-budget-aks/REPORT.md)、[本地验证](2026-10-08-image-budget/REPORT.md) |
 | 2026-09-30 | Dashboard、明亮配色与版本标识 AKS 发布 | [部署回执](2026-09-30-dashboard-aks/REPORT.md) |
 | 2026-09-30 | 图表明亮配色与 usage 告警只读评估 | [现场证据与建议](2026-09-30-chart-usage-review/ASSESSMENT.md) |

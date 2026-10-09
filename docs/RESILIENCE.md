@@ -2,7 +2,7 @@
 
 Author: Zeno Ren
 
-2026-10-09 的候选增加协议取证、Copilot 模型/API 局部熔断与有界恢复优先窗口，见 [本轮实现与验证](reviews/2026-10-09-stream-reliability/REPORT.md)。尚未部署 AKS。下文早期 endpoint-only 状态机保留为共享账户保护层的说明。
+2026-10-09 增加协议取证、Copilot 模型/API 局部熔断与有界恢复优先窗口，见 [本轮实现与验证](reviews/2026-10-09-stream-reliability/REPORT.md)。已发布到 AKS（源码 `fea7d60`，默认配置全开），见 [部署回执](reviews/2026-10-09-stream-aks/REPORT.md)；发布后观察期未复现原断流，不能据此宣称该故障已消除。下文早期 endpoint-only 状态机保留为共享账户保护层的说明。
 
 2026-09-30 adds safe circuit transition evidence and [offline experiment gates](OPERATIONS_EXPERIMENTS.md), without widening the replay allowlist or changing endpoint thresholds. [Request diagnostics](OBSERVABILITY_AND_CONTEXT.md) distinguish local overload, transport/protocol failures and recovered attempts. The independent review gate below remains applicable.
 

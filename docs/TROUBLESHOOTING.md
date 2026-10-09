@@ -265,6 +265,24 @@ SSE 流提前断开，客户端拼接到一半挂了。Codex Desktop / OpenAI JS
 3. 若 `copilot_stream_read_timeout_total` >0,说明有人把 `COPILOT_POOL_READ_TIMEOUT` 设成了有限值。恢复成 `None`（或删掉环境变量）
 4. 若 `copilot_stream_truncated_no_completion_by_model_total{model="X"}` 集中在某个模型,该模型的 GHCP 端可能在长 reasoning 期间会主动 EOF —— 目前只能降 reasoning_effort 或切换模型
 
+### 客户端报 `RemoteProtocolError` 时按协议取证定方向
+
+形如 `RemoteProtocolError: Upstream request could not complete ... chunks_yielded=0 first_event=None probe.ok=True` 的报错，**这段 SSE 字符串本身不足以归因** —— 它不含协议类型，`probe.ok` 是故障之后才做的探针，不是当时的因果证据。查 `kind=copilot_stream_network_error` 的结构化日志（`fea7d60` 起提供）：
+
+```bash
+kubectl -n YOUR_NS logs -l app=claude-lb --since=1h | grep copilot_stream_network_error
+```
+
+| 字段组合 | 观测到的事实 | 方向 |
+|---|---|---|
+| `protocol_error_kind=http2_goaway` + `http2_last_stream_id` | 远端主动终止整条连接 | 查 CDN / service mesh / 中间代理的连接回收与 idle 策略；仍按共享保护熔断 |
+| `protocol_error_kind=http2_stream_reset` + `http2_error_code` | 远端只重置了这一个流 | 1/2/8 进入 endpoint/model/API 局部熔断；据错误码重新评估该路由，不扩大到整个账户 |
+| `protocol_error_kind=remote_protocol_error` + `protocol_scope=unknown` | 裸 EOF，没有 typed h2 事件 | 无法归因，保守保留共享熔断。要再进一步只能抓包 |
+| `upstream_headers_received=false` | 连响应头都没拿到 | 偏建连/握手侧 |
+| `upstream_headers_received=true` + `upstream_idle_seconds` 很大 | 200 之后长时间无正文再断 | 偏上游生成侧或中间层 idle 回收；该值是「最近响应头或正文 delivery 到异常」的间隔，不是抓包的 TCP 空闲时间，本地 heartbeat 不刷新它 |
+
+缺少 `h2` 包时上述字段全部降级为 `unknown`。`requirements.lock` 固定 `h2==4.4.1`，发布前应确认镜像内存在；见 [部署回执](reviews/2026-10-09-stream-aks/REPORT.md)。局部熔断范围可用 `lb_circuit_transition` 的 `circuit_scope` 和 `/stats` 的 `model_api_circuits` 读回。另注意 `outcome=client_disconnected` + `error_origin=client` 是**下游客户端自己断开**，与本节的上游协议错误不是同一回事，不要混在一起统计。
+
 ### Copilot 连接池高水位 / active requests 不下降
 
 新版 Copilot streaming 路径在客户端中断后会从 ASGI response 边界关闭 body iterator，取消 upstream pump、执行 `response.aclose()` 并 exactly-once 归还 request slot。`httpx.PoolTimeout` 被归类为 LB 本地容量压力，不再累计 endpoint circuit breaker 错误。

@@ -1,0 +1,158 @@
+{
+  "author": "Zeno Ren",
+  "release_id": "lb-20261009-stream-030d7b",
+  "release_result": "succeeded",
+  "application_revision": "fea7d604d230dd71347cdf9d6145cb8429f5d729",
+  "registry_image": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:7199477bdae5cf79dffb6ea9b41723a99420feaff96391354585b1fe4074560d",
+  "registry_manifest_single_platform": true,
+  "registry_manifest_platform": "linux/amd64",
+  "previous_image": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:2b0e273e26f181ad7258c9ead871a86242d91151122f85c4630eb38a0161b9c6",
+  "previous_revision": "284ca53ec94b0dbb0d31325c09684bf1aa12fc02",
+  "plan_sha256": "708f07bd61d8f100715ec69f5ef98a4a8769cbf35a45d31b1829bb78e0ab224a",
+  "source_manifest_sha256": "a6e675f86836667d18588d24a770e5066e3e4ba2580e78c64847004ffd8426d5",
+  "runtime_files_verified": 21,
+  "public_version_verification": "matched",
+  "restarts": 0,
+  "source_and_image_identity_verified": true,
+  "scope_only_image_and_source_annotation": true,
+  "maintenance_started_at": 1791545798.044327,
+  "maintenance_finished_at": 1791545953.7548745,
+  "maintenance_seconds": 155.711,
+  "maintenance_budget_seconds": 600,
+  "drain_started_at": 1791545801.1640153,
+  "rollback_performed": false,
+  "cancel_requested": false,
+  "maintenance_cleared": true,
+  "cleanup_errors": [],
+  "pod": {
+    "name": "claude-lb-56ccf89864-w9vs5",
+    "uid": "02e6f0f0-9608-4b9c-9796-024c76d8271e"
+  },
+  "routes": {
+    "claude-lb": {
+      "selector": {
+        "app": "claude-lb"
+      },
+      "ready_endpoints": 1,
+      "new_pod_only": true
+    },
+    "claude-lb-internal": {
+      "selector": {
+        "app": "claude-lb"
+      },
+      "ready_endpoints": 1,
+      "new_pod_only": true
+    }
+  },
+  "business_probes": [
+    {
+      "api": "messages",
+      "model": "databricks-claude-opus-5",
+      "stream": false,
+      "completed": true,
+      "marker_found": true,
+      "actual_provider": "databricks"
+    },
+    {
+      "api": "responses",
+      "model": "gpt-5.4",
+      "stream": true,
+      "completed": true,
+      "marker_found": true,
+      "actual_provider": "copilot"
+    },
+    {
+      "api": "chat",
+      "model": "gpt-5.6-luna",
+      "stream": true,
+      "completed": true,
+      "marker_found": true,
+      "actual_provider": "copilot"
+    }
+  ],
+  "business_probe_persistence_verified": true,
+  "effective_settings_read_back": {
+    "copilot_scoped_circuits": true,
+    "copilot_recovery_small_input_bytes": 65536,
+    "copilot_recovery_preference_seconds": 10.0,
+    "lb_context_large_input_bytes": 262144,
+    "env_overrides_injected": false
+  },
+  "image_optional_dependency": {
+    "h2_version": "4.4.1",
+    "protocol_forensics_degraded_to_unknown": false
+  },
+  "tests": {
+    "host_full_suite": {
+      "passed": 816,
+      "subtests_passed": 745,
+      "skipped": 6
+    },
+    "release_image_suite": {
+      "passed": 733,
+      "subtests_passed": 685,
+      "skipped": 7,
+      "failed": 0,
+      "excluded_files": 8,
+      "exclusion_reason": "depend on operations module or repository docs absent from the application image by design",
+      "application_source_mounted": false,
+      "network": "none"
+    }
+  },
+  "public_observation": {
+    "author": "Zeno Ren",
+    "after_maintenance_rounds": 30,
+    "unhealthy_rounds": 0,
+    "collection_errors": 0,
+    "paths": [
+      "/health/live",
+      "/health/ready",
+      "/health/accepting"
+    ]
+  },
+  "post_release_window": {
+    "window_minutes": 30,
+    "lb_request_end_total": 56,
+    "outcome": {
+      "completed": 50,
+      "client_disconnected": 6
+    },
+    "provider": {
+      "copilot": 43,
+      "databricks": 13
+    },
+    "copilot_stream_network_error_events": 0,
+    "lb_circuit_transition_events": 0,
+    "lb_recovery_deferred_events": 0,
+    "context_advice": {
+      "none": 41,
+      "large_input": 25
+    },
+    "estimate_confidence": {
+      "low": 66
+    },
+    "original_failure_reproduced": false,
+    "fix_confirmed": false
+  },
+  "usage_backend": {
+    "health_ready": "ready",
+    "health_ready_issues": [],
+    "history_days_returned": 90,
+    "history_earliest": "2026-07-12",
+    "history_latest": "2026-10-09",
+    "per_row_payload_hash_reverified": false
+  },
+  "not_performed_this_release": [
+    "database consistent snapshot and isolated restore verification",
+    "independent QA review",
+    "original disconnect reproduction and attribution",
+    "sustained load and failure drill",
+    "Mac client rendering of new context response headers"
+  ],
+  "github": {
+    "implementation_pr": "https://github.com/ZenoRewn/databricks-claude-lb/pull/19",
+    "pr_ci": "https://github.com/ZenoRewn/databricks-claude-lb/actions/runs/37923144166",
+    "main_ci": "https://github.com/ZenoRewn/databricks-claude-lb/actions/runs/37923530559",
+    "all_six_checks_passed": true
+  }
+}
