@@ -284,7 +284,16 @@ kubectl -n YOUR_NS logs -l app=claude-lb --since=1h | grep copilot_stream_networ
 
 #### `CANCEL(8)` + `upstream_idle_seconds≈120.000`：上游定时取消
 
-2026-10-09 生产事件捕获到 5 次 `http2_stream_reset` + `http2_error_code=8`，`upstream_idle_seconds` 为 120.103448 / 120.000985 / 120.000871 / 120.000406 / 120.000004。四个读数落在同一毫秒内 —— 这是定时器，不是网络抖动。全部 `upstream_headers_received=true`、`chunks_yielded=0`，即上游返回了 200 但 120 秒内一个字节正文都没有。对应请求体积分别为 365 KB、770 KB、2.20 MB、2.20 MB、2.20 MB。
+2026-10-09 与 10-10 两次生产事件共捕获 12 次 `http2_stream_reset` + `http2_error_code=8`，全部 `upstream_headers_received=true`、`chunks_yielded=0` —— 上游返回了 200 但一个字节正文都没有。`upstream_idle_seconds`：
+
+```
+120.000004  120.000406  120.000825  120.00085   120.000871  120.000985
+120.001934  120.002181  120.051215  120.103448  124.776939  134.360068
+```
+
+**判读方式：8 个读数贴着 120，而且没有一个低于 120。** 这个硬下界才是「存在定时器」的证据。三个偏高值不构成反证 —— `upstream_idle_seconds` 量的是「最近活动 → 本地捕获异常」的间隔，事件循环调度和 pump 积压只会把它放大，不会缩小。（本页早先版本写「四个读数落在同一毫秒内」，那是只有 5 个样本时的过度概括，已修正。）
+
+对应请求体积最小 365 KB，其余为 770 KB 与 2.20 MB 量级。
 
 `protocol_scope=stream` 说明重置只影响该流。**但不要据此断定定时器属于谁** —— GHCP 服务端和支持 HTTP/2 的中间代理都能发 `RST_STREAM(CANCEL)`。体积相关性只有 5 个样本，**不是**体积阈值，不要用它设准入上限。
 
