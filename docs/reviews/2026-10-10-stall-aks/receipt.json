@@ -1,0 +1,157 @@
+{
+  "author": "Zeno Ren",
+  "release_id": "lb-20261010-stall-bf47b0",
+  "release_result": "succeeded",
+  "application_revision": "97c7e64fea6b80afa60636a231f357ac82e8042b",
+  "registry_image": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:6cf3b76a435fc4fd7a9d32047361d01409b84bb163af3013044a84e0d2ad7f85",
+  "registry_manifest_single_platform": true,
+  "registry_manifest_platform": "linux/amd64",
+  "config_digest": "sha256:65568cddb0cad155b0a2546bc9062ee1d7370853d923e77d2f67720c18e22743",
+  "source_manifest_sha256": "dd4cab6f07b7a44758864bc7c5dfe06c08ece26d485438cd10248fe3fb416d38",
+  "plan_sha256": "84b3fb897c678f72847e3e4c6f13066d71cd969782daaad9ecd3a4208fbdccc6",
+  "previous_image": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:7199477bdae5cf79dffb6ea9b41723a99420feaff96391354585b1fe4074560d",
+  "previous_revision": "fea7d604d230dd71347cdf9d6145cb8429f5d729",
+  "public_version_verification": "matched",
+  "restarts": 0,
+  "maintenance_started_at": 1791606726.74,
+  "maintenance_finished_at": 1791606775.229,
+  "maintenance_seconds": 48.488,
+  "maintenance_budget_seconds": 600,
+  "rollback_performed": false,
+  "maintenance_cleared": true,
+  "cleanup_errors": [],
+  "first_attempt_rejected": {
+    "release_id": "lb-20261010-stall-6cc1a0",
+    "phase": "rolled_back",
+    "failed_action": "preflight",
+    "code": "old_backend_not_healthy",
+    "error_type": "RuntimeError",
+    "maintenance_started_at": null,
+    "production_changed": false,
+    "rejection_correct": true,
+    "observed_at_rejection": {
+      "lb_usage_backend_ready": 0,
+      "lb_usage_pending_events": 646,
+      "health_accepting_status": 200,
+      "health_ready_status": 200
+    },
+    "root_cause": {
+      "component": "azure_mysql_flexible_server",
+      "server": "zeno-sea-mysql",
+      "state_at_rejection": "Stopped",
+      "pod_dns_ms": 35,
+      "pod_tcp_result": "timeout_after_8008ms",
+      "collateral_pods_crashlooping": [
+        "ghost-blog",
+        "umami"
+      ],
+      "stop_cause_verified": false
+    },
+    "recovery": {
+      "action": "az mysql flexible-server start",
+      "state_after": "Ready",
+      "pod_tcp_ms": 21,
+      "lb_usage_backend_ready": 1,
+      "pending_events_before": 646,
+      "pending_events_after": 0,
+      "events_lost": 0
+    }
+  },
+  "business_probes": [
+    {
+      "api": "messages",
+      "model": "databricks-claude-opus-5",
+      "stream": false,
+      "completed": true,
+      "marker_found": true,
+      "actual_provider": "databricks"
+    },
+    {
+      "api": "responses",
+      "model": "gpt-5.4",
+      "stream": true,
+      "completed": true,
+      "marker_found": true,
+      "actual_provider": "copilot"
+    },
+    {
+      "api": "chat",
+      "model": "gpt-5.6-luna",
+      "stream": true,
+      "completed": true,
+      "marker_found": true,
+      "actual_provider": "copilot"
+    }
+  ],
+  "business_probe_persistence_verified": true,
+  "routes": {
+    "claude-lb": {
+      "selector": {
+        "app": "claude-lb"
+      },
+      "ready_endpoints": 1,
+      "new_pod_only": true
+    },
+    "claude-lb-internal": {
+      "selector": {
+        "app": "claude-lb"
+      },
+      "ready_endpoints": 1,
+      "new_pod_only": true
+    }
+  },
+  "post_release_env_change": {
+    "change": "removed COPILOT_RECOVERY_PREFERENCE_SECONDS=0",
+    "reason": "evidence gating is a no-op while the preference is disabled entirely",
+    "separate_rollout": true,
+    "mergeable_with_release": false,
+    "order": "release first, then remove; the reverse would run the old image with a 10s window and no gating",
+    "patch_type": "json patch with test assertion on the entry name",
+    "server_dry_run_verified": true
+  },
+  "effective_settings_read_back": {
+    "copilot_recovery_preference_seconds": 10.0,
+    "copilot_scoped_circuits": true,
+    "copilot_recovery_small_input_bytes": 65536,
+    "copilot_stream_prefirst_content_warn_seconds": 90
+  },
+  "image_verification": {
+    "h2_version": "4.4.1",
+    "stall_methods_present": true,
+    "evidence_gating_methods_present": true,
+    "diagnostic_fields_pass_filter": [
+      "seconds_since_headers",
+      "threshold_seconds"
+    ]
+  },
+  "tests": {
+    "host_full_suite": {
+      "passed": 833,
+      "subtests_passed": 747,
+      "skipped": 6
+    },
+    "release_image_suite": {
+      "passed": 750,
+      "subtests_passed": 687,
+      "skipped": 7,
+      "failed": 0,
+      "excluded_files": 8,
+      "exclusion_reason": "depend on operations module or repository docs absent from the application image by design",
+      "application_source_mounted": false,
+      "network": "none"
+    }
+  },
+  "github": {
+    "implementation_pr": "https://github.com/ZenoRewn/databricks-claude-lb/pull/21",
+    "merged_revision": "97c7e64fea6b80afa60636a231f357ac82e8042b",
+    "all_six_checks_passed": true
+  },
+  "not_performed_this_release": [
+    "database consistent snapshot and isolated restore verification",
+    "independent QA review",
+    "attribution of why the MySQL server was stopped",
+    "verification that evidence gating improves recovery under real load",
+    "confirmation that umami's crashloop is resolved",
+    "resolution of the upstream 120s cancellation or REFUSED_STREAM throttling"
+  ]
+}

@@ -307,12 +307,23 @@ cannot be reclassified retroactively. A 2026-10-09 production incident did
 capture typed codes for the same shape, recorded in
 [stream forensics](reviews/2026-10-09-stream-forensics/REPORT.md): upstream
 answered 200 and then sent `RST_STREAM` with `CANCEL(8)` at
-`upstream_idle_seconds` of 120.000004, 120.000406, 120.000871, 120.000985 and
-120.103448. Four readings within one millisecond of each other indicate a timer,
-not jitter. Every one of them carried a body over 365 KB. This locates a
-stream-scoped upstream cancellation correlated with request size; it does not
-prove which component owns the timer, and a correlation over five samples is not
-a size threshold. Do not derive an admission limit from it.
+`upstream_idle_seconds` clustered at 120 seconds. A second incident the next day
+brought the sample to twelve readings: 120.000004, 120.000406, 120.000825,
+120.00085, 120.000871, 120.000985, 120.001934, 120.002181, 120.051215,
+120.103448, 124.776939 and 134.360068.
+
+Read that distribution carefully. Eight readings sit within milliseconds of
+120, and **none is below it** — a hard floor at 120 indicates a timer. The three
+high outliers are not counter-evidence: `upstream_idle_seconds` measures the
+last observed activity to the exception being caught locally, so event-loop
+scheduling and pump backlog can only inflate it. An earlier revision of this
+page said "four readings within one millisecond", which overstated what five
+samples supported; the floor is the claim that holds.
+
+Every affected body exceeded 365 KB. This locates a stream-scoped upstream
+cancellation correlated with request size; it does not prove which component
+owns the timer, and the correlation is not a size threshold. Do not derive an
+admission limit from it.
 
 That incident also showed the limits of the two protections above. The dominant
 failure was `REFUSED_STREAM(7)`, which by design retains shared protection, so
