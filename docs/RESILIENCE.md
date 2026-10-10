@@ -344,6 +344,27 @@ waiting for a window that nothing can satisfy. This does not widen replay, and
 it does not make a large request preferred — it only stops penalising it when
 there is no small alternative.
 
+Two typed facts are now acted on, both resting on an h2 event rather than an
+exception string, elapsed time or request size.
+
+A remote `RST_STREAM` carrying `REFUSED_STREAM` is replay-safe. RFC 7540 §8.1.4
+states the stream closed "prior to any processing having occurred" and the
+request "can be safely retried", so execution state is *known* rather than
+unknown — which is the condition the no-replay invariant actually guards. This
+is the first addition to the replay allowlist since it was written, and it is
+deliberately narrow: a locally initiated reset proves nothing about upstream, a
+connection-scoped GOAWAY carrying 7 is not a per-stream guarantee, and every
+other code including `ENHANCE_YOUR_CALM` stays excluded. Callers still require a
+null response, no delivered content, and their existing attempt budget. The code
+also still counts toward the shared circuit, so sustained refusal trips the
+breaker and stops the retries rather than amplifying an overload.
+
+`GOAWAY` carrying `NO_ERROR` is an orderly shutdown (RFC 7540 §6.8), not a
+fault, and no longer accumulates circuit errors. The stream is still lost and
+the client still sees a failure; the endpoint simply is not unhealthy. It is not
+replay-safe — a clean connection close says nothing about whether this stream
+was already processed. `GOAWAY` with any real error code still counts.
+
 Do not suppress unknown EOF failures or blacklist prompts.
 VS Code/Mac/provider equivalence and production acceptance remain unverified.
 

@@ -2450,7 +2450,32 @@ _CURRENT_TENANT: contextvars.ContextVar[str] = contextvars.ContextVar("current_t
 def _replay_safe_transport_failure(exc):
     # POST is not idempotent. Read/write/EOF/protocol/internal failures can occur
     # after execution, even when no response content has reached the client.
-    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+        return True
+    # RFC 7540 §8.1.4: a remote RST_STREAM carrying REFUSED_STREAM means the stream
+    # closed "prior to any processing having occurred", so the request "can be
+    # safely retried". Execution state here is known rather than unknown, which is
+    # what the no-replay invariant actually guards against. Evidence comes from the
+    # typed h2 event only: a locally initiated reset proves nothing about upstream,
+    # a connection-scoped GOAWAY is not a per-stream guarantee, and every other
+    # code (including ENHANCE_YOUR_CALM) stays excluded. Callers additionally
+    # require response is None and no delivered content, and keep their budget.
+    details = transport_details(exc)
+    return (details['protocol_error_kind'] == 'http2_stream_reset'
+            and details.get('http2_error_code') == 7)
+
+
+def _graceful_shutdown_failure(exc):
+    """RFC 7540 §6.8: GOAWAY with NO_ERROR is an orderly shutdown, not a fault.
+
+    The stream is still lost and the client still sees a failure, but the endpoint
+    is not unhealthy — a new connection works — so this must not accumulate
+    circuit-breaker errors. It is not replay-safe: unlike REFUSED_STREAM, a clean
+    connection close says nothing about whether this stream was already processed.
+    """
+    details = transport_details(exc)
+    return (details['protocol_error_kind'] == 'http2_goaway'
+            and details.get('http2_error_code') == 0)
 
 
 def _copilot_failure_scope(*, exception=None, reason=None):
@@ -3245,7 +3270,7 @@ class ClaudeProxy:
                 self.global_stats.total_errors += 1
                 logger.error(f"{endpoint.name} failed: {e}")
                 await self.load_balancer.on_request_end(endpoint, success=False, lease=attempt_lease,
-                                                        is_client_error=isinstance(e, httpx.PoolTimeout))
+                                                        is_client_error=isinstance(e, httpx.PoolTimeout) or _graceful_shutdown_failure(e))
                 if _replay_safe_transport_failure(e) and attempt < max_retries - 1:
                     await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                     continue
@@ -3469,7 +3494,7 @@ class ClaudeProxy:
                     note_exception(e)
                     error_detail = f"{type(e).__name__}: Upstream request could not complete; execution may have occurred."
                     logger.error("Stream failed (%s)", type(e).__name__)
-                    await end_current_request(success=False, is_client_error=isinstance(e, httpx.PoolTimeout))
+                    await end_current_request(success=False, is_client_error=isinstance(e, httpx.PoolTimeout) or _graceful_shutdown_failure(e))
                     _detail = _apply_request_id_prefix(error_detail, {"request_id": request_id} if request_id else None)
                     yield _sse_terminal_error('messages','upstream_stream_error',_detail)
                     return
@@ -3680,7 +3705,8 @@ class AzureOpenAIProxy:
                 last_error = e
                 self.global_stats.total_errors += 1
                 logger.error(f"{endpoint.name} failed: {e}")
-                await end_attempt(success=False, is_client_error=isinstance(e, httpx.PoolTimeout))
+                await end_attempt(success=False,
+                                  is_client_error=isinstance(e, httpx.PoolTimeout) or _graceful_shutdown_failure(e))
                 if _replay_safe_transport_failure(e) and attempt < max_retries - 1:
                     await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                     continue
@@ -3880,7 +3906,7 @@ class AzureOpenAIProxy:
                     note_exception(e)
                     error_detail = f"{type(e).__name__}: Upstream request could not complete; execution may have occurred."
                     logger.error(f"Azure stream error: {error_detail}")
-                    await end_current_request(success=False, is_client_error=isinstance(e, httpx.PoolTimeout))
+                    await end_current_request(success=False, is_client_error=isinstance(e, httpx.PoolTimeout) or _graceful_shutdown_failure(e))
                     yield _sse_terminal_error(api_type, "upstream_error", error_detail)
                     return
 
@@ -5820,7 +5846,8 @@ class CopilotProxy:
                     last_error = e
                     self.global_stats.total_errors += 1
                     logger.error(f"[Copilot] {endpoint.name} failed: {e}")
-                    await end_attempt(success=False, is_client_error=isinstance(e, httpx.PoolTimeout),
+                    await end_attempt(success=False,
+                                      is_client_error=isinstance(e, httpx.PoolTimeout) or _graceful_shutdown_failure(e),
                                       failure_scope=_copilot_failure_scope(exception=e))
                     if _replay_safe_transport_failure(e) and attempt < max_retries - 1:
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
@@ -6504,7 +6531,9 @@ class CopilotProxy:
                             "upstream_probe": probe_snapshot,
                         },
                     )
-                    await end_current_request(success=False, failure_scope=_copilot_failure_scope(exception=e))
+                    await end_current_request(success=False,
+                                              is_client_error=_graceful_shutdown_failure(e),
+                                              failure_scope=_copilot_failure_scope(exception=e))
 
                     # POST replay 只在 connect/pool 类瞬时失败允许（不 replay read/write timeout、协议错）
                     # 且 response 必须是 None（未拿到任何响应字节）
