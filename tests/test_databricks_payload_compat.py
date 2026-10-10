@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import unittest
 
+import copilot_pricing
 import main
 
 
@@ -135,9 +136,18 @@ class DatabricksPayloadCompatTests(unittest.TestCase):
 
     def test_openai_default_catalog_all_priced(self):
         """/models 端点默认 catalog 里每个 model 都必须能计费——否则 /stats 里
-        estimated_total_cost_usd 会因 pricing=None 少统计一部分请求。"""
+        estimated_total_cost_usd 会因 pricing=None 少统计一部分请求。
+
+        但「能计费」不等于「在 MODEL_PRICING 里」。那张表收的是 Anthropic/OpenAI/
+        Google 的公开 API 价，而 grok-4.7、mai-code-1.1-flash 这类 Copilot 专属
+        模型没有这种公开价，硬填一个等于编造。实际计价路径是：Copilot 实时估算走
+        copilot_pricing.record_estimate，/stats/history 的 historical_model_cost
+        对非 Anthropic 模型先调 estimate_history_reference（copilot_pricing），
+        只在它返 None 时才回落 MODEL_PRICING。所以两张表任一覆盖即可。
+        """
         for m in main.OPENAI_COMPAT_DEFAULT_MODEL_IDS:
-            self.assertIsNotNone(main.get_model_pricing(m), msg=f"{m}: missing pricing")
+            self.assertTrue(main.get_model_pricing(m) or copilot_pricing.get_pricing(m),
+                            msg=f"{m}: neither MODEL_PRICING nor copilot_pricing can price it")
 
     def test_sonnet_5_maps_to_databricks_sonnet_5(self):
         """Sonnet 5 与 Opus 5 使用相同的 regex 分支模式（数字 5 boundary）。"""
@@ -263,7 +273,7 @@ class OpenAICompatTests(unittest.TestCase):
             ),
         ])
 
-        ids = main._collect_openai_model_ids(azure, copilot)
+        ids = main._collect_openai_model_ids(azure, copilot, databricks=None)
 
         self.assertEqual(ids, sorted(set(ids)))
         self.assertIn("gpt-4.1", ids)
@@ -272,7 +282,10 @@ class OpenAICompatTests(unittest.TestCase):
         self.assertIn("gpt-5.6-sol", ids)
         self.assertIn("gpt-5.6-luna", ids)
         self.assertIn("gpt-5.6-terra", ids)
-        self.assertIn("gpt-5-codex", ids)
+        # gpt-5.3-codex 取代了 gpt-5-codex：后者 2026-10-10 实测 404 rejected，
+        # 已从核验目录移除。
+        self.assertIn("gpt-5.3-codex", ids)
+        # 配置发现来的条目（这里是 Copilot 显式白名单）照常收录。
         self.assertIn("gemini-2.5-pro", ids)
 
     def test_openai_models_payload_has_data_plus_empty_codex_models_key(self):

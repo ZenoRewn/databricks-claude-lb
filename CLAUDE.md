@@ -38,7 +38,7 @@ Copilot 的 opaque-state 拒绝是请求级问题，不应污染账户熔断；�
 | `/v1/responses` | POST | 需要 | OpenAI Responses API（按模型分流：Copilot 优先 → Azure fallback；`claude-*` 拒绝） |
 | `/v1/responses`、`/v1/responses/{tail}` | GET | 不需要 | **501** + `Allow: POST`：Codex 的 background/polling 模式未实现。必须是 501 而不是 404/405 —— 后两者会触发客户端指数重试风暴 |
 | `/v1/chat/completions` | POST | 需要 | OpenAI Chat Completions API（按模型分流：Copilot 优先 → Azure fallback；`claude-*` 拒绝） |
-| `/v1/models`、`/v1/models/{id}`、`/models`、`/models/{id}` | GET | **可选** | 模型清单（客户端发现用）。第三种鉴权模式：**带了 key 就必须有效（否则 401），完全不带则放行** —— 见 `_verify_optional_models_auth` |
+| `/v1/models`、`/v1/models/{id}`、`/models`、`/models/{id}` | GET | **可选** | 模型清单（客户端发现用），含 Databricks Claude 与 OpenAI 风格两侧。核验过的条目带非标准 `supported_endpoints` 字段标明可用入口（`/v1/messages`、`/v1/responses`、`/v1/chat/completions`），配置发现来的条目不带该字段而不是替上游断言。清单是**运维人工核验的时点快照，不是供应商能力认证**。第三种鉴权模式：**带了 key 就必须有效（否则 401），完全不带则放行** —— 见 `_verify_optional_models_auth` |
 | `/health`、`/health/live` | GET | 不需要 | Liveness probe（仅检查进程） |
 | `/health/ready` | GET | 不需要 | Readiness probe（检查依赖就绪；故障返回 503 + issues 数组） |
 | `/health/accepting` | GET | 不需要 | 本地接流量就绪：初始化完成、路由已配置且未 draining；不因共享上游故障摘除整个网关 |

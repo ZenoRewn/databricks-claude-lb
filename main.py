@@ -363,33 +363,69 @@ def _csv_env_set(name: str, default: str) -> set:
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
-OPENAI_COMPAT_DEFAULT_MODEL_IDS = (
-    "gpt-4.1",
-    "gpt-4.1-2025-04-14",
-    "gpt-4o",
-    "gpt-4o-mini",
-    "gpt-5",
-    "gpt-5-mini",
-    "gpt-5-nano",
-    "gpt-5-pro",           # 新增：high-tier reasoning
-    "gpt-5.1",
-    "gpt-5.2",
-    "gpt-5.4",
-    "gpt-5.5",
-    "gpt-5.6-cyber",       # 新增：GPT-5.6 top tier
-    "gpt-5.6-sol",
-    "gpt-5.6-luna",
-    "gpt-5.6-terra",
-    "gpt-5-codex",
-    "gpt-5.1-codex",
-    "gpt-5.3-codex",       # 新增：latest codex tier
-    "o3",
-    "o3-mini",
-    "o3-pro",              # 新增：high-tier reasoning
-    "o4-mini",
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-)
+RESPONSES_ENTRY_POINT = "/v1/responses"
+CHAT_ENTRY_POINT = "/v1/chat/completions"
+MESSAGES_ENTRY_POINT = "/v1/messages"
+
+# Copilot 端点用 models=[] 通配时，网关无从知道上游服务哪些模型，所以这里给一份
+# 静态目录。它是 **运维人工核验的时点快照，不是供应商能力认证**，上游随时可能
+# 变动；下次发现条目失效时请重新核验后更新，不要凭价目表推断。
+#
+# 2026-10-10 用最小真实请求逐个核验。上一版 25 个条目里有 14 个实际不可用已移除：
+# gpt-5 / gpt-5-nano / gpt-5-pro / gpt-5.1 / gpt-5.2 / gpt-5-codex / gpt-5.1-codex /
+# o3 / o3-mini / o3-pro / o4-mini / gemini-2.5-pro / gemini-2.5-flash 均 404
+# "rejected model"；gpt-5.6-cyber 是 integrator 限制（400，与模型不存在不同）。
+# gpt-6-astra、kimi-k3 同样被上游拒绝，gpt-5.4-nano 受 integrator 限制，均未收录。
+#
+# 入口差异是实测出来的，不是推断：仅 Responses 的模型在 /chat/completions 上报
+# "not accessible via the /chat/completions endpoint"，gemini-3.8-flash 在
+# /responses 上报 "does not support Responses API"。客户端选错入口就是 400。
+OPENAI_COMPAT_DEFAULT_MODELS = {
+    # 仅 Responses API
+    "gpt-5-mini":         (RESPONSES_ENTRY_POINT,),
+    "gpt-5.3-codex":      (RESPONSES_ENTRY_POINT,),
+    "gpt-5.4":            (RESPONSES_ENTRY_POINT,),
+    "gpt-5.4-mini":       (RESPONSES_ENTRY_POINT,),
+    "gpt-5.5":            (RESPONSES_ENTRY_POINT,),
+    "gpt-5.6-sol":        (RESPONSES_ENTRY_POINT,),
+    "gpt-5.6-terra":      (RESPONSES_ENTRY_POINT,),
+    "gpt-6-luna":         (RESPONSES_ENTRY_POINT,),
+    "gpt-6-sol":          (RESPONSES_ENTRY_POINT,),
+    "gpt-6.1-sol":        (RESPONSES_ENTRY_POINT,),
+    "grok-4.7":           (RESPONSES_ENTRY_POINT,),
+    "mai-code-1.1-flash": (RESPONSES_ENTRY_POINT,),
+    # 两个入口都实测可用
+    "gpt-5.6-luna":       (RESPONSES_ENTRY_POINT, CHAT_ENTRY_POINT),
+    # 仅 Chat Completions（这几个由 Azure fallback 服务，不在 Copilot 价目表里）
+    "gpt-4.1":            (CHAT_ENTRY_POINT,),
+    "gpt-4.1-2025-04-14": (CHAT_ENTRY_POINT,),
+    "gpt-4o":             (CHAT_ENTRY_POINT,),
+    "gpt-4o-mini":        (CHAT_ENTRY_POINT,),
+    "gemini-3.8-flash":   (CHAT_ENTRY_POINT,),
+}
+
+# 保留 id 视图供既有调用方与测试使用。
+OPENAI_COMPAT_DEFAULT_MODEL_IDS = tuple(OPENAI_COMPAT_DEFAULT_MODELS)
+
+# Databricks 上的 Claude 模型只走 /v1/messages —— claude-* 在 OpenAI 风格入口
+# 按不变量一律拒绝，所以这里绝不能标注那两个入口。2026-10-10 逐个真实请求核验。
+# Fable 不收录：实测受 region 限制（6 次仅 2 次成功，其余 NOT_FOUND "not
+# available in your region"），放进发现目录等于广告一个多数端点会失败的模型；
+# 它仍可被显式请求。
+DATABRICKS_CLAUDE_MODELS = {
+    "databricks-claude-opus-5-5":   (MESSAGES_ENTRY_POINT,),
+    "databricks-claude-opus-5":     (MESSAGES_ENTRY_POINT,),
+    "databricks-claude-opus-4-8":   (MESSAGES_ENTRY_POINT,),
+    "databricks-claude-opus-4-7":   (MESSAGES_ENTRY_POINT,),
+    "databricks-claude-opus-4-6":   (MESSAGES_ENTRY_POINT,),
+    "databricks-claude-opus-4-5":   (MESSAGES_ENTRY_POINT,),
+    "databricks-claude-sonnet-5-5": (MESSAGES_ENTRY_POINT,),
+    "databricks-claude-sonnet-5":   (MESSAGES_ENTRY_POINT,),
+    "databricks-claude-sonnet-4-6": (MESSAGES_ENTRY_POINT,),
+    "databricks-claude-sonnet-4-5": (MESSAGES_ENTRY_POINT,),
+    "databricks-claude-haiku-5-5":  (MESSAGES_ENTRY_POINT,),
+    "databricks-claude-haiku-4-5":  (MESSAGES_ENTRY_POINT,),
+}
 
 OPENAI_CHAT_TO_RESPONSES_MODELS = _csv_env_set(
     "OPENAI_CHAT_TO_RESPONSES_MODELS",
@@ -7363,22 +7399,26 @@ def _azure_supports_model(model: str) -> bool:
     )
 
 
-def _collect_openai_model_ids(azure=None, copilot=None) -> list:
-    """Build an OpenAI-compatible model catalog from configured providers.
+def _collect_model_catalog(azure=None, copilot=None, databricks=None) -> dict:
+    """Map每个可发现模型到实测可用的入口。
 
-    Copilot endpoints can use models=[] as a wildcard, so expose a conservative
+    Copilot endpoints can use models=[] as a wildcard, so expose the verified
     static catalog in that case; explicit Azure deployments and Copilot model
     allow-lists are always included.
+
+    配置发现来的条目（Azure deployments、Copilot 显式白名单）映射到空元组：
+    它们的入口支持情况此处无从核验，宁可不声明，也不替上游断言。
     """
     azure = azure_proxy if azure is None else azure
     copilot = copilot_proxy if copilot is None else copilot
-    model_ids = set()
+    databricks = proxy if databricks is None else databricks
+    catalog = {}
 
     if azure:
         for ep in getattr(getattr(azure, "load_balancer", None), "endpoints", []):
             for model in getattr(ep, "deployments", []) or []:
                 if model:
-                    model_ids.add(str(model))
+                    catalog.setdefault(str(model), ())
 
     if copilot:
         has_wildcard = False
@@ -7387,22 +7427,35 @@ def _collect_openai_model_ids(azure=None, copilot=None) -> list:
             if models:
                 for model in models:
                     if model:
-                        model_ids.add(str(model))
+                        catalog.setdefault(str(model), ())
             else:
                 has_wildcard = True
         if has_wildcard:
-            model_ids.update(OPENAI_COMPAT_DEFAULT_MODEL_IDS)
+            catalog.update(OPENAI_COMPAT_DEFAULT_MODELS)
 
-    return sorted(model_ids)
+    if databricks:
+        catalog.update(DATABRICKS_CLAUDE_MODELS)
+
+    return catalog
 
 
-def _openai_model_entry(model_id: str) -> dict:
-    return {
+def _collect_openai_model_ids(azure=None, copilot=None, databricks=None) -> list:
+    """Sorted id view of the catalog, for membership checks."""
+    return sorted(_collect_model_catalog(azure=azure, copilot=copilot, databricks=databricks))
+
+
+def _openai_model_entry(model_id: str, endpoints=None) -> dict:
+    entry = {
         "id": model_id,
         "object": "model",
         "created": 0,
         "owned_by": "databricks-claude-lb",
     }
+    # 非标准字段；OpenAI SDK 会忽略未知键。只有核验过的条目才带，避免把
+    # 「不知道」说成「都支持」。
+    if endpoints:
+        entry["supported_endpoints"] = list(endpoints)
+    return entry
 
 
 def _build_openai_models_payload() -> dict:
@@ -7418,7 +7471,8 @@ def _build_openai_models_payload() -> dict:
       拿到 `models: []` 认为"这个 provider 没主动声明 catalog"，回落到
       config.toml 里 `model = "..."` 或 `-m` 指定的模型，功能不受影响。
     """
-    entries = [_openai_model_entry(model_id) for model_id in _collect_openai_model_ids()]
+    catalog = _collect_model_catalog()
+    entries = [_openai_model_entry(model_id, catalog[model_id]) for model_id in sorted(catalog)]
     return {
         "object": "list",
         "data": entries,
@@ -7982,8 +8036,10 @@ def _stream_disconnect_checker(request: Request, stream: bool):
 @app.get("/models")
 @app.get("/v1/models")
 async def openai_models(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
-    if not (azure_proxy or copilot_proxy):
-        raise HTTPException(status_code=404, detail={"error": {"message": "No OpenAI-style provider (Azure / Copilot) configured"}})
+    # Databricks 也计入：它的 Claude 模型在目录里（走 /v1/messages），只配
+    # Databricks 时清单不应为空。
+    if not (azure_proxy or copilot_proxy or proxy):
+        raise HTTPException(status_code=404, detail={"error": {"message": "No provider (Databricks / Azure / Copilot) configured"}})
     _verify_optional_models_auth(request, x_api_key)
     return JSONResponse(content=_build_openai_models_payload())
 
@@ -7991,12 +8047,13 @@ async def openai_models(request: Request, x_api_key: Optional[str] = Header(None
 @app.get("/models/{model_id}")
 @app.get("/v1/models/{model_id}")
 async def openai_model(model_id: str, request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
-    if not (azure_proxy or copilot_proxy):
-        raise HTTPException(status_code=404, detail={"error": {"message": "No OpenAI-style provider (Azure / Copilot) configured"}})
+    if not (azure_proxy or copilot_proxy or proxy):
+        raise HTTPException(status_code=404, detail={"error": {"message": "No provider (Databricks / Azure / Copilot) configured"}})
     _verify_optional_models_auth(request, x_api_key)
-    if model_id not in _collect_openai_model_ids():
+    catalog = _collect_model_catalog()
+    if model_id not in catalog:
         raise HTTPException(status_code=404, detail={"error": {"message": f"Model '{model_id}' is not listed by this proxy"}})
-    return JSONResponse(content=_openai_model_entry(model_id))
+    return JSONResponse(content=_openai_model_entry(model_id, catalog[model_id]))
 
 
 @app.get("/v1/responses")
