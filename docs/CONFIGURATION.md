@@ -27,7 +27,20 @@ Claude 模型使用 `/v1/messages`。在 OpenAI 风格入口传入 Claude 模型
 
 历史上这里曾用正则嗅探版本，其分隔符字符类同时匹配 `5.5` 里的第二个点，导致显式请求 Opus 5.5 静默跑在 Opus 5 上；因此不要恢复按版本分支的 if/elif 写法。
 
-解析成功不代表每个端点都有该模型。2026-10-10 实测 Opus/Sonnet/Haiku 的 5.5 在全部端点稳定，而 `claude-fable-5-1` 仅部分 workspace 可用，其余返回 `NOT_FOUND ... not available in your region`，按端点轮询会间歇失败。区域受限模型需要用 `endpoints[].models` 限定到确有该模型的端点。
+解析成功不代表每个端点都有该模型。`claude-fable-5-1` 仅部分 workspace 可用，其余返回 `NOT_FOUND ... not available in your region`，按端点轮询会间歇失败；区域受限模型需要用 `endpoints[].models` 限定到确有该模型的端点。Opus 5.5 另有间歇性 `TEMPORARILY_UNAVAILABLE` 容量拒绝，属上游容量，网关侧无开关。
+
+### `/models` 清单语义
+
+`/v1/models` 同时列出 Databricks Claude 与 OpenAI 风格两侧的模型。核验过的条目带非标准 `supported_endpoints` 字段，值是完整入口路径；OpenAI SDK 会忽略未知字段，不影响兼容性。
+
+入口差异是实测的，不是推断：部分模型只在 `/v1/responses` 可用（在 `/v1/chat/completions` 上报 `not accessible via the /chat/completions endpoint`），`gemini-3.8-flash` 只在 Chat 可用（在 Responses 上报 `does not support Responses API`），`gpt-5.6-luna` 两者皆可。`claude-*` 只标 `/v1/messages` —— 它们在 OpenAI 风格入口按不变量一律拒绝。
+
+两类条目要分清：
+
+- **静态核验目录**（Copilot 配 `models: []` 通配时使用）是运维人工核验的**时点快照，不是供应商能力认证**。2026-10-10 核验时移除了 14 个实际不可用的条目（`gpt-5`、`gpt-5.1`、`o3` 系列、`gemini-2.5-*` 等均 404 `rejected model`；`gpt-5.6-cyber` 为 integrator 限制），补入 7 个实测可用的条目。发现条目失效时请重新核验后更新，不要凭价目表推断 —— 价目表是 GitHub 公布的清单，不等于本账户可用。
+- **配置发现条目**（Azure `deployments`、Copilot 显式 `models` 白名单）照常收录，但**不带** `supported_endpoints`：其入口支持情况无从核验，宁可不声明。
+
+目录里的模型必须至少能被 `MODEL_PRICING` 或 `copilot_pricing` 之一计价，否则成本会静默漏统计。两张表分工不同：前者是公开 API 价（历史/通用口径），后者是 Copilot 官方分档价并用于实时估算，所以 Copilot 专属模型（如 grok、mai-code）只在后者有价，不应为其臆造公开 API 价。
 
 ## Azure OpenAI
 

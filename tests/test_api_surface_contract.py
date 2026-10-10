@@ -192,10 +192,21 @@ class UndocumentedBehaviourNowPinnedTests(unittest.TestCase):
         钉住它是因为这直接决定上面那批鉴权断言必须装 stub proxy 才有意义 ——
         不装的话每条都拿到 404，测试「通过」但什么都没验到（我第一版就踩了）。
         """
+        # Databricks 也算 provider：它的 Claude 模型在目录里（走 /v1/messages），
+        # 所以「未配置」必须把三个 proxy 都清掉才成立。
         with patch.object(main, "copilot_proxy", None), \
-             patch.object(main, "azure_proxy", None):
+             patch.object(main, "azure_proxy", None), \
+             patch.object(main, "proxy", None):
             r = self.client.get("/v1/models", headers={"Authorization": "Bearer nope"})
         self.assertEqual(r.status_code, 404, "未配置 provider 时 404 优先于 401")
+
+    def test_databricks_alone_still_serves_the_model_listing(self):
+        with patch.object(main, "copilot_proxy", None), \
+             patch.object(main, "azure_proxy", None):
+            r = self.client.get("/v1/models")
+        self.assertEqual(r.status_code, 200)
+        ids = [m["id"] for m in r.json()["data"]]
+        self.assertIn("databricks-claude-opus-5-5", ids)
 
 
 if __name__ == "__main__":
