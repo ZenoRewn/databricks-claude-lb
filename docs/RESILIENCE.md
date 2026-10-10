@@ -258,6 +258,12 @@ make readiness oscillate. Copilot also requires a valid cached session and no
 known auth-invalid indicator. Readiness is a local admission signal, **not** a
 live provider SLA check; it sends no model request and acquires no trial lease.
 
+Providers with empty endpoint lists are disabled for this check and are skipped,
+including an empty `ClaudeProxy` in a Copilot-only gateway. If no provider has
+configured endpoints, `/health/ready` returns 503 with
+`routing: no configured endpoints` in `detail.issues`. A configured provider
+without an eligible/healthy endpoint still fails readiness when siblings are healthy.
+
 Do not silently change Kubernetes probes. The inspected deployed probes both
 use `/health`, so production currently treats them as process health. Moving a
 single multiprovider pod to strict `/health/ready` could remove healthy sibling

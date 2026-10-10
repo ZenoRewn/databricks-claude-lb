@@ -8207,12 +8207,17 @@ async def health_ready():
     """Readiness probe：检查依赖是否就绪。
     任一关键依赖失败 → 503，K8s 把 Pod 移出 Service endpoints。
     - Each configured provider needs a CLOSED or recovery-eligible endpoint.
+    - Empty endpoint lists are disabled; no configured routes is not ready.
     - Copilot additionally needs valid cached auth, without known auth failure.
     - HALF_OPEN eligibility does not claim or certify successful inference.
     """
     issues = []
 
-    if proxy:
+    if not any(instance and instance.load_balancer.endpoints
+               for instance in (proxy, azure_proxy, copilot_proxy)):
+        issues.append("routing: no configured endpoints")
+
+    if proxy and proxy.load_balancer.endpoints:
         if not any(proxy.load_balancer.is_available(ep, readiness=True) for ep in proxy.load_balancer.endpoints):
             issues.append("databricks: no available endpoints (all circuits open)")
 
