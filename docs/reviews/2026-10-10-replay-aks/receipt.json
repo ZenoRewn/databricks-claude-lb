@@ -1,0 +1,154 @@
+{
+  "author": "Zeno Ren",
+  "release_id": "lb-20261010-replay-5d38b6",
+  "release_result": "succeeded",
+  "application_revision": "5f2463e0124f0d18e699aea64e01ff672dad074e",
+  "registry_image": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:691109f90c658a78073e31c6d6d1a3af174f529cc34fe0126108a3b9ef41e003",
+  "registry_manifest_single_platform": true,
+  "registry_manifest_platform": "linux/amd64",
+  "config_digest": "sha256:f74d092e2f70f614037488cad35242951e6031dd1080daa02161c49cb0f40ecf",
+  "source_manifest_sha256": "d3cbcb194f6c10576531a0c30fa5675aee59954a78398f0370e77488da4171f2",
+  "plan_sha256": "0975a4d3b12d71fb54794d87a56b068da3ba165e3947eec50def5e7ae2366b21",
+  "previous_image": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:6cf3b76a435fc4fd7a9d32047361d01409b84bb163af3013044a84e0d2ad7f85",
+  "previous_revision": "97c7e64fea6b80afa60636a231f357ac82e8042b",
+  "public_version_verification": "matched",
+  "restarts": 0,
+  "maintenance_started_at": 1791619620.952,
+  "maintenance_finished_at": 1791619687.049,
+  "maintenance_seconds": 66.097,
+  "maintenance_budget_seconds": 600,
+  "rollback_performed": false,
+  "maintenance_cleared": true,
+  "cleanup_errors": [],
+  "all_actions_verified": true,
+  "behaviour_changes": {
+    "replay_allowlist_extended": {
+      "code": "http2 REFUSED_STREAM (7) on a remote RST_STREAM",
+      "basis": "RFC 7540 section 8.1.4",
+      "first_extension_since_allowlist_written": true,
+      "guards_retained": [
+        "response is None",
+        "no delivered content",
+        "existing attempt budget"
+      ],
+      "still_counts_toward_shared_circuit": true,
+      "excluded": [
+        "locally initiated reset",
+        "connection-scoped GOAWAY carrying 7",
+        "CANCEL(8)",
+        "INTERNAL_ERROR(2)",
+        "PROTOCOL_ERROR(1)",
+        "ENHANCE_YOUR_CALM(11)"
+      ],
+      "production_verified": false
+    },
+    "graceful_goaway_neutral": {
+      "code": "http2 GOAWAY with NO_ERROR (0)",
+      "basis": "RFC 7540 section 6.8",
+      "effect": "no longer accumulates circuit-breaker errors",
+      "applied_to_all_provider_paths": true,
+      "replay_safe": false,
+      "scope_unchanged": "endpoint",
+      "production_verified": false
+    },
+    "bare_response_failed": {
+      "effect": "failure_reason records upstream_failure instead of unknown",
+      "incomplete_untouched": true
+    },
+    "elevated_input_advice": {
+      "threshold_bytes": 1048576,
+      "env": "LB_CONTEXT_ELEVATED_INPUT_BYTES",
+      "evidence_derived": false,
+      "rationale": "heuristic so 1.58/2.20/3.21 MB bodies stop sharing a label with 256 KiB",
+      "rejects_or_trims": false
+    }
+  },
+  "effective_settings_read_back": {
+    "replay_refused_stream": true,
+    "graceful_goaway_neutral": true,
+    "context_elevated_input_bytes": 1048576,
+    "copilot_recovery_preference_seconds": 10.0,
+    "copilot_stream_prefirst_content_warn_seconds": 90
+  },
+  "business_probes": [
+    {
+      "api": "messages",
+      "model": "databricks-claude-opus-5",
+      "stream": false,
+      "completed": true,
+      "marker_found": true,
+      "actual_provider": "databricks"
+    },
+    {
+      "api": "responses",
+      "model": "gpt-5.4",
+      "stream": true,
+      "completed": true,
+      "marker_found": true,
+      "actual_provider": "copilot"
+    },
+    {
+      "api": "chat",
+      "model": "gpt-5.6-luna",
+      "stream": true,
+      "completed": true,
+      "marker_found": true,
+      "actual_provider": "copilot"
+    }
+  ],
+  "business_probe_persistence_verified": true,
+  "routes": {
+    "claude-lb": {
+      "selector": {
+        "app": "claude-lb"
+      },
+      "new_pod_only": true
+    },
+    "claude-lb-internal": {
+      "selector": {
+        "app": "claude-lb"
+      },
+      "new_pod_only": true
+    }
+  },
+  "tests": {
+    "host_full_suite": {
+      "passed": 870,
+      "subtests_passed": 772,
+      "skipped": 6
+    },
+    "release_image_suite": {
+      "passed": 787,
+      "subtests_passed": 712,
+      "skipped": 7,
+      "failed": 0,
+      "excluded_files": 8,
+      "application_source_mounted": false,
+      "network": "none"
+    }
+  },
+  "image_behaviour_verification": {
+    "refused_stream_replayable": true,
+    "cancel_8_replayable": false,
+    "enhance_your_calm_11_replayable": false,
+    "locally_initiated_reset_replayable": false,
+    "goaway_no_error_neutral": true,
+    "goaway_error_code_1_neutral": false,
+    "advice_for_3_21mb": "elevated_input"
+  },
+  "github": {
+    "prs": [
+      "https://github.com/ZenoRewn/databricks-claude-lb/pull/23",
+      "https://github.com/ZenoRewn/databricks-claude-lb/pull/24"
+    ],
+    "merged_revision": "5f2463e0124f0d18e699aea64e01ff672dad074e",
+    "all_six_checks_passed": true
+  },
+  "not_performed_this_release": [
+    "database consistent snapshot and isolated restore verification",
+    "independent QA review",
+    "production verification that replaying REFUSED_STREAM reduces client-visible failures",
+    "production verification that graceful-GOAWAY neutrality changes recovery behaviour",
+    "resolution of the upstream 120s cancellation, REFUSED_STREAM throttling or bare response.failed"
+  ]
+}

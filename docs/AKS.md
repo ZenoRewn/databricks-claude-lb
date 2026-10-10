@@ -2,7 +2,9 @@
 
 Author: Zeno Ren
 
-2026-10-10 已发布应用源码 `97c7e64`：首个内容前停滞信号、恢复优先窗口的证据门控。维护约 48 秒，三个常规业务探针、账本与清理通过。**首次提交被 preflight 以 `old_backend_not_healthy` 正当拒绝**（Azure MySQL 处于 Stopped，646 条用量事件悬在内存），启动数据库后 646 条全部落盘再重新发布；发布后另有一次独立 rollout 移除 `COPILOT_RECOVERY_PREFERENCE_SECONDS=0`。上游 120 秒取消与限流均未解决。见 [本次发布回执](reviews/2026-10-10-stall-aks/REPORT.md)。以下为历史发布记录，不代表当前运行版本。
+2026-10-10 已发布应用源码 `5f2463e`：落地两项 h2 协议保证 —— `REFUSED_STREAM` 进入重放白名单（**自编写以来首次扩展**，有 RFC 7540 §8.1.4 依据，生产未验证）、`GOAWAY`+`NO_ERROR` 不再累积熔断错误；另含裸 `response.failed` 的明确归因与 `elevated_input` 提示层。维护约 66 秒，三探针、账本与清理通过。上游三类拒绝均未解决。见 [本次发布回执](reviews/2026-10-10-replay-aks/REPORT.md)。以下为历史发布记录，不代表当前运行版本。
+
+2026-10-10 曾发布应用源码 `97c7e64`：首个内容前停滞信号、恢复优先窗口的证据门控。维护约 48 秒，三个常规业务探针、账本与清理通过。**首次提交被 preflight 以 `old_backend_not_healthy` 正当拒绝**（Azure MySQL 处于 Stopped，646 条用量事件悬在内存），启动数据库后 646 条全部落盘再重新发布；发布后另有一次独立 rollout 移除 `COPILOT_RECOVERY_PREFERENCE_SECONDS=0`。上游 120 秒取消与限流均未解决。见 [本次发布回执](reviews/2026-10-10-stall-aks/REPORT.md)。以下为历史发布记录，不代表当前运行版本。
 
 2026-10-09 曾发布应用源码 `fea7d60`：h2 协议取证、Copilot 模型/API 局部熔断、冷却后小请求优先窗口与上下文提示。维护约 156 秒，三个常规业务探针、账本与清理通过。本次上线的是取证与局部保护，**不是对断流故障的修复**；发布后 30 分钟观察期零协议错误不构成故障已消除的证据。本次未做数据库快照与独立 QA。见 [本次发布回执](reviews/2026-10-09-stream-aks/REPORT.md)。以下为历史发布记录，不代表当前运行版本。
 

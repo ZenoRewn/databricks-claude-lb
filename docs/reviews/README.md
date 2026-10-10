@@ -6,6 +6,7 @@ Author: Zeno Ren
 
 | 日期 | 范围 | 入口 |
 |---|---|---|
+| 2026-10-10 | 协议保证落地与重放白名单首次扩展 AKS 发布 | [部署回执](2026-10-10-replay-aks/REPORT.md) |
 | 2026-10-10 | 停滞信号与证据门控 AKS 发布；preflight 拒绝与账本恢复 | [部署回执](2026-10-10-stall-aks/REPORT.md) |
 | 2026-10-09 | 120 秒上游取消的生产取证；两项保护的实测局限 | [流取证](2026-10-09-stream-forensics/REPORT.md) |
 | 2026-10-09 | 流协议取证与分层保护 AKS 发布；原故障未复现、未归因 | [部署回执](2026-10-09-stream-aks/REPORT.md)、[本地验证](2026-10-09-stream-reliability/REPORT.md) |

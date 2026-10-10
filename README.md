@@ -116,7 +116,7 @@ python -m operations.build_identity \
 
 AKS 操作从 [部署指南](docs/AKS.md) 和 [受控发布工具](docs/RELEASE_TOOL.md) 开始。`deploy/k8s/` 是示例形态，**不能整份 apply 覆盖现有生产环境**。单副本发布可能产生维护窗口；需要预先完成备份、排空、恢复材料和业务验收。
 
-最近一次已记录的 AKS 发布为 [2026-10-10 停滞信号与证据门控](docs/reviews/2026-10-10-stall-aks/REPORT.md)，应用源码 `97c7e64`。三个常规业务与账本验收通过；首次提交被 preflight 正当拒绝（账本后端不可用），恢复后重新发布。上游 120 秒取消与限流未解决。后续文档或代码提交不自动表示线上更新。历次验证与部署结果集中在 [验证索引](docs/reviews/README.md)。
+最近一次已记录的 AKS 发布为 [2026-10-10 协议保证落地与重放白名单扩展](docs/reviews/2026-10-10-replay-aks/REPORT.md)，应用源码 `5f2463e`。三个常规业务与账本验收通过。该次包含推理 POST 重放白名单自编写以来的首次扩展（`REFUSED_STREAM`，有 RFC 依据、生产未验证）。上游的 120 秒取消、限流与裸失败均未解决。后续文档或代码提交不自动表示线上更新。历次验证与部署结果集中在 [验证索引](docs/reviews/README.md)。
 
 ## 开发
 
