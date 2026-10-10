@@ -330,9 +330,22 @@ kubectl -n YOUR_NS logs -l app=claude-lb --since=1h | grep '"generation_outcome"
 - `failure_reason` 为 `context_window_exceeded` / `invalid_input` / `output_limit` 等 → 上游给了结构化 error，按该原因处理
 - 配合 `lb_context_budget` 的 `context_advice`：`elevated_input` 表示体积已达 1 MiB 以上
 
-**已知限制**：流式路径只把 `{'error': ...}` 传给 `failure_reason()`，不含 `response.status`，所以 429/401/5xx 这类 status-based 分类在流式 failed 事件里不生效，只有 error 的 `code` 参与判断。缓冲（非流式）路径不受此限制。
+**协议固有特性，不是代码遗漏**（此处修正本页早先把它写成「已知限制」的措辞）：流式场景的 HTTP 响应早已是 200，失败只出现在后续 SSE 事件里，**协议上就不存在可供分类的 HTTP 状态码**。因此 429/401/5xx 这类 status-based 判断在流式 failed 事件里无从适用，只有 error 的 `code` 参与。缓冲（非流式）路径有真实状态码，不受影响。`response.status` 是 `"failed"` 这样的字符串，不是 HTTP 码，传它没有意义。
 
-#### `REFUSED_STREAM(7)` 会打开共享熔断
+#### `REFUSED_STREAM(7)` 会被自动重放，但仍打开共享熔断
+
+这两件事是**不同维度**，不冲突：
+
+- **可重放**：RFC 7540 §8.1.4 规定 `REFUSED_STREAM` 表示流在「任何处理发生之前」就被关闭，请求「可以安全重试」。执行状态因此是**已知的（未执行）**，而不变量禁止的是在执行状态**不明**时重放。所以 LB 会自动换端点重试，客户端不再看到这类失败。证据只取自 typed h2 事件：本地发起的重置（`remote_reset=False`）不算，连接级 GOAWAY 携带 7 也不算，其他错误码（含 `ENHANCE_YOUR_CALM`）一律排除。重放仍受 `response is None`、未向下游输出、以及既有 attempt 预算三重约束。
+- **仍计入共享熔断**：`REFUSED_STREAM` 同时是账户级过载信号，所以它**保留共享保护**、不进局部层。如果上游持续拒绝，熔断会打开并终止重试 —— 这正是防止重放加剧过载的闸门。
+
+#### `GOAWAY` + `NO_ERROR(0)` 不再计入熔断
+
+RFC 7540 §6.8 的 `GOAWAY` 携带 `NO_ERROR` 表示**优雅关闭连接**，不是故障。2026-10-09 观测到 6 次（21 秒内），其中几条已输出 3442/3692 chunks。流确实丢了、客户端确实看到失败，但端点并不不健康 —— 新连接照样能用 —— 所以它现在记为 neutral，不累积熔断错误。此前这类事件会把一次正常的连接回收推向 `failure_threshold`。
+
+它**不可重放**：与 `REFUSED_STREAM` 不同，连接干净关闭并不说明这个流是否已被处理。携带真实错误码的 `GOAWAY`（1/2/7/11 等）仍按故障计入。
+
+#### `REFUSED_STREAM(7)` 的熔断范围
 
 `REFUSED_STREAM` 作为账户级过载信号**保留共享保护**，不进局部层。所以一个模型的大请求触发 GHCP 限流时，共享 endpoint 熔断会打开并挡住同账户其他模型 —— 2026-10-09 事件里 `gpt-6.1-sol` 局部层 HALF_OPEN，而零错误的 `gpt-5.4` / `gpt-5.6-luna` / `gpt-6-astra` 一并被挡。用 `/stats` 的 `model_api_circuits` 对照 `circuit_open` 可以分辨是哪一层在拦。这是有意的取舍，不是 bug；若要退回 endpoint-only 保护用 `COPILOT_SCOPED_CIRCUITS=false`。
 
