@@ -305,6 +305,33 @@ kubectl -n YOUR_NS logs -l app=claude-lb --since=1h | grep copilot_stream_networ
 
 `copilot_stream_prefirst_content_stall_total` 与 `kind=copilot_stream_prefirst_content_stall` 在「已收到响应头、但超过 `COPILOT_STREAM_PREFIRST_CONTENT_WARN_SECONDS`（默认 90 秒）仍无正文」时各发一次。它**纯观测** —— 不中止流、不触发重试、不影响熔断。设计目的是在撞上上游 120 秒取消**之前**就能看到，而不是事后从 `CANCEL(8)` 倒推。每条流最多发一次。
 
+#### 客户端报 `response.failed event received`
+
+**这段文案不是 LB 产生的** —— 它是 Codex 收到上游 `response.failed` 事件后自己报的。LB 把上游的失败终态如实透传，既没伪装成成功也没编造原因。
+
+与前两种形态的区别：
+
+| | `REFUSED_STREAM(7)` | `CANCEL(8)` | `response.failed` |
+|---|---|---|---|
+| 层次 | 传输层 | 传输层 | **应用层 SSE 终态** |
+| 上游是否执行 | 协议保证**未**执行 | 200 后静默 | **200 后主动声明失败** |
+| 耗时 | 立即 | 120 秒硬下界 | **2.5–5.1 秒** |
+| `terminal_seen` | false | false | **true** |
+
+2026-10-10 观测到 5 次，8 秒内集中发生，全部 `gpt-6.1-sol` + codex，体积 1.58 MB×2 与 3.21 MB×3，全部 `upstream_headers_received=true`、`chunks_yielded=0`、`usage` 为 null。**上游没有给任何 error 详情** —— 不是超时，是快速拒绝。
+
+排查：
+
+```bash
+kubectl -n YOUR_NS logs -l app=claude-lb --since=1h | grep '"generation_outcome": "failed"'
+```
+
+- `failure_reason=upstream_failure` + 无 `lb_upstream_error` 的分类细节 → 上游声明失败但未说明原因（本形态）。`upstream_failure` 是诚实的兜底，表示「上游失败、无进一步分类」，不代表 LB 知道原因
+- `failure_reason` 为 `context_window_exceeded` / `invalid_input` / `output_limit` 等 → 上游给了结构化 error，按该原因处理
+- 配合 `lb_context_budget` 的 `context_advice`：`elevated_input` 表示体积已达 1 MiB 以上
+
+**已知限制**：流式路径只把 `{'error': ...}` 传给 `failure_reason()`，不含 `response.status`，所以 429/401/5xx 这类 status-based 分类在流式 failed 事件里不生效，只有 error 的 `code` 参与判断。缓冲（非流式）路径不受此限制。
+
 #### `REFUSED_STREAM(7)` 会打开共享熔断
 
 `REFUSED_STREAM` 作为账户级过载信号**保留共享保护**，不进局部层。所以一个模型的大请求触发 GHCP 限流时，共享 endpoint 熔断会打开并挡住同账户其他模型 —— 2026-10-09 事件里 `gpt-6.1-sol` 局部层 HALF_OPEN，而零错误的 `gpt-5.4` / `gpt-5.6-luna` / `gpt-6-astra` 一并被挡。用 `/stats` 的 `model_api_circuits` 对照 `circuit_open` 可以分辨是哪一层在拦。这是有意的取舍，不是 bug；若要退回 endpoint-only 保护用 `COPILOT_SCOPED_CIRCUITS=false`。

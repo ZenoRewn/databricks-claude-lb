@@ -112,7 +112,9 @@ DNS/TCP/TLS/pool 没有可靠独立 hook，保持 null。阶段可能嵌套，�
 
 推理 JSON/SSE 响应头现在提供 `X-LB-Context-Estimated-Input-Tokens`、`X-LB-Context-Text-Bytes`、`X-LB-Context-Estimate-Confidence`、`X-LB-Context-Estimate-Complete`、`X-LB-Context-Unknown-Components` 和 `X-LB-Context-Advice`。未知限额不返回数值；有当前已核验目录时才返回 `X-LB-Context-Input-Limit` / `X-LB-Context-Context-Limit`。所有字段为估算或目录元数据，不含正文。流式响应头只反映提交头部时已观察到的路由，不能宣称后续重试目标的限额。
 
-建议值为 `none`、`large_input`、`estimated_near_limit` 或 `estimated_over_limit`。语义输入默认达到 256 KiB 时提示 large_input；已核验限额的低可信度估算达到 80% / 超过 100% 时给出 near / over 提示，始终不据此硬拒绝输入、不摘要或删除历史。调用方可主动整理会话、工具输出或图片；Codex 是否显示这些自定义响应头尚未验收。`LB_CONTEXT_BUDGET_MODE=off` 关闭推理上下文提示，受保护的本地 count_tokens 接口仍提供其估算头。
+建议值为 `none`、`large_input`、`elevated_input`、`estimated_near_limit` 或 `estimated_over_limit`。语义输入默认达到 256 KiB 时提示 large_input、达到 1 MiB 时提示 elevated_input；已核验限额的低可信度估算达到 80% / 超过 100% 时给出 near / over 提示（限额比值优先于体积分级），始终不据此硬拒绝输入、不摘要或删除历史。
+
+`elevated_input` 的 1 MiB 默认值（`LB_CONTEXT_ELEVATED_INPUT_BYTES`，范围 1 B～64 MiB，必须大于 `LB_CONTEXT_LARGE_INPUT_BYTES`）是**启发式**而非证据阈值：2026-10-09/10 事件中失败请求体积为 1.58 MB、2.20 MB、3.21 MB，而同窗口内 >1 MB 的请求仍有 103/179 成功。设这一级的目的只是让这些请求不再与 256 KiB 请求共用同一个标签，不构成容量判断，也不触发任何拒绝。体积分级在 token 估算不完整时同样给出 —— 线缆上的字节数是已知的，与未知的图片/opaque token 数无关。调用方可主动整理会话、工具输出或图片；Codex 是否显示这些自定义响应头尚未验收。`LB_CONTEXT_BUDGET_MODE=off` 关闭推理上下文提示，受保护的本地 count_tokens 接口仍提供其估算头。
 
 `LB_CONTEXT_LARGE_INPUT_BYTES=262144` 可配置规模提示阈值，范围 1 B～64 MiB；这不是模型上下文容量或服务拒绝阈值。
 
