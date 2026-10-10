@@ -1322,21 +1322,28 @@ class _SSEObservation:
 
 # ==================== 模型名称映射 ====================
 
-DATABRICKS_MODELS = {
-    "sonnet": "databricks-claude-sonnet-4-6",  # 默认使用最新版本
-    "sonnet-4-5": "databricks-claude-sonnet-4-5",
-    "sonnet-4-6": "databricks-claude-sonnet-4-6",
-    "sonnet-5":   "databricks-claude-sonnet-5",   # Anthropic 2026-09 新版；Databricks 上线后即可用
-    "opus": "databricks-claude-opus-4-7",  # 默认版本；显式指定 opus-5 走 Opus 5
-    "opus-4-5": "databricks-claude-opus-4-5",
-    "opus-4-6": "databricks-claude-opus-4-6",
-    "opus-4-7": "databricks-claude-opus-4-7",
-    "opus-4-8": "databricks-claude-opus-4-8",   # Anthropic 2026-09 legacy tier
-    "opus-5": "databricks-claude-opus-5",       # Databricks 已 GA
-    "haiku": "databricks-claude-haiku-4-5",
+# 只有「没写版本号」时才需要代码里的默认值；写了版本号一律规范化后透传，
+# 由上游决定该版本是否存在。这样新版本上线当天无需改码即可用，而不存在的
+# 版本会明确报错，不会被静默降级成另一个模型。
+#
+# 2026-10-10 用最小真实请求逐个核对过的上游清单：
+#   opus   4-5 4-6 4-7 4-8 5 5-5    （5-1、6、*-fast 均被拒绝）
+#   sonnet 4-6 5 5-5                （5-1 被拒绝）
+#   haiku  4-5 5-5                  （没有 haiku-5，直接跳过）
+#   fable  5 5-1                    （受 region 限制，见下）
+# opus/sonnet/haiku 的 5-5 在全部端点 6/6 稳定；fable-5-1 只有 2/6，其余返回
+# NOT_FOUND "not available in your region"，即只有部分 workspace 有该模型。
+# 要稳定使用 fable 需要在配置里用 endpoints[].models 把它限定到有该模型的端点，
+# 这是配置动作而非代码问题。此处仍保留 fable 家族默认值，否则 "claude-fable"
+# 会落到 DEFAULT_MODEL，变成更糟的跨家族静默替换。
+DATABRICKS_FAMILY_DEFAULTS = {
+    "opus":   "databricks-claude-opus-5-5",
+    "sonnet": "databricks-claude-sonnet-5-5",
+    "haiku":  "databricks-claude-haiku-5-5",
+    "fable":  "databricks-claude-fable-5-1",
 }
 
-DEFAULT_MODEL = "databricks-claude-sonnet-4-6"
+DEFAULT_MODEL = "databricks-claude-sonnet-5-5"
 
 # 模型定价（USD per 1M tokens）
 # - Anthropic：Anthropic 官方 API 公开价
@@ -1346,7 +1353,7 @@ DEFAULT_MODEL = "databricks-claude-sonnet-4-6"
 #   实际靠 get_model_pricing() 的排序保障，dict 顺序仅作可读性
 MODEL_PRICING = {
     # 数据源：Anthropic https://claude.com/pricing、OpenAI https://developers.openai.com/api/docs/pricing
-    # 最近核对：2026-09-08。不作为 GitHub Copilot 当前分档计费表。
+    # 最近核对：2026-10-10（Claude 5.5 与 Fable 系列）。不作为 GitHub Copilot 当前分档计费表。
     #
     # 定价 key 约定：
     #   - input / output：USD per 1M tokens
@@ -1355,15 +1362,23 @@ MODEL_PRICING = {
     # 子串匹配靠 _PRICING_KEYS_BY_LENGTH 按 key 长度降序，长 key 先命中。
 
     # ---------- Anthropic Claude ----------
+    "fable-5-1":  {"input": 10.00, "output": 50.00, "cache_write": 12.50, "cache_read": 0.25},
+    "fable-5":    {"input": 10.00, "output": 50.00, "cache_write": 12.50, "cache_read": 1.00},
+    "opus-5-5":   {"input": 4.00, "output": 20.00, "cache_write": 5.00, "cache_read": 0.20},
     "opus-5":     {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
     "opus-4-8":   {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},   # 2026 legacy tier
     "opus-4-7":   {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
     "opus-4-6":   {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
     "opus-4-5":   {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
     "opus-4-1":   {"input": 15.00, "output": 75.00, "cache_write": 18.75, "cache_read": 1.50},  # older tier, 3x price
+    "sonnet-5-5": {"input": 2.00, "output": 10.00, "cache_write": 2.50, "cache_read": 0.10},
     "sonnet-5":   {"input": 2.00, "output": 10.00, "cache_write": 2.50, "cache_read": 0.20},   # NEW 2026-09
     "sonnet-4-6": {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
     "sonnet-4-5": {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
+    # Haiku 5.5 官方按 prompt 大小分两档，这张表是平价结构，只收 ≤100K 档。
+    # >100K 档为 5×（0.50 / 2.50 / cw 0.625 / cr 0.05），本表不覆盖，会低估；
+    # 同 gpt-5.4/5.5 只收短上下文价的既有处理。不收录则成本完全不计入，更差。
+    "haiku-5-5":  {"input": 0.10, "output": 0.50, "cache_write": 0.125, "cache_read": 0.01},
     "haiku-4-5":  {"input": 1.00, "output": 5.00,  "cache_write": 1.25, "cache_read": 0.10},
 
     # ---------- OpenAI GPT-5 系列 ----------
@@ -1444,7 +1459,7 @@ def historical_model_cost(model, stats):
     """Price a read-only aggregate view without claiming a provider or past tariff."""
     # Anthropic input excludes caches; the OpenAI-style adapters report inclusive
     # input. Daily storage has no provider column, so do not infer the provider.
-    anthropic = model.lower().startswith(('databricks-', 'claude-', 'opus-', 'sonnet-', 'haiku-'))
+    anthropic = model.lower().startswith(('databricks-', 'claude-', 'opus-', 'sonnet-', 'haiku-', 'fable-'))
     quote = None if anthropic else estimate_history_reference(model, stats)
     requests = stats.get('requests', 0)
     if quote is None:
@@ -1508,45 +1523,35 @@ def supports_adaptive_thinking(databricks_model: str) -> bool:
     return not any(marker in databricks_model for marker in legacy_non_adaptive_markers)
 
 
+# 日期戳与 "latest" 不是模型身份的一部分，剥掉；其余尾缀一律保留，
+# 这样 "opus-5-5-fast" 会去问上游，而不是被吞成 "opus-5-5" 后按一半价格计费。
+_MODEL_NON_IDENTITY_SEGMENT = re.compile(r"^(?:\d{8}|latest)$")
+
+
 def get_databricks_model(model: str) -> str:
-    """将 Claude 模型名称映射到 Databricks 模型名称"""
+    """将 Claude 模型名称规范化为 Databricks 模型名称。
+
+    规范化而不猜测：定家族 → 剥离非身份尾缀 → 统一分隔符 → 拼名字。显式写了
+    版本号就按写的转发，由上游裁决该版本是否存在；只有完全没写版本号时才落到
+    家族默认值。旧实现靠 if/elif 嗅探版本，其分隔符字符类同时匹配 "5.5" 里的
+    第二个点，于是显式请求 Opus 5.5 被静默降级成 Opus 5。
+    """
     model_lower = model.lower()
 
     # 已经是 Databricks 模型名称，直接返回
     if model_lower.startswith("databricks-"):
         return model
 
-    # 检查是否指定了具体版本 (如 claude-opus-5, claude-opus-4-7, opus-4-5)
-    # 注意：Opus 5 判断必须先于 "opus-*-*"，否则会被通用 opus 分支吞掉走到默认（4-7）
-    if "opus" in model_lower:
-        # Opus 5 系列：匹配 "opus-5" / "opus-5-*" / "opus5"（不匹配 "opus-4-*" 里可能出现的 "5"）
-        if re.search(r"opus[-_.]?5(?:[-_.]|$)", model_lower):
-            mapped = DATABRICKS_MODELS["opus-5"]
-        elif "4-5" in model_lower or "4.5" in model_lower:
-            mapped = DATABRICKS_MODELS["opus-4-5"]
-        elif "4-6" in model_lower or "4.6" in model_lower:
-            mapped = DATABRICKS_MODELS["opus-4-6"]
-        elif "4-7" in model_lower or "4.7" in model_lower:
-            mapped = DATABRICKS_MODELS["opus-4-7"]
-        elif "4-8" in model_lower or "4.8" in model_lower:
-            mapped = DATABRICKS_MODELS["opus-4-8"]
-        else:
-            mapped = DATABRICKS_MODELS["opus"]  # 默认最新版本
-    elif "sonnet" in model_lower:
-        # Sonnet 5 判断必须在 4-x 之前（与 opus-5 同样的模式）
-        if re.search(r"sonnet[-_.]?5(?:[-_.]|$)", model_lower):
-            mapped = DATABRICKS_MODELS["sonnet-5"]
-        elif "4-5" in model_lower or "4.5" in model_lower:
-            mapped = DATABRICKS_MODELS["sonnet-4-5"]
-        elif "4-6" in model_lower or "4.6" in model_lower:
-            mapped = DATABRICKS_MODELS["sonnet-4-6"]
-        else:
-            mapped = DATABRICKS_MODELS["sonnet"]  # 默认最新版本
-    elif "haiku" in model_lower:
-        mapped = DATABRICKS_MODELS["haiku"]
-    else:
+    family = next((f for f in DATABRICKS_FAMILY_DEFAULTS if f in model_lower), None)
+    if family is None:
         logger.warning(f"Unknown model '{model}', using default: {DEFAULT_MODEL}")
         mapped = DEFAULT_MODEL
+    else:
+        tail = model_lower.split(family, 1)[1]
+        segments = [s for s in re.split(r"[-_.]+", tail)
+                    if s and not _MODEL_NON_IDENTITY_SEGMENT.match(s)]
+        mapped = (f"databricks-claude-{family}-{'-'.join(segments)}" if segments
+                  else DATABRICKS_FAMILY_DEFAULTS[family])
 
     if mapped != model:
         logger.info(f"Model mapping: {model} -> {mapped}")

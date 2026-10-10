@@ -70,7 +70,10 @@ class DatabricksPayloadCompatTests(unittest.TestCase):
 
     def test_opus_5_all_variants_bypass_downgrade(self):
         """回归防护：任何 opus-5 变体都必须映射到 databricks-claude-opus-5，
-        绝不能被通用 opus 分支吞掉降级到 4-7。列出常见客户端可能发出的形态。"""
+        绝不能被通用 opus 分支吞掉降级到 4-7。列出常见客户端可能发出的形态。
+
+        小版本号（如 5.1 / 5.5）不在此列：它们是独立模型，规范化后透传给上游，
+        见 tests/test_databricks_model_resolution.py。"""
         variants = [
             "databricks-claude-opus-5",   # 已经是 Databricks 名，原样返回
             "opus-5",                     # 裸模型名
@@ -78,7 +81,6 @@ class DatabricksPayloadCompatTests(unittest.TestCase):
             "claude-opus-5-latest",       # latest 别名
             "claude-opus-5-20250514",     # 20250514 date suffix
             "claude-opus-5-20260101",     # 未来 date suffix
-            "claude-opus-5.1",            # 小版本号（次要修订）
             "CLAUDE-OPUS-5",              # 全大写
             "Claude-Opus-5",              # 混合大小写
             "claude-opus-5_20260101",     # 下划线分隔（非常见但要 robust）
@@ -100,10 +102,10 @@ class DatabricksPayloadCompatTests(unittest.TestCase):
             main.get_databricks_model("claude-opus-4-5"),
             "databricks-claude-opus-4-5",
         )
-        # 无版本号的 "claude-opus" 走默认（4-7），不能被误识别为 5
+        # 无版本号的 "claude-opus" 走家族默认（当前 5-5），不能被误识别为某个显式版本
         self.assertEqual(
             main.get_databricks_model("claude-opus"),
-            "databricks-claude-opus-4-7",
+            "databricks-claude-opus-5-5",
         )
 
     def test_new_2026_models_have_pricing(self):
@@ -112,6 +114,11 @@ class DatabricksPayloadCompatTests(unittest.TestCase):
             # Anthropic 新增
             "databricks-claude-sonnet-5",
             "databricks-claude-opus-4-8",
+            "databricks-claude-opus-5-5",
+            "databricks-claude-sonnet-5-5",
+            "databricks-claude-haiku-5-5",
+            "databricks-claude-fable-5",
+            "databricks-claude-fable-5-1",
             # OpenAI 新增 / 修正
             "o4-mini", "o3-pro",
             "gpt-5-pro",
@@ -141,8 +148,8 @@ class DatabricksPayloadCompatTests(unittest.TestCase):
                 "databricks-claude-sonnet-5",
                 msg=f"{m}: not mapped to sonnet-5",
             )
-        # 未指定 5 时仍走默认（4-6）
-        self.assertEqual(main.get_databricks_model("claude-sonnet"), "databricks-claude-sonnet-4-6")
+        # 未指定版本时走家族默认（当前 5-5）
+        self.assertEqual(main.get_databricks_model("claude-sonnet"), "databricks-claude-sonnet-5-5")
         # 显式 4-6 保持不变
         self.assertEqual(main.get_databricks_model("claude-sonnet-4-6"), "databricks-claude-sonnet-4-6")
 

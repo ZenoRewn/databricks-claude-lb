@@ -16,6 +16,19 @@ Author: Zeno Ren
 
 Claude 模型使用 `/v1/messages`。在 OpenAI 风格入口传入 Claude 模型会被拒绝，不会隐式换协议或供应商。模型映射和支持范围以代码配置及上游实际可用性为准。
 
+### 模型名解析
+
+`get_databricks_model` 规范化而不猜测版本：定家族（opus/sonnet/haiku/fable）→ 剥离日期戳与 `latest` → 统一 `-_.` 分隔符 → 拼成 `databricks-claude-<家族>-<版本>`。
+
+- **写了版本号就按写的转发**，由上游裁决是否存在。新版本上线当天无需改码即可用；不存在的版本得到上游明确的 `passthrough is not supported for model ...`，不会被静默降级成另一个模型。
+- **只有完全没写版本号**才用 `DATABRICKS_FAMILY_DEFAULTS` 里的家族默认值，该默认值是代码里唯一的版本假设。
+- 日期戳与 `latest` 之外的尾缀一律保留进模型名（如 `-fast`），避免被吞掉后按另一档价格计费。
+- `databricks-` 前缀的名字原样透传，不做任何解析。
+
+历史上这里曾用正则嗅探版本，其分隔符字符类同时匹配 `5.5` 里的第二个点，导致显式请求 Opus 5.5 静默跑在 Opus 5 上；因此不要恢复按版本分支的 if/elif 写法。
+
+解析成功不代表每个端点都有该模型。2026-10-10 实测 Opus/Sonnet/Haiku 的 5.5 在全部端点稳定，而 `claude-fable-5-1` 仅部分 workspace 可用，其余返回 `NOT_FOUND ... not available in your region`，按端点轮询会间歇失败。区域受限模型需要用 `endpoints[].models` 限定到确有该模型的端点。
+
 ## Azure OpenAI
 
 ```yaml

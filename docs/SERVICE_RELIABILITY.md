@@ -17,7 +17,7 @@ Author: Zeno Ren
 - main：`f9ad2781e492fd15e444522b69bd76352db88518ad02f61292e321e83c9f49f0`
 - effort：`75eefaf3d111c8d04e9c5c667acd0d4029a09db10fbc72105696123801c27436`
 
-该行为只为 Databricks Opus 5 保留 `output_config.effort`，不宣称 schema/format 已生效。非流式响应继续保留线上已有的 effort 提示头。Dockerfile 和 CI smoke 文件清单包含所有新增运行模块。
+该行为只为 Databricks Opus 5 与 Opus 5.5 保留 `output_config.effort`（`effort_compat.EFFORT_CAPABLE_MODELS`，精确匹配而非子串，所以 `opus-5-5-fast` 之类未验证变体不会继承），不宣称 schema/format 已生效。非流式响应继续保留线上已有的 effort 提示头。Dockerfile 和 CI smoke 文件清单包含所有新增运行模块。
 
 ## 请求观测契约
 
@@ -125,7 +125,7 @@ lifespan 关闭现在使用 finally 和受保护的 cleanup owner；warmup、刷
 
 默认保持兼容行为，通过 `X-LB-Parameter-Policy: compat` 和 `X-LB-Dropped-Parameters` 告知本地移除的字段名。覆盖 DB 的 output_config/schema/effort、context_management、已知 tool/cache-control/tool-reference/adaptive-budget 移除，以及 Responses 适配的采样参数移除；不包含字段值、schema 正文或请求内容。
 
-调用方可设置 `X-LB-Strict-Parameters: true`（或 1）。遇到这些已知本地移除时，在发起推理前返回 HTTP 400 `parameter_not_forwarded`；支持的 Opus 5 effort 仍按现有契约透传。非法 header 值返回 400。该选项说明的是网关的本地兼容行为，**不是供应商能力认证**，也不改变已有 Copilot ID 剥离/opaque-state 恢复或图片压缩策略。
+调用方可设置 `X-LB-Strict-Parameters: true`（或 1）。遇到这些已知本地移除时，在发起推理前返回 HTTP 400 `parameter_not_forwarded`；支持的 Opus 5 / Opus 5.5 effort 仍按现有契约透传。非法 header 值返回 400。该选项说明的是网关的本地兼容行为，**不是供应商能力认证**，也不改变已有 Copilot ID 剥离/opaque-state 恢复或图片压缩策略。
 
 `lb_parameter_policy_requests_total{action,parameter}` 按“受该字段决策影响的请求数”计数，每请求每字段一次；action 为 dropped/rejected。它既不是剥离字段总数，也不是上下文 token 数。结构化输出仍需调用方验证。
 

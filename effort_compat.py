@@ -1,8 +1,21 @@
 """Preserve the supported native effort field without widening legacy passthrough. Author: Zeno Ren."""
 
+# Exact membership, never substring: "databricks-claude-opus-5-5" contains
+# "databricks-claude-opus-5", and an unverified qualifier such as "-fast" must
+# not inherit support from the base model.
+EFFORT_CAPABLE_MODELS = (
+    "databricks-claude-opus-5",
+    "databricks-claude-opus-5-5",
+)
+
+
+def _supports_native_effort(model):
+    return (model or "").lower() in EFFORT_CAPABLE_MODELS
+
+
 def preserve_native_effort(body):
     output = body.pop("output_config", None)
-    if body.get("model", "").lower() == "databricks-claude-opus-5" and isinstance(output, dict) and "effort" in output:
+    if _supports_native_effort(body.get("model", "")) and isinstance(output, dict) and "effort" in output:
         # Leave value validation to the actual upstream. In particular, do not
         # silently default invalid effort values to high.
         body["output_config"] = {"effort": output["effort"]}
@@ -25,7 +38,7 @@ def databricks_parameter_drops(body, *, adaptive_supported=False):
             fields.add('output_config')
         else:
             for key in output:
-                if key=='effort' and body.get('model','').lower()=='databricks-claude-opus-5':
+                if key=='effort' and _supports_native_effort(body.get('model','')):
                     continue
                 fields.add('output_config.'+key if key in ('effort','format') else 'output_config.other')
     blocks = [b for b in body.get('system',[]) if isinstance(b,dict)] if isinstance(body.get('system'),list) else []
