@@ -59,7 +59,7 @@ ENUM_FIELDS = {
     'protocol_error_kind': {'http2_stream_reset', 'http2_goaway', 'remote_protocol_error', 'unknown'},
     'protocol_scope': {'stream', 'connection', 'unknown'},
     'circuit_scope': {'endpoint', 'model_api'},
-    'context_advice': {'none', 'large_input', 'estimated_near_limit', 'estimated_over_limit'},
+    'context_advice': {'none', 'large_input', 'elevated_input', 'estimated_near_limit', 'estimated_over_limit'},
 }
 
 

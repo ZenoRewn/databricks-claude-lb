@@ -23,6 +23,15 @@ if MODE not in ('off', 'observe', 'enforce'):
 LARGE_INPUT_BYTES = int(os.getenv('LB_CONTEXT_LARGE_INPUT_BYTES', '262144'))
 if not 1 <= LARGE_INPUT_BYTES <= 64 * 1024 * 1024:
     raise ValueError('LB_CONTEXT_LARGE_INPUT_BYTES must be between 1 and 67108864')
+# Louder advisory tier above LARGE_INPUT_BYTES. The 1 MiB default is a heuristic
+# chosen so the 1.58/2.20/3.21 MB bodies seen in the 2026-10-09/10 incidents stop
+# sharing a label with a 256 KiB request. It is NOT an evidence-derived limit —
+# large requests also succeed — so it never rejects, trims or summarises input.
+ELEVATED_INPUT_BYTES = int(os.getenv('LB_CONTEXT_ELEVATED_INPUT_BYTES', '1048576'))
+if not 1 <= ELEVATED_INPUT_BYTES <= 64 * 1024 * 1024:
+    raise ValueError('LB_CONTEXT_ELEVATED_INPUT_BYTES must be between 1 and 67108864')
+if ELEVATED_INPUT_BYTES <= LARGE_INPUT_BYTES:
+    raise ValueError('LB_CONTEXT_ELEVATED_INPUT_BYTES must exceed LB_CONTEXT_LARGE_INPUT_BYTES')
 LIMITS = ('input_tokens', 'context_tokens', 'output_tokens')
 FEATURES = ('tools', 'images', 'structured_output', 'opaque_state')
 SEMANTIC_FIELDS = {'messages', 'input', 'system', 'instructions', 'tools', 'tool_choice',
@@ -210,6 +219,10 @@ def context_advice(estimate, limits=None, reserved=None):
         return 'estimated_over_limit'
     if any(ratio >= .8 for ratio in ratios):
         return 'estimated_near_limit'
+    # Size tiers are reported even when the token estimate is incomplete: bytes on
+    # the wire are known regardless of unknown image/opaque token counts.
+    if estimate['text_bytes'] >= ELEVATED_INPUT_BYTES:
+        return 'elevated_input'
     return 'large_input' if estimate['text_bytes'] >= LARGE_INPUT_BYTES else 'none'
 
 

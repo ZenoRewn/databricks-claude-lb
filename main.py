@@ -283,6 +283,7 @@ class LBSettings:
                 'chat_adapter_preserve_models': sorted(PRESERVE_MODELS) if PRESERVE_MODELS is not None else None,
                 'context_budget_mode': model_capabilities.MODE,
                 'context_large_input_bytes': model_capabilities.LARGE_INPUT_BYTES,
+                'context_elevated_input_bytes': model_capabilities.ELEVATED_INPUT_BYTES,
                 'capability_catalog_sha256': model_capabilities.CATALOG.sha256,
                 'capability_catalog_entries': len(model_capabilities.CATALOG.entries)}
 
@@ -1296,6 +1297,13 @@ class _SSEObservation:
             # Narrow request-local evidence only. Auth/quota/overload/server and
             # unknown EOF/errors remain conservative endpoint failures.
             self.neutral = self.neutral or reason in ('context_window_exceeded','invalid_input','output_limit')
+        elif self.terminal == "failed":
+            # Upstream declared failure without usable detail (observed 2026-10-10:
+            # bare response.failed, no error object, no usage). "Upstream said it
+            # failed" is stronger evidence than the 'unknown' default, so record it
+            # rather than losing the distinction. No cause is invented beyond that,
+            # and with no detail to localise the fault this stays endpoint-scoped.
+            note_failure('upstream_failure', origin='upstream_stream')
 
     def _usage(self, usage, input_key="input_tokens", output_key="output_tokens", details_key="input_tokens_details"):
         if not isinstance(usage, dict):
