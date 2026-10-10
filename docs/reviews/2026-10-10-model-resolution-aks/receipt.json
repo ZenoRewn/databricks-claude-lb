@@ -1,0 +1,172 @@
+{
+    "author": "Zeno Ren",
+    "release_id": "lb-20261010-models-16ff0f",
+    "release_result": "succeeded",
+    "attempts": 2,
+    "first_attempt": {
+        "release_id": "lb-20261010-models-37f523",
+        "release_result": "rolled_back",
+        "failed_action": "verify_business",
+        "failure_code": "business_or_persistence_verification_failed",
+        "failure_error_type": "ReadTimeout",
+        "plan_sha256": "8394e86c52b49230f1e7ed47c902c2e7624a27d5c9e225715bfb06fd8c811349",
+        "maintenance_started_at": 1791626848.144,
+        "maintenance_finished_at": 1791627070.386,
+        "maintenance_seconds": 222.242,
+        "cleanup_errors": ["RuntimeError"],
+        "cause": "operator_probe_choice_not_application_defect",
+        "cause_detail": "databricks-claude-opus-5-5 was used as a mandatory business probe; upstream returned TEMPORARILY_UNAVAILABLE (503, upstream_endpoint=southcentralus-adb-ws) due to Databricks capacity constraints",
+        "variable_isolation": {
+            "method": "replayed the probe at three output budgets to separate request size from time-varying capacity",
+            "max_tokens_4": "1/3 succeeded",
+            "max_tokens_16": "3/3 succeeded",
+            "max_tokens_128": "2/3 succeeded",
+            "conclusion": "intermittent upstream capacity limit, not correlated with request size"
+        },
+        "rollback_verified": true,
+        "rollback_public_health_verified": true,
+        "rollback_storage_backend_ready": true,
+        "post_rollback_state": {
+            "pod_ready": true,
+            "restarts": 0,
+            "service_selectors_clean": true,
+            "accepting_status": 200,
+            "usage_backend_ready": 1
+        },
+        "correction_applied": "second attempt used databricks-claude-opus-5 for the release gate; 5.5 verification moved to post-release checks"
+    },
+    "application_revision": "c3187243ebbfbab956c83d0b2ec721c905267fd5",
+    "registry_image": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:e6b00f998d6547154953c645a048f3c565c6ac271bad098bc9c3fd90bdfc6293",
+    "registry_manifest_single_platform": true,
+    "registry_manifest_platform": "linux/amd64",
+    "registry_manifest_media_type": "application/vnd.docker.distribution.manifest.v2+json",
+    "config_digest": "sha256:5f6233a9fb51e6d78526142e6fcea6b99cb07743e9eee201738aa6d112988163",
+    "source_manifest_sha256": "aff8eca6f39405c652f551b74d379f81fa43b958452a8cc117240e46d301b31e",
+    "source_tree_dirty": false,
+    "plan_sha256": "a623605532dec8219c28894f26458512852ee7b8504aabec9920c8bc92f1f89a",
+    "previous_image": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:691109f90c658a78073e31c6d6d1a3af174f529cc34fe0126108a3b9ef41e003",
+    "previous_revision": "5f2463e0124f0d18e699aea64e01ff672dad074e",
+    "public_version_verification": "matched",
+    "restarts": 0,
+    "maintenance_started_at": 1791628120.453,
+    "maintenance_finished_at": 1791628167.003,
+    "maintenance_seconds": 46.55,
+    "maintenance_budget_seconds": 600,
+    "rollback_performed": false,
+    "maintenance_cleared": true,
+    "cleanup_errors": [],
+    "all_actions_verified": true,
+    "business_probes": [
+        {"api": "messages", "model": "databricks-claude-opus-5", "stream": false, "completed": true, "marker_found": true},
+        {"api": "responses", "model": "gpt-5.4", "stream": true, "completed": true, "marker_found": true},
+        {"api": "chat", "model": "gpt-5.6-luna", "stream": true, "completed": true, "marker_found": true}
+    ],
+    "persistence_verified": true,
+    "behaviour_changes": {
+        "model_resolution_rewritten": {
+            "defect": "the version regex separator class also matched the second dot in 5.5, so an explicit Opus 5.5 request silently ran on Opus 5",
+            "additional_defects": [
+                "claude-haiku-5.5 resolved two tiers down to haiku-4-5",
+                "claude-fable-5-1 crossed families into sonnet-4-6"
+            ],
+            "wrong_assumption_removed": "a contract test required claude-opus-5.1 to fall back to opus-5 as a minor revision; opus-5-1 does not exist upstream while 5-5 is a separate model",
+            "approach": "identify family, strip non-identity segments (8-digit date stamps and latest), normalise -_. separators, then build the name",
+            "upstream_is_authority_on_existence": true,
+            "forward_compatible_without_code_change": true,
+            "unknown_qualifier_preserved": "-fast is kept rather than swallowed, which would bill a different tier than the one served",
+            "family_default_only_when_no_version_given": true
+        },
+        "family_defaults_raised": {
+            "opus": "databricks-claude-opus-5-5",
+            "sonnet": "databricks-claude-sonnet-5-5",
+            "haiku": "databricks-claude-haiku-5-5",
+            "fable": "databricks-claude-fable-5-1",
+            "default_model": "databricks-claude-sonnet-5-5",
+            "note": "newer and cheaper than the previous 4-7 / 4-6 / 4-5 defaults"
+        },
+        "pricing_added": {
+            "source": "claude.com/pricing",
+            "fetched_on": "2026-10-10",
+            "opus-5-5": {"input": 4.0, "output": 20.0, "cache_write": 5.0, "cache_read": 0.2},
+            "sonnet-5-5": {"input": 2.0, "output": 10.0, "cache_write": 2.5, "cache_read": 0.1},
+            "haiku-5-5": {"input": 0.1, "output": 0.5, "cache_write": 0.125, "cache_read": 0.01},
+            "fable-5-1": {"input": 10.0, "output": 50.0, "cache_write": 12.5, "cache_read": 0.25},
+            "fable-5": {"input": 10.0, "output": 50.0, "cache_write": 12.5, "cache_read": 1.0},
+            "previously_none": ["haiku-5-5", "fable-5-1", "fable-5"],
+            "previously_wrong": "opus-5-5 substring-matched opus-5 and was billed 5/25",
+            "haiku_5_5_tier_limitation": "officially tiered by prompt size; only the <=100K tier is encoded, >100K is 5x and under-reported, following the existing gpt-5.4/5.5 handling"
+        },
+        "effort_allowlist_exact": {
+            "models": ["databricks-claude-opus-5", "databricks-claude-opus-5-5"],
+            "matching": "exact membership, never substring",
+            "reason": "databricks-claude-opus-5-5 contains databricks-claude-opus-5, and an unverified qualifier such as -fast must not inherit support"
+        },
+        "historical_attribution_fixed": "historical_model_cost lacked a 'fable-' prefix, routing bare fable rows through the OpenAI-style inclusive-input branch"
+    },
+    "post_release_readback": {
+        "source": "running process in the deployed pod, not unit tests",
+        "claude-opus-5-5": "databricks-claude-opus-5-5",
+        "claude-opus-5.5": "databricks-claude-opus-5-5",
+        "claude-haiku-5.5": "databricks-claude-haiku-5-5",
+        "claude-fable-5-1": "databricks-claude-fable-5-1",
+        "claude-opus-5": "databricks-claude-opus-5",
+        "claude-opus": "databricks-claude-opus-5-5",
+        "claude-opus-5.1": "databricks-claude-opus-5-1",
+        "claude-opus-6": "databricks-claude-opus-6",
+        "claude-opus-5-5-fast": "databricks-claude-opus-5-5-fast"
+    },
+    "end_to_end_short_names": {
+        "claude-opus-5-5": "claude-opus-5-5",
+        "claude-sonnet-5-5": "claude-sonnet-5-5",
+        "claude-haiku-5.5": "claude-haiku-5-5"
+    },
+    "closed_previously_unverified": {
+        "item": "whether Opus 5.5 upstream accepts output_config.effort",
+        "why_it_could_not_close_before_release": "the old gateway stripped the field before the request left, so it could not be probed from outside",
+        "result": "accepted; claude-opus-5-5 returned x-claude-effort-forwarded: low with HTTP 200, while claude-sonnet-5-5 correctly returned x-lb-dropped-parameters",
+        "revert_needed": false
+    },
+    "upstream_inventory_probed": {
+        "probed_on": "2026-10-10",
+        "method": "minimal live requests",
+        "opus": ["4-5", "4-6", "4-7", "4-8", "5", "5-5"],
+        "sonnet": ["4-6", "5", "5-5"],
+        "haiku": ["4-5", "5-5"],
+        "fable": ["5", "5-1"],
+        "rejected": ["opus-5-1", "sonnet-5-1", "opus-6", "haiku-5", "opus-5-5-fast", "opus-4-8-fast"],
+        "note": "haiku has no version 5; it goes straight from 4-5 to 5-5"
+    },
+    "tests": {
+        "local_total": {"passed": 897, "subtests_passed": 834, "skipped": 6, "delta_vs_previous": 27},
+        "in_image": {"passed": 767, "subtests_passed": 692, "skipped": 7, "failed": 0, "network": "none"},
+        "in_image_changed_files_only": {"passed": 77, "subtests_passed": 68, "skipped": 1},
+        "in_image_source_identity": "main.py and effort_compat.py sha256 compared byte-for-byte against the release image; only pytest layers added, application source not mount-replaced",
+        "in_image_exclusions_are_environmental": "operations release package and openai/anthropic test SDKs are not in the runtime image by design, and CLAUDE.md / docs / model-capabilities.example.json are not runtime files; each exclusion was checked individually and none is a regression",
+        "ui": ["tests/test_copilot_pricing_ui.cjs", "tests/test_dashboard_ui.cjs"],
+        "ci_checks_passed": 6
+    },
+    "corrections": {
+        "retracted_claim": "PR #26 stated Opus/Sonnet/Haiku 5.5 were 6/6 stable across all endpoints",
+        "status": "true when measured, not true at all times",
+        "post_release_resample": {"opus-5-5": "5/6", "sonnet-5-5": "6/6", "haiku-5-5": "6/6", "opus-5": "6/6"}
+    },
+    "unverified_boundaries": [
+        "Opus 5.5 is intermittently capacity-limited on Databricks (5/6 sampled after release); rejected requests return TEMPORARILY_UNAVAILABLE. This is upstream capacity with no gateway-side control and must not be read as a regression of this change. The ratio is a point-in-time sample, not a stability guarantee",
+        "Fable 5.1 is region-limited (2 of 6 samples succeeded; the rest NOT_FOUND 'not available in your region'); it needs an endpoints[].models restriction, which is a configuration action not performed in this release",
+        "Haiku 5.5 pricing covers only the <=100K prompt tier; the >100K tier is 5x and under-reported",
+        "no database snapshot or isolated restore verification was performed",
+        "no independent QA review was scheduled",
+        "the three upstream rejections carried over from the previous release (120-second CANCEL, REFUSED_STREAM throttling, bare response.failed) were not touched and remain unresolved"
+    ],
+    "behaviour_changes_callers_should_know": {
+        "claude-opus-5.1": "was silently opus-5, now resolves to opus-5-1 and gets an explicit upstream 400",
+        "bare_family_aliases": "claude-opus / claude-sonnet moved from 4-7 / 4-6 to 5-5",
+        "claude-3-opus-20240229": "date stamp stripped leaves no version, so it falls to the family default (5-5)"
+    },
+    "deployment_spec_changes": ["image", "source-revision annotation"],
+    "deployment_spec_unchanged": [
+        "replicas", "resource requests", "service selectors", "ingress",
+        "config and credentials", "three probes", "preStop", "terminationGracePeriodSeconds",
+        "environment variables"
+    ]
+}
