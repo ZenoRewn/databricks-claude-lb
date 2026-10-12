@@ -1497,8 +1497,17 @@ def calculate_cost(model_name: str, input_tokens: int, output_tokens: int,
 def historical_model_cost(model, stats):
     """Price a read-only aggregate view without claiming a provider or past tariff."""
     # Anthropic input excludes caches; the OpenAI-style adapters report inclusive
-    # input. Daily storage has no provider column, so do not infer the provider.
-    anthropic = model.lower().startswith(('databricks-', 'claude-', 'opus-', 'sonnet-', 'haiku-', 'fable-'))
+    # input. Daily storage has no provider column, so the recorded name is the
+    # only signal — and the two channels use different names: Databricks records
+    # the mapped `databricks-` form while Copilot records its own id.
+    #
+    # A bare `claude-*` row therefore comes from Copilot and must be priced on
+    # the Copilot basis, not the public Anthropic API price. Verified against
+    # production on 2026-10-12: usage_daily held 14 Claude rows, every one
+    # `databricks-` prefixed, and zero bare `claude-*` rows, so no existing row
+    # changes basis here. Bare family names (opus-/sonnet-/…) stay on the
+    # Anthropic basis — those are legacy Databricks aliases, not Copilot ids.
+    anthropic = model.lower().startswith(('databricks-', 'opus-', 'sonnet-', 'haiku-', 'fable-'))
     quote = None if anthropic else estimate_history_reference(model, stats)
     requests = stats.get('requests', 0)
     if quote is None:
@@ -7478,13 +7487,48 @@ def _verify_lb_api_key(actual_key: str) -> bool:
     return False
 
 
+OPENAI_STYLE_PROVIDERS = ("copilot", "azure_openai")
+
+
+def _openai_provider_order(model: str) -> tuple:
+    """OpenAI 风格入口的 provider 尝试顺序。
+
+    偏好是**重排而非筛除**：运维列出的 provider 提到前面，未列出的按默认顺序
+    （Copilot 优先 → Azure）接在后面，fallback 能力不丢。`databricks` 出现在
+    偏好里会被忽略 —— 它服务 /v1/messages，不服务这两个入口。
+    """
+    store = key_policy_store
+    preferred = store.model_preference(model) if store is not None else ()
+    order = [p for p in preferred if p in OPENAI_STYLE_PROVIDERS]
+    order += [p for p in OPENAI_STYLE_PROVIDERS if p not in order]
+    return tuple(order)
+
+
+def _model_pinned_to_openai_style_provider(model: str) -> bool:
+    """该模型是否被显式指到某个 OpenAI 风格 provider。"""
+    store = key_policy_store
+    if store is None:
+        return False
+    return any(p in OPENAI_STYLE_PROVIDERS for p in store.model_preference(model))
+
+
 def _reject_anthropic_on_openai(model: str):
-    """claude-* 模型不应该走 OpenAI 风格端点；明确拒绝避免混淆"""
-    if "claude" in (model or "").lower():
+    """claude-* 默认不走 OpenAI 风格端点；逐模型显式指派后才放行。
+
+    放行是**按模型 opt-in**，不是整族开闸：只有当运维给这个具体模型配了指向
+    Copilot/Azure 的偏好时才允许。没配就保持与此前完全一致的 400，所以既有
+    客户端行为不变。
+
+    注意作用范围：Copilot 原生服务 claude 的 Responses/Chat 形状，所以这里能
+    放行；`/v1/messages` 仍然只走 Databricks —— 从 Copilot 提供 Anthropic
+    Messages 协议需要双向适配器（本仓库能解析 Anthropic SSE，但没有合成器）。
+    """
+    if "claude" in (model or "").lower() and not _model_pinned_to_openai_style_provider(model):
         raise HTTPException(
             status_code=400,
             detail={"error": {"message":
-                f"Anthropic model '{model}' must use /v1/messages (Databricks), not OpenAI-style endpoints"}},
+                f"Anthropic model '{model}' must use /v1/messages (Databricks), not OpenAI-style "
+                f"endpoints. Map it to a provider explicitly to serve it here."}},
         )
 
 
@@ -7987,6 +8031,35 @@ async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Opt
         raise HTTPException(status_code=404, detail={"error": {"message": msg}})
 
     copilot_failure: Optional[str] = None
+
+    # 尝试顺序由 per-model 偏好决定；默认仍是 Copilot 优先 → Azure fallback。
+    # 偏好只重排，不筛除，所以 fallback 能力保留。
+    order = _openai_provider_order(model)
+    if order[0] == "azure_openai" and azure_supports:
+        # Azure 优先：失败后仍可落到 Copilot（与默认方向对称）。
+        try:
+            return await azure_call(body, stream=stream)
+        except HTTPException as e:
+            retryable = (e.status_code >= 500 or (
+                e.status_code == 503 and isinstance(e.detail, dict)
+                and e.detail.get("error", {}).get("code") == "endpoint_unavailable"))
+            if not (retryable and copilot_can):
+                raise
+            azure_failure = f"Azure error {e.status_code}"
+            logger.info(f"[route][{rid}] Azure (preferred) failed for '{model}' "
+                        f"({e.status_code}), falling back to Copilot")
+            try:
+                if disconnect_checker is not None:
+                    return await copilot_call(body, stream=stream,
+                                              disconnect_checker=disconnect_checker,
+                                              request_id=request_id)
+                return await copilot_call(body, stream=stream, request_id=request_id)
+            except HTTPException as inner:
+                detail = inner.detail
+                if isinstance(detail, dict) and "error" in detail:
+                    detail["error"]["azure_attempt"] = azure_failure
+                raise HTTPException(status_code=inner.status_code, detail=detail,
+                                    headers=inner.headers) from inner
 
     # 1) 优先 Copilot
     if copilot_can:
@@ -8808,6 +8881,74 @@ async def admin_copilot_reload(request: Request, x_api_key: Optional[str] = Head
             item["error"] = f"{type(e).__name__}: {e}"
         results.append(item)
     return {"endpoints": results}
+
+
+@app.get("/admin/model-routing")
+async def admin_model_routing(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：per-model 的 provider 优先序。"""
+    _require_admin_key(request, x_api_key)
+    store = key_policy_store
+    preferences = store.model_preferences_snapshot() if store is not None else {}
+    return {
+        "preferences": [{"model": model, "providers": list(order),
+                         "effective_openai_order": list(_openai_provider_order(model))}
+                        for model, order in sorted(preferences.items())],
+        "providers": list(PROVIDER_IDS),
+        "provider_labels": dict(PROVIDER_LABELS),
+        "default_openai_order": list(OPENAI_STYLE_PROVIDERS),
+        "policy": _policy_status_view(),
+        "note": ("A preference reorders providers, it does not remove any, so fallback is kept. "
+                 "'databricks' in a preference only opens claude-* on the OpenAI-style entry "
+                 "points; /v1/messages stays Databricks-only."),
+    }
+
+
+@app.put("/admin/model-routing/{model}")
+async def admin_set_model_routing(model: str, request: Request,
+                                  x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：设置某模型的 provider 优先序（顺序即偏好，不去重不重排）。"""
+    _require_admin_key(request, x_api_key)
+    if key_policy_store is None:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "policy_store_unavailable",
+            "message": "Model routing storage is not configured."}})
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail={"error": {"message": "Body must be JSON"}})
+    try:
+        order = await key_policy_store.set_model_preference(model, (payload or {}).get("providers"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"error": {
+            "code": "invalid_model_routing", "message": str(e)}})
+    except Exception as e:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "policy_write_failed", "message": f"{type(e).__name__}"}})
+    return {"model": model, "providers": list(order),
+            "effective_openai_order": list(_openai_provider_order(model)),
+            # 只有本来会被拒的 claude-* 才算「被这条偏好放行」。
+            "opens_claude_on_openai_entry_points": ("claude" in model.lower()
+                                                    and _model_pinned_to_openai_style_provider(model)),
+            "policy": _policy_status_view()}
+
+
+@app.delete("/admin/model-routing/{model}")
+async def admin_clear_model_routing(model: str, request: Request,
+                                    x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：清除偏好，回到默认顺序（claude-* 也随之重新被拒）。"""
+    _require_admin_key(request, x_api_key)
+    if key_policy_store is None:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "policy_store_unavailable",
+            "message": "Model routing storage is not configured."}})
+    try:
+        await key_policy_store.clear_model_preference(model)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "policy_write_failed", "message": f"{type(e).__name__}"}})
+    return {"model": model, "providers": [],
+            "effective_openai_order": list(_openai_provider_order(model)),
+            "policy": _policy_status_view()}
 
 
 async def _discover_copilot_capability(endpoint: "CopilotEndpoint") -> list:

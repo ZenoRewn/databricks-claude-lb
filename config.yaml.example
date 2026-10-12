@@ -102,7 +102,9 @@ endpoints:
 
 # GitHub Copilot 端点配置（可选）
 # 与 Azure OpenAI 共享 /v1/chat/completions 与 /v1/responses 路由：
-#   - claude-* 模型 → Databricks（永远不会走 Copilot/Azure）
+#   - claude-* 模型 → 默认只走 Databricks。例外是逐模型 opt-in：用
+#     PUT /admin/model-routing/{model} 给某个 claude 模型配指向 copilot 的优先序，
+#     该模型即在 OpenAI 风格入口放行。/v1/messages 仍然只走 Databricks。
 #   - 其他模型 → Copilot 优先，模型不支持/全部熔断 → fallback 到 Azure OpenAI
 #   - /v1/models 会列出 Azure deployments、显式 Copilot models；models: [] 通配时使用内置常用模型目录
 #   - gpt-5.5/gpt-5.6-*/gpt-5-codex 等 Responses-only 模型如从 /v1/chat/completions 进入，会 buffered 转到 /v1/responses

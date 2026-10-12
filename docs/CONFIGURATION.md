@@ -58,6 +58,26 @@ Claude 模型使用 `/v1/messages`。在 OpenAI 风格入口传入 Claude 模型
 
 目录里的模型必须至少能被 `MODEL_PRICING` 或 `copilot_pricing` 之一计价，否则成本会静默漏统计。两张表分工不同：前者是公开 API 价（历史/通用口径），后者是 Copilot 官方分档价并用于实时估算，所以 Copilot 专属模型（如 grok、mai-code）只在后者有价，不应为其臆造公开 API 价。
 
+### 模型 → Provider 优先序
+
+`PUT /admin/model-routing/{model}` 给单个模型设置 provider 顺序（Dashboard「密钥与渠道」页也可操作）。**顺序即偏好**，不去重也不重排，重复项会被拒。
+
+**偏好只重排，不筛除。** 列出的 provider 提到前面，未列出的按默认顺序（`copilot` → `azure_openai`）接在后面，所以 fallback 能力完整保留。筛除是 per-key allowlist 的职责；两者叠加后的候选是：
+
+```
+(能服务该模型的 provider) ∩ (该 key 允许的 provider)，先按偏好排序，再按默认顺序
+```
+
+偏好里的 `databricks` 不参与 OpenAI 风格入口的顺序 —— 它服务 `/v1/messages`。
+
+### `claude-*` 走 GHCP：逐模型 opt-in
+
+`claude-*` 默认仍被 OpenAI 风格入口拒绝（400）。给**某个具体模型**配置指向 `copilot`/`azure_openai` 的偏好后，该模型在这些入口放行 —— Copilot 原生服务它的 Responses/Chat 形状。这是逐模型开关，不是整族开闸：开放 `claude-opus-5.5` 不会同时开放 `claude-sonnet-5.5`。清除偏好即恢复拒绝。
+
+**作用范围限制：`/v1/messages` 仍然只走 Databricks。** 从 Copilot 提供 Anthropic Messages 协议需要双向适配器 —— 本仓库能解析 Anthropic SSE（`main.py` 的流观测与 `release_probe`），但没有合成器，`chat_adapter` 是 Chat→Responses 的 OpenAI 内部转换。所以通过 Claude Code 这类走 `/v1/messages` 的客户端**用不到**这条通路；它面向 OpenAI 风格客户端（Codex、OpenAI SDK）。
+
+**计价必须分渠道**，否则费用会算错。区分依据是记录的模型名：Databricks 记映射后的 `databricks-claude-*`，Copilot 记自己的 id（裸 `claude-*`）。前者按 Anthropic 公开 API 价与「input 不含 cache」口径，后者按 `copilot_pricing` 分档价与 inclusive-input 口径。2026-10-12 核对生产 `usage_daily`：14 条 Claude 行全部带 `databricks-` 前缀、零条裸 `claude-*`，所以这项修正不改变任何既有行的计价基准。
+
 ### GHCP 多账户：启用与按账户勾选模型
 
 账户凭据不进配置。`endpoints[]` 里只写 `name`，token 会按 `copilot-auth-<name>.json` 从 device-flow 缓存目录解析（AKS 上由 Secret 挂载），`token_source` 记为 `file`，因此 `/admin/copilot/reload` 可以重读它 —— 写死在配置里的明文（`literal`）做不到。

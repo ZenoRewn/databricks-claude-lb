@@ -7,7 +7,9 @@ Author: Zeno Ren
 ## 不变量
 
 - 推理 POST 的执行状态不明、已输出内容或可能产生工具副作用时，不自动重放；不能通过重新推理补账。见 [可靠性契约](docs/RESILIENCE.md)。
-- 保留 provider/model 兼容性、账户 pinning 和会话亲和。Copilot 优先；仅明确未准入或不支持模型等既有分支允许 Azure fallback，不能泛化成任意 503 后重试。
+- 保留 provider/model 兼容性、账户 pinning 和会话亲和。默认 Copilot 优先；仅明确未准入或不支持模型等既有分支允许 Azure fallback，不能泛化成任意 503 后重试。per-model 优先序可以**重排**这两个 provider（`/admin/model-routing`），但只重排不筛除，fallback 必须保留；筛除是 per-key allowlist 的职责。
+- `claude-*` 默认只走 Databricks 的 `/v1/messages`。**例外是逐模型 opt-in**：给某个 claude 模型显式配置指向 Copilot/Azure 的优先序后，该模型在 OpenAI 风格入口放行（Copilot 原生服务其 Responses/Chat 形状）。没配就保持 400，既有行为不变。`/v1/messages` 仍然只走 Databricks —— 从 Copilot 提供 Anthropic Messages 协议需要双向适配器，本仓库只有解析没有合成。
+- 计价按**记录的模型名**区分渠道：`databricks-claude-*`（及裸 `opus-/sonnet-/haiku-/fable-` 旧别名）按 Anthropic 公开 API 价与「input 不含 cache」口径；裸 `claude-*` 来自 Copilot，按 copilot_pricing 分档价与 inclusive-input 口径。两者不可混用。
 - HTTP 200 或首个 SSE chunk 不代表生成完成。保留成功终态、失败、incomplete、refusal 和工具语义，见 [流协议](docs/STREAM_PROTOCOL.md)。
 - MySQL 账本幂等防止已持久批次重复累计；尚未 flush 的内存事件仍可能丢失，不能承诺零 RPO。JSON 后端只支持单写者。
 - Dashboard 的未知费用保持未知，部分计价保留已知小计。Copilot 实时估算采用 [GHCP 价格口径](docs/COPILOT_PRICING.md)，历史参考价不能混称实际渠道账单。
@@ -46,6 +48,9 @@ Copilot 的 opaque-state 拒绝是请求级问题，不应污染账户熔断；�
 | `/admin/copilot/reload` | POST | 需要 | 运维端点：从源重读所有 Copilot endpoint 的 long-lived token + 强制刷新 session（K8s Secret rotation 后立刻生效） |
 | `/admin/copilot/reset-pool` | POST | 需要 | 运维端点：重建共享 httpx.AsyncClient，逐出所有 keepalive/半开连接 |
 | `/admin/model-capabilities` | GET | 需要 | 渠道/模型/API 能力目录、来源与有效期；未验证或过期能力不自动变成硬限额 |
+| `/admin/model-routing` | GET | 需要 | per-model 的 provider 优先序与生效顺序 |
+| `/admin/model-routing/{model}` | PUT | 需要 | 设置优先序（**顺序即偏好**，不去重不重排）。偏好只重排不筛除，fallback 保留；给 `claude-*` 配指向 Copilot/Azure 的偏好会在 OpenAI 风格入口放行该模型 |
+| `/admin/model-routing/{model}` | DELETE | 需要 | 清除偏好回到默认顺序；`claude-*` 随之重新被 OpenAI 风格入口拒绝 |
 | `/admin/copilot/accounts` | GET | 需要 | Copilot 账户的启用态、已发现能力（capability）与允许模型；只返回账户名与模型名，不返回 token。请求数为进程内累计 |
 | `/admin/copilot/accounts/{account}` | PUT | 需要 | 切换账户启用态与允许模型。**只能在已发现 capability 内勾选**，空列表被拒（停用请用 `enabled: false`）；写失败时执行中的策略不变 |
 | `/admin/copilot/accounts/{account}/discover` | POST | 需要 | 向上游重新发现该账户的模型能力并存快照。时点发现，不是能力认证；需带 editor 头部，否则 GitHub 返 403 |
