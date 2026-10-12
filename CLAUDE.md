@@ -46,6 +46,9 @@ Copilot 的 opaque-state 拒绝是请求级问题，不应污染账户熔断；�
 | `/admin/copilot/reload` | POST | 需要 | 运维端点：从源重读所有 Copilot endpoint 的 long-lived token + 强制刷新 session（K8s Secret rotation 后立刻生效） |
 | `/admin/copilot/reset-pool` | POST | 需要 | 运维端点：重建共享 httpx.AsyncClient，逐出所有 keepalive/半开连接 |
 | `/admin/model-capabilities` | GET | 需要 | 渠道/模型/API 能力目录、来源与有效期；未验证或过期能力不自动变成硬限额 |
+| `/admin/api-keys` | GET | 需要 | 已激活密钥的**身份**与渠道限制：掩码 + sha256 前缀，**绝不返回明文**，短密钥连掩码都不给。请求数与最后使用时间是进程内计数，重启归零 |
+| `/admin/api-keys/{tenant}/providers` | PUT | 需要 | 设置该租户允许的后端 provider（allowlist，只做减法）。写失败时执行中的策略保持不变，不假装成功 |
+| `/admin/api-keys/reload` | POST | 需要 | 从 `CONFIG_PATH` 重读客户端密钥（同 `/admin/copilot/reload` 的模型：**源头轮换 + 网关重读**，网关不生成密钥）。校验在替换之前，坏配置不会把调用方锁在门外；`${ENV}` 值仍需滚动重启 |
 | `/config/effective` | GET | 需要 | 返回实际生效设置与构建身份，不用于公开版本展示 |
 | `/version` | GET | 不需要 | 有界公开构建标识：源码提交、GitHub 链接、运行文件匹配状态；无配置/凭据，不宣称 GitHub 最新状态 |
 | `/stats` | GET | 不需要 | 端点统计（含成本估算、Azure OpenAI、GitHub Copilot） |

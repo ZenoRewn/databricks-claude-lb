@@ -20,6 +20,20 @@ load_balancer:
 
 auth:
   api_key: your-api-key-here      # 客户端认证密钥，Claude Code 需要使用此密钥
+  # 多租户密钥（与上面的单 api_key 可共存）。租户名用作 metrics label、
+  # 结构化日志字段，以及渠道限制的主键。
+  # api_keys:
+  #   default: ${LB_KEY_DEFAULT}
+  #   team-a: ${LB_KEY_TEAM_A}
+  #
+  # 每个密钥可用的后端渠道（allowlist）**不在这里配置** —— 它存在用量存储里，
+  # 通过 Dashboard「密钥与渠道」页或 PUT /admin/api-keys/{tenant}/providers 设置，
+  # 立即生效并跨重启保留。未设置的租户默认允许全部渠道。
+  # 渠道 id：databricks(ADB) / copilot(GHCP) / azure_openai(Foundry)。
+  #
+  # 轮换密钥：在本文件或 ${ENV} 源头替换后，调 POST /admin/api-keys/reload
+  # 让网关重读，无需重启 Pod。网关不生成也不存储客户端密钥。注意 ${ENV}
+  # 形式的值取自进程环境，改文件不会改变它们，仍需滚动重启。
 
 endpoints:
   # Databricks Workspace 端点配置

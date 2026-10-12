@@ -68,6 +68,16 @@ async def check_schema(storage):
             schema['unique_indexes']=indexes
             await cur.execute("SELECT COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='usage_batch_ledger' AND INDEX_NAME='usage_batch_event_date' ORDER BY SEQ_IN_INDEX")
             schema['event_date_index']=[row[0] for row in await cur.fetchall()]
+            # Authorisation data deserves the same drift check, but the table is
+            # created lazily on first use, so it is absent before the release
+            # that introduces it. Validate its shape only once it exists —
+            # requiring it here would block that very first release.
+            await cur.execute("SELECT COLUMN_NAME,DATA_TYPE,IS_NULLABLE,CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='api_key_policy'")
+            schema['policy_columns']={row[0]:list(row[1:]) for row in await cur.fetchall()}
+            await cur.execute("SELECT INDEX_NAME,COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='api_key_policy' AND NON_UNIQUE=0 ORDER BY INDEX_NAME,SEQ_IN_INDEX")
+            policy_indexes={}
+            for index,column in await cur.fetchall():policy_indexes.setdefault(index,[]).append(column)
+            schema['policy_unique_indexes']=policy_indexes
             validate_schema(schema)
     finally:conn.close()
 
@@ -84,6 +94,15 @@ def validate_schema(schema):
     if schema['unique_indexes']!={'usage_batch_ledger':{'PRIMARY':['batch_id']},'usage_daily':{'PRIMARY':['date','model']}}:
         raise ValueError('usage_schema_unique_keys_mismatch')
     if schema['event_date_index']!=['event_date']:raise ValueError('usage_schema_retention_index_missing')
+    # Absent is accepted (pre-introduction); present must match exactly. A
+    # tenant column that silently widened or lost its primary key would change
+    # which allow-list a request resolves to.
+    if schema.get('policy_columns'):
+        expected={'tenant':['varchar','NO',190],'providers':['varchar','NO',255],
+                  'updated_at':['timestamp','NO',None]}
+        if schema['policy_columns']!=expected:raise ValueError('policy_schema_columns_mismatch')
+        if schema.get('policy_unique_indexes')!={'PRIMARY':['tenant']}:
+            raise ValueError('policy_schema_unique_keys_mismatch')
 
 
 def success_payload(payload,api):
