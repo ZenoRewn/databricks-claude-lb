@@ -46,6 +46,9 @@ Copilot 的 opaque-state 拒绝是请求级问题，不应污染账户熔断；�
 | `/admin/copilot/reload` | POST | 需要 | 运维端点：从源重读所有 Copilot endpoint 的 long-lived token + 强制刷新 session（K8s Secret rotation 后立刻生效） |
 | `/admin/copilot/reset-pool` | POST | 需要 | 运维端点：重建共享 httpx.AsyncClient，逐出所有 keepalive/半开连接 |
 | `/admin/model-capabilities` | GET | 需要 | 渠道/模型/API 能力目录、来源与有效期；未验证或过期能力不自动变成硬限额 |
+| `/admin/copilot/accounts` | GET | 需要 | Copilot 账户的启用态、已发现能力（capability）与允许模型；只返回账户名与模型名，不返回 token。请求数为进程内累计 |
+| `/admin/copilot/accounts/{account}` | PUT | 需要 | 切换账户启用态与允许模型。**只能在已发现 capability 内勾选**，空列表被拒（停用请用 `enabled: false`）；写失败时执行中的策略不变 |
+| `/admin/copilot/accounts/{account}/discover` | POST | 需要 | 向上游重新发现该账户的模型能力并存快照。时点发现，不是能力认证；需带 editor 头部，否则 GitHub 返 403 |
 | `/admin/api-keys` | GET | 需要 | 已激活密钥的**身份**与渠道限制：掩码 + sha256 前缀，**绝不返回明文**，短密钥连掩码都不给。请求数与最后使用时间是进程内计数，重启归零 |
 | `/admin/api-keys/{tenant}/providers` | PUT | 需要 | 设置该租户允许的后端 provider（allowlist，只做减法）。写失败时执行中的策略保持不变，不假装成功 |
 | `/admin/api-keys/reload` | POST | 需要 | 从 `CONFIG_PATH` 重读客户端密钥（同 `/admin/copilot/reload` 的模型：**源头轮换 + 网关重读**，网关不生成密钥）。校验在替换之前，坏配置不会把调用方锁在门外；`${ENV}` 值仍需滚动重启 |

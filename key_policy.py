@@ -1,4 +1,15 @@
-"""Per-tenant provider allow-lists. Author: Zeno Ren.
+"""Runtime policy store: per-tenant provider allow-lists and Copilot account
+enablement. Author: Zeno Ren.
+
+Two policies live here because they share one cache, one degradation contract
+and one status surface; splitting them would mean two stores to reason about
+during an outage.
+
+Copilot accounts carry two layers. `capability` is discovered from upstream and
+read-only — it records what an account actually serves. `allowed_models` is the
+operator's subset of it. A write naming a model outside capability is refused,
+so an account can never be told to serve something it does not have. A
+hand-maintained list would drift; a discovered one cannot.
 
 Scope and deliberate limits:
 
@@ -34,6 +45,9 @@ PROVIDER_LABELS = {'databricks': 'ADB', 'copilot': 'GHCP', 'azure_openai': 'Foun
 ALL_PROVIDERS = frozenset(PROVIDER_IDS)
 
 MASK_MIN_LENGTH = 12
+
+# Distinguishes "caller omitted allowed_models" from "caller asked to clear it".
+_UNSET = object()
 
 
 def normalise_providers(value) -> tuple:
@@ -78,6 +92,7 @@ class KeyPolicyStore:
         requested = config.get('type', 'memory')
         self.backend = requested if requested in ('mysql', 'json') else 'memory'
         self._policies: dict = {}
+        self._accounts: dict = {}
         self._state = 'unavailable'
         self._last_loaded_at: Optional[float] = None
         self._last_error_type: Optional[str] = None
@@ -109,6 +124,7 @@ class KeyPolicyStore:
         try:
             async with asyncio.timeout(IO_TIMEOUT):
                 loaded = await self._backend_load()
+                accounts = await self._backend_load_accounts()
         except Exception as exc:
             self._last_error_type = type(exc).__name__
             # Never loaded → no restriction; loaded before → keep enforcing it.
@@ -116,6 +132,7 @@ class KeyPolicyStore:
             logger.warning('key_policy: load failed (%s); state=%s', self._last_error_type, self._state)
             return self.status()
         self._policies = loaded
+        self._accounts = accounts
         self._state = 'loaded'
         self._last_loaded_at = time.time()
         self._last_error_type = None
@@ -139,10 +156,116 @@ class KeyPolicyStore:
             'state': self._state,
             'backend': self.backend,
             'tenants': len(self._policies),
+            'accounts': len(self._accounts),
             'last_loaded_at': self._last_loaded_at,
             'last_error_type': self._last_error_type,
             'unrestricted_when_unavailable': True,
         }
+
+    # -- Copilot account enablement --------------------------------------
+
+    def account_policy(self, name: str) -> dict:
+        """Effective record for one account; defaults keep existing config intact."""
+        record = self._accounts.get(name) or {}
+        return {
+            'enabled': bool(record.get('enabled', True)),
+            'allowed_models': record.get('allowed_models'),
+            'capability': tuple(record.get('capability') or ()),
+            'capability_at': record.get('capability_at'),
+            'configured': name in self._accounts,
+        }
+
+    def account_allows(self, name: str, model: str) -> bool:
+        """有效集 = capability ∩ allowlist。只做减法。
+
+        capability 本身就是外层边界：上游说这个账户没有该模型，把请求路由过去
+        没有意义。未发现过 capability（空）时不据此限制，避免「还没发现」被当成
+        「什么都没有」。无记录或存储未加载时一律放行。
+        """
+        if self._state == 'unavailable':
+            return True
+        record = self._accounts.get(name)
+        if not record:
+            return True
+        if not record.get('enabled', True):
+            return False
+        capability = record.get('capability') or ()
+        if capability and model not in capability:
+            return False
+        allowed = record.get('allowed_models')
+        if allowed is None:
+            return True
+        return model in allowed
+
+    def accounts_snapshot(self) -> dict:
+        return {name: self.account_policy(name) for name in self._accounts}
+
+    async def set_account_capability(self, name: str, models) -> tuple:
+        """Record what upstream says this account serves. Read-only to operators."""
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError('account must be a non-empty string')
+        discovered = tuple(sorted({str(m) for m in (models or []) if str(m)}))
+        async with self._lock:
+            record = dict(self._accounts.get(name.strip()) or {})
+            record['capability'] = discovered
+            record['capability_at'] = time.time()
+            record.setdefault('enabled', True)
+            record.setdefault('allowed_models', None)
+            # Capability can shrink; drop allow-list entries upstream no longer
+            # offers rather than keeping a selection that cannot be served.
+            if record.get('allowed_models') is not None:
+                kept = tuple(m for m in record['allowed_models'] if m in discovered)
+                record['allowed_models'] = kept or None
+            async with asyncio.timeout(IO_TIMEOUT):
+                await self._backend_write_account(name.strip(), record)
+            self._accounts[name.strip()] = record
+            if self._state == 'unavailable':
+                self._state = 'loaded'
+                self._last_loaded_at = time.time()
+        return discovered
+
+    async def set_account(self, name: str, *, enabled=None, allowed_models=_UNSET) -> dict:
+        """Toggle an account and/or set its allow-list within capability."""
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError('account must be a non-empty string')
+        key = name.strip()
+        current = dict(self._accounts.get(key) or {})
+        capability = tuple(current.get('capability') or ())
+        record = {
+            'enabled': current.get('enabled', True),
+            'allowed_models': current.get('allowed_models'),
+            'capability': capability,
+            'capability_at': current.get('capability_at'),
+        }
+        if enabled is not None:
+            if not isinstance(enabled, bool):
+                raise ValueError('enabled must be a boolean')
+            record['enabled'] = enabled
+        if allowed_models is not _UNSET:
+            if allowed_models is None:
+                record['allowed_models'] = None
+            else:
+                if not isinstance(allowed_models, (list, tuple, set, frozenset)):
+                    raise ValueError('allowed_models must be a list of model ids or null')
+                chosen = tuple(sorted({str(m) for m in allowed_models if str(m)}))
+                if not chosen:
+                    # Disabling is the explicit way to stop using an account; an
+                    # empty allow-list would do it silently under another name.
+                    raise ValueError('allowed_models must name at least one model, or be null')
+                if capability:
+                    outside = sorted(set(chosen) - set(capability))
+                    if outside:
+                        raise ValueError(
+                            f'models outside this account\'s discovered capability: {", ".join(outside)}')
+                record['allowed_models'] = chosen
+        async with self._lock:
+            async with asyncio.timeout(IO_TIMEOUT):
+                await self._backend_write_account(key, record)
+            self._accounts[key] = record
+            if self._state == 'unavailable':
+                self._state = 'loaded'
+                self._last_loaded_at = time.time()
+        return self.account_policy(key)
 
     # -- writes ----------------------------------------------------------
 
@@ -187,6 +310,73 @@ class KeyPolicyStore:
             return {name: normalise_providers(value) for name, value in raw.items()}
         return dict(self._policies)
 
+    async def _backend_load_accounts(self) -> dict:
+        if self.backend == 'mysql':
+            await self._ensure_pool()
+            async with self._pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute('SELECT account, enabled, allowed_models, capability, '
+                                      'UNIX_TIMESTAMP(capability_at) FROM copilot_account_policy')
+                    rows = await cur.fetchall()
+            return {row[0]: self._decode_account(row[1], row[2], row[3], row[4]) for row in rows}
+        if self.backend == 'json':
+            path = self._accounts_path()
+            if not path.exists():
+                return {}
+            raw = json.loads(path.read_text() or '{}')
+            return {name: self._normalise_account(value) for name, value in raw.items()}
+        return dict(self._accounts)
+
+    @staticmethod
+    def _decode_account(enabled, allowed, capability, capability_at) -> dict:
+        allowed_list = json.loads(allowed) if allowed else None
+        return {
+            'enabled': bool(enabled),
+            'allowed_models': tuple(allowed_list) if allowed_list else None,
+            'capability': tuple(json.loads(capability) if capability else ()),
+            'capability_at': float(capability_at) if capability_at is not None else None,
+        }
+
+    @staticmethod
+    def _normalise_account(value: dict) -> dict:
+        allowed = value.get('allowed_models')
+        return {
+            'enabled': bool(value.get('enabled', True)),
+            'allowed_models': tuple(allowed) if allowed else None,
+            'capability': tuple(value.get('capability') or ()),
+            'capability_at': value.get('capability_at'),
+        }
+
+    async def _backend_write_account(self, account: str, record: dict) -> None:
+        if self.backend == 'mysql':
+            await self._ensure_pool()
+            allowed = record.get('allowed_models')
+            async with self._pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        'INSERT INTO copilot_account_policy '
+                        '(account, enabled, allowed_models, capability, capability_at) '
+                        'VALUES (%s, %s, %s, %s, FROM_UNIXTIME(%s)) '
+                        'ON DUPLICATE KEY UPDATE enabled = VALUES(enabled), '
+                        'allowed_models = VALUES(allowed_models), '
+                        'capability = VALUES(capability), capability_at = VALUES(capability_at)',
+                        (account, 1 if record.get('enabled', True) else 0,
+                         json.dumps(list(allowed)) if allowed else None,
+                         json.dumps(list(record.get('capability') or ())),
+                         record.get('capability_at')))
+            return
+        if self.backend == 'json':
+            merged = {**{n: dict(v) for n, v in self._accounts.items()}, account: dict(record)}
+            self._atomic_write_json(self._accounts_path(), {
+                name: {'enabled': bool(value.get('enabled', True)),
+                       'allowed_models': list(value['allowed_models']) if value.get('allowed_models') else None,
+                       'capability': list(value.get('capability') or ()),
+                       'capability_at': value.get('capability_at')}
+                for name, value in merged.items()})
+
+    def _accounts_path(self):
+        return self._path.parent / 'copilot_account_policy.json'
+
     async def _backend_write(self, tenant: str, providers: tuple) -> None:
         if self.backend == 'mysql':
             await self._ensure_pool()
@@ -213,15 +403,17 @@ class KeyPolicyStore:
             self._atomic_write(merged)
 
     def _atomic_write(self, policies: dict) -> None:
+        self._atomic_write_json(self._path, {name: list(value) for name, value in policies.items()})
+
+    def _atomic_write_json(self, path, payload: dict) -> None:
         # Single writer only, same constraint the JSON usage backend documents.
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps({name: list(value) for name, value in policies.items()},
-                             sort_keys=True, indent=1)
-        handle, temp = tempfile.mkstemp(dir=str(self._path.parent), suffix='.tmp')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        body = json.dumps(payload, sort_keys=True, indent=1)
+        handle, temp = tempfile.mkstemp(dir=str(path.parent), suffix='.tmp')
         try:
             with os.fdopen(handle, 'w') as fh:
-                fh.write(payload)
-            os.replace(temp, self._path)
+                fh.write(body)
+            os.replace(temp, path)
         except Exception:
             Path(temp).unlink(missing_ok=True)
             raise
@@ -253,5 +445,16 @@ class KeyPolicyStore:
                         providers VARCHAR(255) NOT NULL,
                         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                         PRIMARY KEY (tenant)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS copilot_account_policy (
+                        account VARCHAR(190) NOT NULL,
+                        enabled TINYINT NOT NULL DEFAULT 1,
+                        allowed_models TEXT NULL,
+                        capability TEXT NULL,
+                        capability_at TIMESTAMP NULL DEFAULT NULL,
+                        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        PRIMARY KEY (account)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)

@@ -184,5 +184,64 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   assert.ok(!requests.some(r => r.url.includes('lb-key-for-panel-tests')),
     'the key must never travel in a URL');
 
-  console.log('Dashboard UI: authenticated cleanup, honest errors, safe release identity, key panel passed.');
+  // ---- GHCP accounts ----
+  assert.match(html, /id="accountsContent"/, 'account area needs a container');
+  assert.match(html, /capability 是向上游的时点发现/, 'capability must be labelled as a snapshot');
+
+  context.renderAccounts({policy: {state: 'loaded', backend: 'mysql', tenants: 0},
+    accounts: [{account: 'biz', enabled: true, token_source: 'file', requests: 7,
+                capability: ['gpt-4o', 'kimi-k3'], capability_at: 1700000000,
+                allowed_models: ['gpt-4o']}]});
+  assert.match(element('accountsContent').innerHTML, /biz/);
+  assert.match(element('accountsContent').innerHTML, /已启用/);
+  assert.match(element('accountsContent').innerHTML, /kimi-k3/);
+  assert.doesNotMatch(element('accountsContent').innerHTML, /ghu_|Bearer/, 'no token material');
+
+  context.renderAccounts({policy: {state: 'loaded', backend: 'json', tenants: 0},
+    accounts: [{account: '<img onerror=bad>', enabled: false, token_source: null, requests: 0,
+                capability: [], capability_at: null, allowed_models: null}]});
+  assert.doesNotMatch(element('accountsContent').innerHTML, /<img onerror/, 'account names escaped');
+  assert.match(element('accountsContent').innerHTML, /尚未发现能力/);
+  assert.match(element('accountsContent').innerHTML, /已停用/);
+
+  // Unchecking every model must not reach the server — disabling is a separate control.
+  const accountNodes = [];
+  context.document.querySelectorAll = selector => {
+    if (selector.includes('[data-save]') || selector.includes('[data-save-account]')
+        || selector.includes('[data-discover]')) return [];
+    return accountNodes.filter(n => n.selector === selector);
+  };
+  element('keysAdminKey').value = 'lb-key-for-account-tests';
+  accountNodes.push({selector: '#accountsTable [data-enable="biz"]', checked: true, dataset: {}},
+    {selector: '#accountsTable [data-account="biz"]', checked: false, dataset: {model: 'gpt-4o'}});
+  requests = [];
+  await context.saveAccount('biz');
+  assert.equal(requests.length, 0, 'an all-unchecked save must be refused locally');
+  assert.match(element('keysStatus').textContent, /取消「启用」/);
+  assert.equal(element('keysAdminKey').value, '');
+
+  element('keysAdminKey').value = 'lb-key-for-account-tests';
+  context.fetch = async (url, options) => {
+    requests.push({url, options});
+    return {ok: true, status: 200, json: async () => ({discovered: 38, policy: {state: 'loaded', backend: 'mysql', tenants: 0}})};
+  };
+  requests = [];
+  await context.discoverAccount('biz');
+  assert.equal(requests[0].url, '/admin/copilot/accounts/biz/discover');
+  assert.equal(requests[0].options.method, 'POST');
+  assert.match(element('keysStatus').textContent, /非能力认证/);
+  assert.equal(element('keysAdminKey').value, '');
+  assert.ok(!requests.some(r => r.url.includes('lb-key-for-account-tests')));
+
+  element('keysAdminKey').value = 'lb-key-for-account-tests';
+  context.fetch = async (url, options) => {
+    requests.push({url, options});
+    return {ok: false, status: 503, json: async () => ({detail: {error: {code: 'policy_write_failed'}}})};
+  };
+  requests = [];
+  await context.discoverAccount('biz');
+  assert.match(element('keysStatus').textContent, /已有快照保持不变/,
+    'a failed discovery must not claim the snapshot changed');
+
+  console.log('Dashboard UI: authenticated cleanup, honest errors, safe release identity, key panel, accounts passed.');
 })().catch(error => {console.error(error); process.exitCode = 1;});

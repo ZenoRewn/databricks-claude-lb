@@ -2233,6 +2233,27 @@ COPILOT_AUTH_DIR = Path.home() / ".config" / "databricks-claude-lb"
 COPILOT_LEGACY_AUTH_FILE = Path.home() / ".config" / "copilot-lb" / "auth.json"
 
 
+def _copilot_account_policy(name: str) -> dict:
+    """账户的生效策略视图；无存储时等价于「启用且不限制」。"""
+    store = key_policy_store
+    if store is None:
+        return {"enabled": True, "allowed_models": None, "capability": (),
+                "capability_at": None, "configured": False}
+    return store.account_policy(name)
+
+
+def _copilot_account_allows(name: str, model: str) -> bool:
+    """运行时 Copilot 账户策略：禁用或未勾选则移出候选，只做减法。
+
+    策略存储未配置或从未加载成功时一律放行，既有配置行为不变。定义在
+    CopilotEndpoint 之前，因为 supports() 会调用它。
+    """
+    store = key_policy_store
+    if store is None:
+        return True
+    return store.account_allows(name, model)
+
+
 def _validate_copilot_api_types(value):
     if (not isinstance(value, (list, tuple)) or not value
             or any(not isinstance(v, str) or v not in ("responses", "chat") for v in value)
@@ -2253,7 +2274,12 @@ class CopilotEndpoint:
         self.api_types = _validate_copilot_api_types(self.api_types)
 
     def supports(self, model, api_type=None):
-        return (not self.models or model in self.models) and (api_type is None or api_type in self.api_types)
+        # 运行时账户策略放在这里，而不是逐个调用点 —— supports() 是所有候选判断
+        # 的唯一收口（含会话亲和用的「配置态合格集合」）。漏掉亲和那一处会让
+        # 已禁用账户仍参与哈希，再回落时把所有会话重新洗牌。
+        return (_copilot_account_allows(self.name, model)
+                and (not self.models or model in self.models)
+                and (api_type is None or api_type in self.api_types))
 
     # long-lived token 来源记录（用于运行时按需重读，支持 K8s Secret rotation）
     # 形如 {"type": "env", "key": "GITHUB_COPILOT_TOKEN_1"}
@@ -7494,13 +7520,20 @@ def _collect_model_catalog(azure=None, copilot=None, databricks=None) -> dict:
     if copilot:
         has_wildcard = False
         for ep in getattr(getattr(copilot, "load_balancer", None), "endpoints", []):
-            models = getattr(ep, "models", []) or []
-            if models:
-                for model in models:
-                    if model:
-                        catalog.setdefault(str(model), ())
-            else:
-                has_wildcard = True
+            name = getattr(ep, "name", "")
+            policy = _copilot_account_policy(name)
+            if not policy["enabled"]:
+                continue  # 目录要反映「现在真能用什么」，不是配置里写了什么
+            models = [str(m) for m in (getattr(ep, "models", []) or []) if m]
+            if not models:
+                # 通配端点：已发现的 capability 比静态核验表更准，优先用它；
+                # 从未发现过才回落静态表。
+                models = list(policy["capability"])
+                if not models:
+                    has_wildcard = True
+            for model in models:
+                if _copilot_account_allows(name, model):
+                    catalog.setdefault(model, ())
         if has_wildcard:
             catalog.update(OPENAI_COMPAT_DEFAULT_MODELS)
 
@@ -8775,6 +8808,138 @@ async def admin_copilot_reload(request: Request, x_api_key: Optional[str] = Head
             item["error"] = f"{type(e).__name__}: {e}"
         results.append(item)
     return {"endpoints": results}
+
+
+async def _discover_copilot_capability(endpoint: "CopilotEndpoint") -> list:
+    """问上游该账户实际服务哪些模型。时点发现，不是能力认证。
+
+    用网关自己的 editor 头部 —— 缺了它们 GitHub 会以 `Please only use
+    approved clients for Copilot.` 回 403，我排查时就先被这一点误导过。
+    """
+    session = await copilot_proxy.get_session_token(endpoint)
+    headers = {"Authorization": f"Bearer {session}", "Accept": "application/json",
+               "Editor-Version": COPILOT_HEADERS["Editor-Version"],
+               "Editor-Plugin-Version": COPILOT_HEADERS["Editor-Plugin-Version"],
+               "Copilot-Integration-Id": COPILOT_HEADERS["Copilot-Integration-Id"],
+               "User-Agent": COPILOT_HEADERS["User-Agent"]}
+    url = (endpoint.session_base_url or COPILOT_DEFAULT_BASE_URL).rstrip("/") + "/models"
+    async with httpx.AsyncClient(timeout=25.0) as client:
+        response = await client.get(url, headers=headers)
+    if response.status_code != 200:
+        raise HTTPException(status_code=502, detail={"error": {
+            "code": "capability_discovery_failed",
+            "message": f"Upstream returned {response.status_code} for the account model list."}})
+    payload = decode_json_response(response)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail={"error": {
+            "code": "capability_discovery_failed", "message": "Unparsable model list."}})
+    # 只收 chat 类：上游同一清单里还有 embeddings（实测 3 个），本网关不提供
+    # embeddings 入口，收进来会让 /models 宣传一个不存在的能力。
+    #
+    # 上游每个条目还自带 supported_endpoints（实测与我手工核验的结果一致），
+    # 用它替代静态注解表是更准的做法，但会改变 capability 的数据形状，留到第二步。
+    return sorted({str(item.get("id")) for item in (payload.get("data") or [])
+                   if isinstance(item, dict) and item.get("id")
+                   and (item.get("capabilities") or {}).get("type") == "chat"})
+
+
+def _copilot_account_view(endpoint: "CopilotEndpoint") -> dict:
+    policy = _copilot_account_policy(endpoint.name)
+    return {
+        "account": endpoint.name,
+        "enabled": policy["enabled"],
+        "configured_models": list(endpoint.models or []),
+        "api_types": list(endpoint.api_types),
+        "capability": list(policy["capability"]),
+        "capability_at": policy["capability_at"],
+        "allowed_models": list(policy["allowed_models"]) if policy["allowed_models"] else None,
+        "token_source": endpoint.token_source.get("type"),
+        "requests": endpoint.total_requests,
+        "circuit_open": endpoint.circuit_open,
+    }
+
+
+@app.get("/admin/copilot/accounts")
+async def admin_copilot_accounts(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：Copilot 账户的启用态、已发现能力与允许模型。
+
+    只返回账户名与模型名，**不返回任何 token 或可反推的前缀**。请求数是端点
+    的进程内累计，重启归零。
+    """
+    _require_admin_key(request, x_api_key)
+    if not copilot_proxy:
+        raise HTTPException(status_code=404, detail={"error": {"message": "GitHub Copilot is not configured"}})
+    return {
+        "accounts": [_copilot_account_view(ep) for ep in copilot_proxy.load_balancer.endpoints],
+        "policy": _policy_status_view(),
+        "counters_are_process_local": True,
+        "note": ("capability is a point-in-time discovery from upstream, not a capability "
+                 "certification. The effective model set is capability ∩ allowed_models."),
+    }
+
+
+@app.put("/admin/copilot/accounts/{account}")
+async def admin_set_copilot_account(account: str, request: Request,
+                                    x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：切换账户启用态与允许模型（只能在已发现 capability 内勾选）。"""
+    _require_admin_key(request, x_api_key)
+    if not copilot_proxy:
+        raise HTTPException(status_code=404, detail={"error": {"message": "GitHub Copilot is not configured"}})
+    if key_policy_store is None:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "policy_store_unavailable",
+            "message": "Account policy storage is not configured."}})
+    endpoint = next((ep for ep in copilot_proxy.load_balancer.endpoints if ep.name == account), None)
+    if endpoint is None:
+        raise HTTPException(status_code=404, detail={"error": {
+            "message": f"Account '{account}' is not a configured Copilot endpoint"}})
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail={"error": {"message": "Body must be JSON"}})
+    payload = payload or {}
+    kwargs = {}
+    if "enabled" in payload:
+        kwargs["enabled"] = payload["enabled"]
+    if "allowed_models" in payload:
+        kwargs["allowed_models"] = payload["allowed_models"]
+    if not kwargs:
+        raise HTTPException(status_code=400, detail={"error": {
+            "message": "Provide 'enabled' and/or 'allowed_models'"}})
+    try:
+        await key_policy_store.set_account(account, **kwargs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"error": {
+            "code": "invalid_account_policy", "message": str(e)}})
+    except Exception as e:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "policy_write_failed", "message": f"{type(e).__name__}"}})
+    return {"account": _copilot_account_view(endpoint), "policy": _policy_status_view()}
+
+
+@app.post("/admin/copilot/accounts/{account}/discover")
+async def admin_discover_copilot_account(account: str, request: Request,
+                                          x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：重新发现该账户的模型能力并存快照。会调用一次上游。"""
+    _require_admin_key(request, x_api_key)
+    if not copilot_proxy:
+        raise HTTPException(status_code=404, detail={"error": {"message": "GitHub Copilot is not configured"}})
+    if key_policy_store is None:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "policy_store_unavailable",
+            "message": "Account policy storage is not configured."}})
+    endpoint = next((ep for ep in copilot_proxy.load_balancer.endpoints if ep.name == account), None)
+    if endpoint is None:
+        raise HTTPException(status_code=404, detail={"error": {
+            "message": f"Account '{account}' is not a configured Copilot endpoint"}})
+    models = await _discover_copilot_capability(endpoint)
+    try:
+        await key_policy_store.set_account_capability(account, models)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "policy_write_failed", "message": f"{type(e).__name__}"}})
+    return {"account": _copilot_account_view(endpoint), "discovered": len(models),
+            "policy": _policy_status_view()}
 
 
 def _require_admin_key(request: Request, x_api_key: Optional[str]) -> str:
