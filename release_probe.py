@@ -80,6 +80,8 @@ async def check_schema(storage):
             schema['policy_unique_indexes']=policy_indexes
             await cur.execute("SELECT COLUMN_NAME,DATA_TYPE,IS_NULLABLE,CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='copilot_account_policy'")
             schema['account_columns']={row[0]:list(row[1:]) for row in await cur.fetchall()}
+            await cur.execute("SELECT COLUMN_NAME,DATA_TYPE,IS_NULLABLE,CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='model_provider_preference'")
+            schema['routing_columns']={row[0]:list(row[1:]) for row in await cur.fetchall()}
             await cur.execute("SELECT INDEX_NAME,COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='copilot_account_policy' AND NON_UNIQUE=0 ORDER BY INDEX_NAME,SEQ_IN_INDEX")
             account_indexes={}
             for index,column in await cur.fetchall():account_indexes.setdefault(index,[]).append(column)
@@ -117,6 +119,10 @@ def validate_schema(schema):
         if schema['account_columns']!=expected:raise ValueError('account_schema_columns_mismatch')
         if schema.get('account_unique_indexes')!={'PRIMARY':['account']}:
             raise ValueError('account_schema_unique_keys_mismatch')
+    if schema.get('routing_columns'):
+        expected={'model':['varchar','NO',190],'providers':['varchar','NO',255],
+                  'updated_at':['timestamp','NO',None]}
+        if schema['routing_columns']!=expected:raise ValueError('routing_schema_columns_mismatch')
 
 
 def success_payload(payload,api):

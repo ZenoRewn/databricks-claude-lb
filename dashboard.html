@@ -192,6 +192,10 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
         <p class="scope-note">账户凭据来自挂载的 device-flow 缓存，网关只读不生成。<strong>capability 是向上游的时点发现，不是能力认证</strong>；勾选只能在 capability 范围内，有效集 = capability ∩ 勾选。停用账户请用启用开关，不要清空勾选。实测当前 4 个 business 账户的模型集合完全相同，差异在 SKU 层（enterprise 与 business 互缺若干模型），所以逐账户勾选在同 SKU 之间暂无区分意义。</p>
         <div class="history-toolbar"><button class="btn btn-primary" id="loadAccounts" type="button">读取账户</button></div>
         <div id="accountsContent"><div class="info-box">输入上面的 API Key 后读取 GHCP 账户。</div></div>
+        <h3>模型 → Provider 优先序</h3>
+        <p class="scope-note">偏好<strong>只重排不筛除</strong>：列出的 Provider 提到前面，未列出的按默认顺序接在后面，fallback 能力保留。筛除是上面「允许渠道」的职责。<strong>给 claude-* 配指向 GHCP/Foundry 的偏好会在 OpenAI 风格入口放行该模型</strong>（逐模型 opt-in，不是整族开闸）；<code>/v1/messages</code> 仍然只走 ADB。计价按渠道分开：<code>databricks-claude-*</code> 用公开 API 价，裸 <code>claude-*</code> 用 GHCP 分档价。</p>
+        <div class="history-toolbar"><button class="btn btn-primary" id="loadRouting" type="button">读取优先序</button><label class="field" for="routeModel">模型<input id="routeModel" type="text" maxlength="190" placeholder="如 gpt-5.4 或 claude-opus-5.5"></label><label class="field" for="routeProviders">顺序<input id="routeProviders" type="text" maxlength="190" placeholder="如 azure_openai,copilot"></label><button class="btn" id="saveRouting" type="button">保存</button></div>
+        <div id="routingContent"><div class="info-box">输入上面的 API Key 后读取模型优先序。</div></div>
       </section>
       <footer class="page-footer"><span>Author: Zeno Ren</span><span>金额均为估算 · 流式 HTTP 200 不代表生成完成</span></footer>
     </main>
@@ -1040,6 +1044,108 @@ async function discoverAccount(account) {
   } finally { field.value = ''; keysInFlight = false; }
 }
 
+// ---------- Model → provider preference ----------
+function renderRouting(payload) {
+  renderPolicyState(payload.policy);
+  const rows = (payload.preferences || []).map(p => {
+    const opens = /claude/i.test(p.model) && (p.providers || []).some(x => x !== 'databricks');
+    return '<tr><td>' + escapeHtml(p.model) + '</td>'
+      + '<td>' + escapeHtml((p.providers || []).join(' → ')) + '</td>'
+      + '<td>' + escapeHtml((p.effective_openai_order || []).join(' → ')) + '</td>'
+      + '<td>' + (opens ? '已在 OpenAI 风格入口放行' : '—') + '</td>'
+      + '<td><button class="btn" type="button" data-clear-route="' + escapeHtml(p.model) + '">清除</button></td></tr>';
+  }).join('');
+  const defaults = '<p class="scope-note">默认顺序：' + escapeHtml((payload.default_openai_order || []).join(' → ')) + '</p>';
+  document.getElementById('routingContent').innerHTML = defaults + (rows
+    ? '<div class="table-wrap"><div class="table-scroll"><table id="routingTable"><thead><tr><th>模型</th><th>配置顺序</th><th>生效顺序</th><th>claude 放行</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>'
+    : '<div class="info-box">没有设置任何模型偏好，全部按默认顺序。</div>');
+  document.querySelectorAll('#routingTable [data-clear-route]').forEach(b => {
+    b.addEventListener('click', () => clearRouting(b.dataset.clearRoute));
+  });
+}
+
+async function loadRouting() {
+  if (keysInFlight) return;
+  const status = document.getElementById('keysStatus');
+  const field = document.getElementById('keysAdminKey');
+  const key = readAdminKey(status);
+  if (!key) return;
+  keysInFlight = true;
+  status.hidden = false; status.dataset.state = 'pending'; status.textContent = '正在读取模型优先序…';
+  try {
+    const payload = await fetchJSON('/admin/model-routing', {headers: {'x-api-key': key}});
+    renderRouting(payload);
+    status.dataset.state = 'success';
+    status.textContent = '已读取 ' + (payload.preferences || []).length + ' 条模型偏好。';
+  } catch (error) {
+    status.dataset.state = 'error';
+    status.textContent = error.status === 401 ? 'API Key 无效。' : '未能读取优先序：' + error.message;
+  } finally { field.value = ''; keysInFlight = false; }
+}
+
+async function saveRouting() {
+  if (keysInFlight) return;
+  const status = document.getElementById('keysStatus');
+  const field = document.getElementById('keysAdminKey');
+  const model = document.getElementById('routeModel').value.trim();
+  const providers = document.getElementById('routeProviders').value.split(',')
+    .map(s => s.trim()).filter(Boolean);
+  status.hidden = false;
+  if (!model || !providers.length) {
+    status.dataset.state = 'error';
+    status.textContent = '请填写模型名与至少一个 Provider（逗号分隔，顺序即偏好）。';
+    return;
+  }
+  const key = readAdminKey(status);
+  if (!key) return;
+  const opensClaude = /claude/i.test(model) && providers.some(p => p !== 'databricks');
+  const warn = opensClaude
+    ? '\n\n注意：这会让 ' + model + ' 在 OpenAI 风格入口被放行（默认是拒绝的），且该渠道按 GHCP 分档价计费。'
+    : '';
+  if (!confirm('设置 ' + model + ' 的优先序为：' + providers.join(' → ') + '。立即生效。' + warn)) {
+    field.value = ''; return;
+  }
+  keysInFlight = true;
+  status.dataset.state = 'pending'; status.textContent = '正在保存模型优先序…';
+  try {
+    const result = await fetchJSON('/admin/model-routing/' + encodeURIComponent(model),
+      {method: 'PUT', headers: {'x-api-key': key, 'content-type': 'application/json'},
+       body: JSON.stringify({providers})});
+    status.dataset.state = 'success';
+    status.textContent = model + ' 生效顺序：' + (result.effective_openai_order || []).join(' → ')
+      + (result.opens_claude_on_openai_entry_points ? '（已在 OpenAI 风格入口放行）' : '');
+    renderPolicyState(result.policy);
+  } catch (error) {
+    status.dataset.state = 'error';
+    status.textContent = error.status === 401 ? 'API Key 无效。'
+      : '未能保存，执行中的偏好保持不变：' + error.message;
+  } finally { field.value = ''; keysInFlight = false; }
+}
+
+async function clearRouting(model) {
+  if (keysInFlight) return;
+  const status = document.getElementById('keysStatus');
+  const field = document.getElementById('keysAdminKey');
+  const key = readAdminKey(status);
+  if (!key) return;
+  if (!confirm('清除 ' + model + ' 的偏好，回到默认顺序。'
+      + (/claude/i.test(model) ? '该模型将重新被 OpenAI 风格入口拒绝。' : '') + ' 确认继续？')) {
+    field.value = ''; return;
+  }
+  keysInFlight = true;
+  status.hidden = false; status.dataset.state = 'pending'; status.textContent = '正在清除偏好…';
+  try {
+    const result = await fetchJSON('/admin/model-routing/' + encodeURIComponent(model),
+      {method: 'DELETE', headers: {'x-api-key': key}});
+    status.dataset.state = 'success';
+    status.textContent = model + ' 已回到默认顺序：' + (result.effective_openai_order || []).join(' → ');
+    renderPolicyState(result.policy);
+  } catch (error) {
+    status.dataset.state = 'error';
+    status.textContent = error.status === 401 ? 'API Key 无效。' : '未能清除，偏好保持不变：' + error.message;
+  } finally { field.value = ''; keysInFlight = false; }
+}
+
 // ---------- Refresh ----------
 const REFRESH_MS = 5000;
 let refreshDeadline = Date.now() + REFRESH_MS;
@@ -1341,6 +1447,8 @@ document.getElementById('cleanupForm').addEventListener('submit', event => { eve
 document.getElementById('loadKeys').addEventListener('click', loadKeys);
 document.getElementById('reloadKeys').addEventListener('click', reloadKeysFromSource);
 document.getElementById('loadAccounts').addEventListener('click', loadAccounts);
+document.getElementById('loadRouting').addEventListener('click', loadRouting);
+document.getElementById('saveRouting').addEventListener('click', saveRouting);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && !refreshPaused) refresh(true); });
 refresh();
 setInterval(refresh, REFRESH_MS);

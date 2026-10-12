@@ -243,5 +243,72 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   assert.match(element('keysStatus').textContent, /已有快照保持不变/,
     'a failed discovery must not claim the snapshot changed');
 
-  console.log('Dashboard UI: authenticated cleanup, honest errors, safe release identity, key panel, accounts passed.');
+  // ---- model → provider preference ----
+  assert.match(html, /id="routingContent"/, 'routing area needs a container');
+  assert.match(html, /只重排不筛除/, 'reorder-not-filter must be stated');
+  assert.match(html, /仍然只走 ADB/, 'the /v1/messages limit must be stated');
+
+  context.renderRouting({policy: {state: 'loaded', backend: 'mysql', tenants: 0},
+    default_openai_order: ['copilot', 'azure_openai'],
+    preferences: [{model: 'gpt-5.4', providers: ['azure_openai'],
+                   effective_openai_order: ['azure_openai', 'copilot']},
+                  {model: 'claude-opus-5.5', providers: ['copilot'],
+                   effective_openai_order: ['copilot', 'azure_openai']}]});
+  assert.match(element('routingContent').innerHTML, /azure_openai → copilot/,
+    'the effective order must be shown, not just the stored one');
+  assert.match(element('routingContent').innerHTML, /已在 OpenAI 风格入口放行/,
+    'a claude model opened by preference must be flagged');
+  const gptRow = element('routingContent').innerHTML.split('<tr>').find(r => r.includes('gpt-5.4'));
+  assert.doesNotMatch(gptRow, /已在 OpenAI 风格入口放行/, 'a non-claude model must not be flagged');
+
+  context.renderRouting({policy: {state: 'loaded', backend: 'json', tenants: 0},
+    default_openai_order: ['copilot', 'azure_openai'],
+    preferences: [{model: '<img onerror=bad>', providers: ['copilot'], effective_openai_order: []}]});
+  assert.doesNotMatch(element('routingContent').innerHTML, /<img onerror/, 'model names escaped');
+
+  context.renderRouting({policy: {state: 'loaded', backend: 'json', tenants: 0},
+    default_openai_order: ['copilot', 'azure_openai'], preferences: []});
+  assert.match(element('routingContent').innerHTML, /全部按默认顺序/);
+
+  // A missing model or provider list must not reach the server.
+  element('routeModel').value = '';
+  element('routeProviders').value = 'copilot';
+  element('keysAdminKey').value = 'lb-key-for-routing-tests';
+  requests = [];
+  await context.saveRouting();
+  assert.equal(requests.length, 0, 'an incomplete routing form must be refused locally');
+  assert.match(element('keysStatus').textContent, /至少一个 Provider/);
+
+  element('routeModel').value = 'claude-opus-5.5';
+  element('routeProviders').value = ' copilot , azure_openai ';
+  element('keysAdminKey').value = 'lb-key-for-routing-tests';
+  context.fetch = async (url, options) => {
+    requests.push({url, options});
+    return {ok: true, status: 200, json: async () => ({
+      effective_openai_order: ['copilot', 'azure_openai'],
+      opens_claude_on_openai_entry_points: true,
+      policy: {state: 'loaded', backend: 'mysql', tenants: 0}})};
+  };
+  requests = [];
+  await context.saveRouting();
+  assert.equal(requests[0].url, '/admin/model-routing/claude-opus-5.5');
+  assert.equal(requests[0].options.method, 'PUT');
+  assert.deepEqual(JSON.parse(requests[0].options.body).providers, ['copilot', 'azure_openai'],
+    'whitespace around the comma-separated order must be trimmed');
+  assert.match(element('keysStatus').textContent, /已在 OpenAI 风格入口放行/);
+  assert.equal(element('keysAdminKey').value, '');
+  assert.ok(!requests.some(r => r.url.includes('lb-key-for-routing-tests')));
+
+  element('keysAdminKey').value = 'lb-key-for-routing-tests';
+  context.fetch = async (url, options) => {
+    requests.push({url, options});
+    return {ok: false, status: 503, json: async () => ({detail: {error: {code: 'policy_write_failed'}}})};
+  };
+  requests = [];
+  await context.clearRouting('claude-opus-5.5');
+  assert.equal(requests[0].options.method, 'DELETE');
+  assert.match(element('keysStatus').textContent, /偏好保持不变/,
+    'a failed clear must not claim the preference changed');
+
+  console.log('Dashboard UI: authenticated cleanup, honest errors, safe release identity, key panel, accounts, routing passed.');
 })().catch(error => {console.error(error); process.exitCode = 1;});

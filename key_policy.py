@@ -68,6 +68,26 @@ def normalise_providers(value) -> tuple:
     return ordered
 
 
+def ordered_providers(value) -> tuple:
+    """Validate an ordered provider preference.
+
+    Unlike `normalise_providers` this keeps the caller's order — the order *is*
+    the meaning. Duplicates are an error rather than collapsed, because a
+    repeated entry means the caller believes order matters somewhere it cannot.
+    """
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        raise ValueError('providers must be an ordered list of provider ids')
+    items = [str(item) for item in value]
+    if not items:
+        raise ValueError('providers must name at least one provider')
+    if len(set(items)) != len(items):
+        raise ValueError('providers must not repeat; the order is the preference')
+    unknown = sorted(set(items) - ALL_PROVIDERS)
+    if unknown:
+        raise ValueError(f'unknown provider ids: {", ".join(unknown)}')
+    return tuple(items)
+
+
 def fingerprint(key: str) -> str:
     return hashlib.sha256((key or '').encode()).hexdigest()[:12]
 
@@ -93,6 +113,7 @@ class KeyPolicyStore:
         self.backend = requested if requested in ('mysql', 'json') else 'memory'
         self._policies: dict = {}
         self._accounts: dict = {}
+        self._preferences: dict = {}
         self._state = 'unavailable'
         self._last_loaded_at: Optional[float] = None
         self._last_error_type: Optional[str] = None
@@ -125,6 +146,7 @@ class KeyPolicyStore:
             async with asyncio.timeout(IO_TIMEOUT):
                 loaded = await self._backend_load()
                 accounts = await self._backend_load_accounts()
+                preferences = await self._backend_load_preferences()
         except Exception as exc:
             self._last_error_type = type(exc).__name__
             # Never loaded → no restriction; loaded before → keep enforcing it.
@@ -133,6 +155,7 @@ class KeyPolicyStore:
             return self.status()
         self._policies = loaded
         self._accounts = accounts
+        self._preferences = preferences
         self._state = 'loaded'
         self._last_loaded_at = time.time()
         self._last_error_type = None
@@ -157,10 +180,41 @@ class KeyPolicyStore:
             'backend': self.backend,
             'tenants': len(self._policies),
             'accounts': len(self._accounts),
+            'model_preferences': len(self._preferences),
             'last_loaded_at': self._last_loaded_at,
             'last_error_type': self._last_error_type,
             'unrestricted_when_unavailable': True,
         }
+
+    # -- per-model provider preference -----------------------------------
+
+    def model_preference(self, model: str) -> tuple:
+        """Ordered preference for one model; empty means «use the default order»."""
+        if self._state == 'unavailable':
+            return ()
+        return tuple(self._preferences.get(model, ()))
+
+    def model_preferences_snapshot(self) -> dict:
+        return {model: tuple(order) for model, order in self._preferences.items()}
+
+    async def set_model_preference(self, model: str, providers) -> tuple:
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError('model must be a non-empty string')
+        order = ordered_providers(providers)
+        async with self._lock:
+            async with asyncio.timeout(IO_TIMEOUT):
+                await self._backend_write_preference(model.strip(), order)
+            self._preferences[model.strip()] = order
+            if self._state == 'unavailable':
+                self._state = 'loaded'
+                self._last_loaded_at = time.time()
+        return order
+
+    async def clear_model_preference(self, model: str) -> None:
+        async with self._lock:
+            async with asyncio.timeout(IO_TIMEOUT):
+                await self._backend_delete_preference(model)
+            self._preferences.pop(model, None)
 
     # -- Copilot account enablement --------------------------------------
 
@@ -310,6 +364,52 @@ class KeyPolicyStore:
             return {name: normalise_providers(value) for name, value in raw.items()}
         return dict(self._policies)
 
+    async def _backend_load_preferences(self) -> dict:
+        if self.backend == 'mysql':
+            await self._ensure_pool()
+            async with self._pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute('SELECT model, providers FROM model_provider_preference')
+                    rows = await cur.fetchall()
+            return {row[0]: ordered_providers(json.loads(row[1])) for row in rows}
+        if self.backend == 'json':
+            path = self._preferences_path()
+            if not path.exists():
+                return {}
+            raw = json.loads(path.read_text() or '{}')
+            return {model: ordered_providers(value) for model, value in raw.items()}
+        return dict(self._preferences)
+
+    async def _backend_write_preference(self, model: str, order: tuple) -> None:
+        if self.backend == 'mysql':
+            await self._ensure_pool()
+            async with self._pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        'INSERT INTO model_provider_preference (model, providers) VALUES (%s, %s) '
+                        'ON DUPLICATE KEY UPDATE providers = VALUES(providers)',
+                        (model, json.dumps(list(order))))
+            return
+        if self.backend == 'json':
+            merged = {**self.model_preferences_snapshot(), model: order}
+            self._atomic_write_json(self._preferences_path(),
+                                    {m: list(o) for m, o in merged.items()})
+
+    async def _backend_delete_preference(self, model: str) -> None:
+        if self.backend == 'mysql':
+            await self._ensure_pool()
+            async with self._pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute('DELETE FROM model_provider_preference WHERE model = %s', (model,))
+            return
+        if self.backend == 'json':
+            merged = {m: o for m, o in self.model_preferences_snapshot().items() if m != model}
+            self._atomic_write_json(self._preferences_path(),
+                                    {m: list(o) for m, o in merged.items()})
+
+    def _preferences_path(self):
+        return self._path.parent / 'model_provider_preference.json'
+
     async def _backend_load_accounts(self) -> dict:
         if self.backend == 'mysql':
             await self._ensure_pool()
@@ -456,5 +556,13 @@ class KeyPolicyStore:
                         capability_at TIMESTAMP NULL DEFAULT NULL,
                         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                         PRIMARY KEY (account)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS model_provider_preference (
+                        model VARCHAR(190) NOT NULL,
+                        providers VARCHAR(255) NOT NULL,
+                        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        PRIMARY KEY (model)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
