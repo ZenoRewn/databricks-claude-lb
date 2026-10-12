@@ -188,6 +188,10 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
         <p class="feedback" id="keysStatus" role="status" hidden></p>
         <div id="keysPolicyState"></div>
         <div id="keysContent"><div class="info-box">输入 API Key 后读取已激活的密钥。</div></div>
+        <h3>GHCP 账户与可用模型</h3>
+        <p class="scope-note">账户凭据来自挂载的 device-flow 缓存，网关只读不生成。<strong>capability 是向上游的时点发现，不是能力认证</strong>；勾选只能在 capability 范围内，有效集 = capability ∩ 勾选。停用账户请用启用开关，不要清空勾选。实测当前 4 个 business 账户的模型集合完全相同，差异在 SKU 层（enterprise 与 business 互缺若干模型），所以逐账户勾选在同 SKU 之间暂无区分意义。</p>
+        <div class="history-toolbar"><button class="btn btn-primary" id="loadAccounts" type="button">读取账户</button></div>
+        <div id="accountsContent"><div class="info-box">输入上面的 API Key 后读取 GHCP 账户。</div></div>
       </section>
       <footer class="page-footer"><span>Author: Zeno Ren</span><span>金额均为估算 · 流式 HTTP 200 不代表生成完成</span></footer>
     </main>
@@ -920,6 +924,122 @@ async function reloadKeysFromSource() {
   } finally { field.value = ''; keysInFlight = false; }
 }
 
+// ---------- GHCP accounts ----------
+// Same one-request key contract as the panels above. capability is read-only;
+// the checkboxes can only ever narrow it, never add to it.
+function renderAccounts(payload) {
+  renderPolicyState(payload.policy);
+  const rows = (payload.accounts || []).map(a => {
+    const capability = a.capability || [];
+    const allowed = a.allowed_models;
+    const boxes = capability.length
+      ? capability.map(m => {
+          const on = !allowed || allowed.includes(m);
+          return '<label class="field"><input type="checkbox" data-account="' + escapeHtml(a.account)
+            + '" data-model="' + escapeHtml(m) + '"' + (on ? ' checked' : '') + '> ' + escapeHtml(m) + '</label>';
+        }).join(' ')
+      : '<span class="scope-note">尚未发现能力，先点「刷新能力」</span>';
+    const at = a.capability_at ? new Date(a.capability_at * 1000).toLocaleString() : '未发现';
+    return '<tr><td>' + escapeHtml(a.account) + '</td>'
+      + '<td><label class="field"><input type="checkbox" data-enable="' + escapeHtml(a.account) + '"'
+      + (a.enabled ? ' checked' : '') + '> ' + (a.enabled ? '已启用' : '已停用') + '</label></td>'
+      + '<td>' + escapeHtml(String(a.token_source || '未知')) + '</td>'
+      + '<td>' + escapeHtml(String(capability.length)) + ' 个<br><span class="scope-note">'
+      + escapeHtml(at) + '</span></td>'
+      + '<td>' + escapeHtml(String(a.requests ?? 0)) + '</td>'
+      + '<td>' + boxes + '</td>'
+      + '<td><button class="btn" type="button" data-save-account="' + escapeHtml(a.account) + '">保存</button>'
+      + ' <button class="btn" type="button" data-discover="' + escapeHtml(a.account) + '">刷新能力</button></td></tr>';
+  }).join('');
+  document.getElementById('accountsContent').innerHTML = rows
+    ? '<div class="table-wrap"><div class="table-scroll"><table id="accountsTable"><thead><tr><th>账户</th><th>启用</th><th>凭据来源</th><th>已发现能力</th><th>本进程请求</th><th>允许模型</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>'
+    : '<div class="info-box">没有已配置的 GHCP 账户。</div>';
+  document.querySelectorAll('#accountsTable [data-save-account]').forEach(b => {
+    b.addEventListener('click', () => saveAccount(b.dataset.saveAccount));
+  });
+  document.querySelectorAll('#accountsTable [data-discover]').forEach(b => {
+    b.addEventListener('click', () => discoverAccount(b.dataset.discover));
+  });
+}
+
+async function loadAccounts() {
+  if (keysInFlight) return;
+  const status = document.getElementById('keysStatus');
+  const field = document.getElementById('keysAdminKey');
+  const key = readAdminKey(status);
+  if (!key) return;
+  keysInFlight = true;
+  status.hidden = false; status.dataset.state = 'pending'; status.textContent = '正在读取 GHCP 账户…';
+  try {
+    const payload = await fetchJSON('/admin/copilot/accounts', {headers: {'x-api-key': key}});
+    renderAccounts(payload);
+    status.dataset.state = 'success';
+    status.textContent = '已读取 ' + (payload.accounts || []).length + ' 个账户。';
+  } catch (error) {
+    status.dataset.state = 'error';
+    status.textContent = error.status === 401 ? 'API Key 无效。' : '未能读取账户：' + error.message;
+  } finally { field.value = ''; keysInFlight = false; }
+}
+
+async function saveAccount(account) {
+  if (keysInFlight) return;
+  const status = document.getElementById('keysStatus');
+  const field = document.getElementById('keysAdminKey');
+  const key = readAdminKey(status);
+  if (!key) return;
+  const enableBox = document.querySelectorAll('#accountsTable [data-enable="' + account + '"]')[0];
+  const enabled = enableBox ? !!enableBox.checked : true;
+  const boxes = Array.from(document.querySelectorAll('#accountsTable [data-account="' + account + '"]'));
+  const chosen = boxes.filter(b => b.checked).map(b => b.dataset.model);
+  if (enabled && boxes.length && !chosen.length) {
+    status.hidden = false; status.dataset.state = 'error';
+    status.textContent = '至少要勾选一个模型；要停用该账户请取消「启用」而不是清空勾选。';
+    field.value = ''; return;
+  }
+  const body = {enabled};
+  if (boxes.length) body.allowed_models = chosen.length === boxes.length ? null : chosen;
+  if (!confirm('账户 ' + account + '：' + (enabled ? '启用' : '停用')
+      + (body.allowed_models ? '，仅允许 ' + body.allowed_models.length + ' 个模型' : '，允许全部已发现模型')
+      + '。立即生效。确认继续？')) { field.value = ''; return; }
+  keysInFlight = true;
+  status.hidden = false; status.dataset.state = 'pending'; status.textContent = '正在保存账户策略…';
+  try {
+    const result = await fetchJSON('/admin/copilot/accounts/' + encodeURIComponent(account),
+      {method: 'PUT', headers: {'x-api-key': key, 'content-type': 'application/json'},
+       body: JSON.stringify(body)});
+    status.dataset.state = 'success';
+    const a = result.account || {};
+    status.textContent = '账户 ' + account + ' 已更新：' + (a.enabled ? '启用' : '停用')
+      + '，允许 ' + (a.allowed_models ? a.allowed_models.length : (a.capability || []).length) + ' 个模型。';
+    renderPolicyState(result.policy);
+  } catch (error) {
+    status.dataset.state = 'error';
+    status.textContent = error.status === 401 ? 'API Key 无效。'
+      : '未能保存，执行中的策略保持不变：' + error.message;
+  } finally { field.value = ''; keysInFlight = false; }
+}
+
+async function discoverAccount(account) {
+  if (keysInFlight) return;
+  const status = document.getElementById('keysStatus');
+  const field = document.getElementById('keysAdminKey');
+  const key = readAdminKey(status);
+  if (!key) return;
+  keysInFlight = true;
+  status.hidden = false; status.dataset.state = 'pending';
+  status.textContent = '正在向上游发现 ' + account + ' 的模型能力…';
+  try {
+    const result = await fetchJSON('/admin/copilot/accounts/' + encodeURIComponent(account) + '/discover',
+      {method: 'POST', headers: {'x-api-key': key}});
+    status.dataset.state = 'success';
+    status.textContent = account + ' 发现 ' + result.discovered + ' 个模型（时点快照，非能力认证）。重新读取账户以查看。';
+    renderPolicyState(result.policy);
+  } catch (error) {
+    status.dataset.state = 'error';
+    status.textContent = error.status === 401 ? 'API Key 无效。' : '发现失败，已有快照保持不变：' + error.message;
+  } finally { field.value = ''; keysInFlight = false; }
+}
+
 // ---------- Refresh ----------
 const REFRESH_MS = 5000;
 let refreshDeadline = Date.now() + REFRESH_MS;
@@ -1220,6 +1340,7 @@ document.getElementById('refreshHistory').addEventListener('click', () => loadHi
 document.getElementById('cleanupForm').addEventListener('submit', event => { event.preventDefault(); cleanupHistory(); });
 document.getElementById('loadKeys').addEventListener('click', loadKeys);
 document.getElementById('reloadKeys').addEventListener('click', reloadKeysFromSource);
+document.getElementById('loadAccounts').addEventListener('click', loadAccounts);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && !refreshPaused) refresh(true); });
 refresh();
 setInterval(refresh, REFRESH_MS);

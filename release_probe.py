@@ -78,6 +78,12 @@ async def check_schema(storage):
             policy_indexes={}
             for index,column in await cur.fetchall():policy_indexes.setdefault(index,[]).append(column)
             schema['policy_unique_indexes']=policy_indexes
+            await cur.execute("SELECT COLUMN_NAME,DATA_TYPE,IS_NULLABLE,CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='copilot_account_policy'")
+            schema['account_columns']={row[0]:list(row[1:]) for row in await cur.fetchall()}
+            await cur.execute("SELECT INDEX_NAME,COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='copilot_account_policy' AND NON_UNIQUE=0 ORDER BY INDEX_NAME,SEQ_IN_INDEX")
+            account_indexes={}
+            for index,column in await cur.fetchall():account_indexes.setdefault(index,[]).append(column)
+            schema['account_unique_indexes']=account_indexes
             validate_schema(schema)
     finally:conn.close()
 
@@ -103,6 +109,14 @@ def validate_schema(schema):
         if schema['policy_columns']!=expected:raise ValueError('policy_schema_columns_mismatch')
         if schema.get('policy_unique_indexes')!={'PRIMARY':['tenant']}:
             raise ValueError('policy_schema_unique_keys_mismatch')
+    # Same absent-is-accepted rule: the account table is also created lazily.
+    if schema.get('account_columns'):
+        expected={'account':['varchar','NO',190],'enabled':['tinyint','NO',None],
+                  'allowed_models':['text','YES',65535],'capability':['text','YES',65535],
+                  'capability_at':['timestamp','YES',None],'updated_at':['timestamp','NO',None]}
+        if schema['account_columns']!=expected:raise ValueError('account_schema_columns_mismatch')
+        if schema.get('account_unique_indexes')!={'PRIMARY':['account']}:
+            raise ValueError('account_schema_unique_keys_mismatch')
 
 
 def success_payload(payload,api):

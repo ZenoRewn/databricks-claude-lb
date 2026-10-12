@@ -58,6 +58,25 @@ Claude 模型使用 `/v1/messages`。在 OpenAI 风格入口传入 Claude 模型
 
 目录里的模型必须至少能被 `MODEL_PRICING` 或 `copilot_pricing` 之一计价，否则成本会静默漏统计。两张表分工不同：前者是公开 API 价（历史/通用口径），后者是 Copilot 官方分档价并用于实时估算，所以 Copilot 专属模型（如 grok、mai-code）只在后者有价，不应为其臆造公开 API 价。
 
+### GHCP 多账户：启用与按账户勾选模型
+
+账户凭据不进配置。`endpoints[]` 里只写 `name`，token 会按 `copilot-auth-<name>.json` 从 device-flow 缓存目录解析（AKS 上由 Secret 挂载），`token_source` 记为 `file`，因此 `/admin/copilot/reload` 可以重读它 —— 写死在配置里的明文（`literal`）做不到。
+
+每个账户有两层模型信息：
+
+- **capability** —— 由 `POST /admin/copilot/accounts/{account}/discover` 向上游发现并存快照，只读、带时间戳。**它是时点发现，不是能力认证**，上游随时会变
+- **allowed_models** —— 运维在 capability 内勾选的子集，`null` 表示不额外限制
+
+有效可用集 = `capability ∩ allowed_models`。capability 本身就是外层边界：上游说某账户没有该模型时，路由过去没有意义，所以即使没设 allowlist 也不会落过去。从未发现过 capability（空）时不据此限制，避免把「还没发现」当成「什么都没有」。写入时超出 capability 的模型被拒，所以**不可能**把账户配成服务它没有的模型。
+
+停用账户用启用开关，不要靠清空勾选 —— 空列表会被拒，否则两种语义会混淆。
+
+与 `/models` 目录的关系：目录由启用账户的有效集派生。通配端点（`models: []`）若已发现 capability，就用 capability 而非静态核验表，因为前者更准。
+
+降级语义与密钥策略一致：存储从未加载成功则不施加限制并标 `unavailable`，刷新失败则继续执行最后已知策略并标 `stale`，状态在 `/stats` 与 Dashboard 暴露。发布预检会校验 `copilot_account_policy` 的列与主键，表不存在时放行（它由首次使用惰性创建）。
+
+实测提示：同一 SKU 的账户模型集合可能完全一致（2026-10-12 实测 4 个 business seat 账户各 38 个模型、零差异），差异主要在 SKU 层。逐账户勾选在同 SKU 之间不产生区分效果。
+
 ## Azure OpenAI
 
 ```yaml

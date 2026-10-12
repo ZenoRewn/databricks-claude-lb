@@ -130,3 +130,14 @@ endpoints:
 #     #   github_token: ${GITHUB_COPILOT_TOKEN_2}
 #     #   weight: 1
 #     #   models: [gpt-5, gpt-5.1, claude-opus-4.7]
+#
+#   多账户要点：
+#   - name 与 device-flow 缓存文件名对应（copilot-auth-<name>.json）。只写 name、
+#     不写 github_token 时自动从缓存解析，凭据不进配置，且 token_source 为 file，
+#     可被 /admin/copilot/reload 重读（写死明文的 literal 不行）。
+#   - **不同 SKU 的账户模型集合会互缺**。实测 enterprise seat 有 gpt-5.4/5.5/5.6-luna
+#     而 business seat 没有；business seat 有 gpt-6-astra/kimi-k3 而 enterprise 没有。
+#     多账户时按 models: [] 通配会让请求有概率落到缺该模型的账户上失败，务必限定。
+#   - 启用开关与「按账户勾选允许模型」在 Dashboard 的「密钥与渠道」页设置，存在
+#     用量存储里，立即生效并跨重启保留；勾选只能在向上游发现的 capability 内。
+#     未设置时按此处的 models 与「全部启用」处理。详见 docs/CONFIGURATION.md。
