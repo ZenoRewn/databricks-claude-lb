@@ -105,5 +105,84 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   await context.refresh(true);
   assert.equal(element('globalGrid').innerHTML, 'last successful snapshot');
   assert.equal(element('endpointBody').innerHTML, 'last successful endpoints');
-  console.log('Dashboard UI: authenticated cleanup, honest errors, safe release identity passed.');
+  // ---- API keys & provider allow-lists ----
+  // The panel must never render a plaintext key, must refuse an empty
+  // allow-list, and must say the enforced policy is unchanged when a write
+  // fails. Rotation must state that the gateway does not issue keys.
+  const nodes = [];
+  context.document.querySelectorAll = selector => {
+    if (selector.includes('[data-save]')) return [];
+    return nodes.filter(node => node.selector === selector);
+  };
+  assert.match(html, /id="nav-keys"/, 'key panel needs a nav entry');
+  assert.match(html, /id="tab-keys"/, 'key panel needs a tab panel');
+  assert.match(html, /type="password"[^>]*id="keysAdminKey"|id="keysAdminKey"[^>]*type="password"/,
+    'the admin key field must be a password input');
+  assert.match(html, /不显示也不返回明文/, 'panel must state plaintext is never shown');
+  assert.match(html, /本进程/, 'panel must label counters as process-local');
+
+  context.renderKeys({providers: ['databricks', 'copilot'],
+    provider_labels: {databricks: 'ADB', copilot: 'GHCP'},
+    policy: {state: 'loaded', backend: 'mysql', tenants: 1},
+    keys: [{tenant: 'team-a', masked: 'abcd…wxyz', fingerprint: 'deadbeefcafe',
+            providers: ['copilot'], restricted: true, requests: 3, last_used_at: 1700000000}]});
+  assert.match(element('keysContent').innerHTML, /team-a/);
+  assert.match(element('keysContent').innerHTML, /abcd…wxyz/);
+  assert.match(element('keysContent').innerHTML, /deadbeefcafe/);
+  assert.match(element('keysPolicyState').innerHTML, /已加载/);
+
+  context.renderKeys({providers: [], policy: {state: 'unavailable', backend: 'mysql', tenants: 0}, keys: []});
+  assert.match(element('keysPolicyState').innerHTML, /不施加任何渠道限制/,
+    'an unloaded policy store must be reported, not hidden');
+  assert.match(element('keysContent').innerHTML, /没有已注册/);
+
+  context.renderKeys({providers: ['copilot'], provider_labels: {},
+    policy: {state: 'loaded', backend: 'json', tenants: 0},
+    keys: [{tenant: '<img onerror=bad>', masked: '', fingerprint: 'f00d', providers: [], requests: 0,
+            last_used_at: null}]});
+  assert.doesNotMatch(element('keysContent').innerHTML, /<img onerror/, 'tenant names must be escaped');
+  assert.match(element('keysContent').innerHTML, /过短，不展示掩码/);
+  assert.match(element('keysContent').innerHTML, /本进程内未使用/);
+
+  element('keysAdminKey').value = 'lb-key-for-panel-tests';
+  requests = [];
+  context.fetch = async (url, options) => {
+    requests.push({url, options});
+    return {ok: false, status: 503, json: async () => ({detail: {error: {code: 'policy_write_failed'}}})};
+  };
+  nodes.length = 0;
+  nodes.push({selector: '#keysTable [data-tenant="team-a"]', checked: true,
+              dataset: {provider: 'copilot'}});
+  await context.saveTenantProviders('team-a');
+  assert.match(element('keysStatus').textContent, /执行中的策略保持不变/,
+    'a failed write must not claim the policy changed');
+  assert.equal(element('keysAdminKey').value, '', 'the key field must be cleared after use');
+
+  element('keysAdminKey').value = 'lb-key-for-panel-tests';
+  nodes.length = 0;
+  nodes.push({selector: '#keysTable [data-tenant="team-a"]', checked: false,
+              dataset: {provider: 'copilot'}});
+  requests = [];
+  await context.saveTenantProviders('team-a');
+  assert.equal(requests.length, 0, 'an empty allow-list must not reach the server');
+  assert.match(element('keysStatus').textContent, /至少要允许一个渠道/);
+
+  element('keysAdminKey').value = 'lb-key-for-panel-tests';
+  context.fetch = async (url, options) => {
+    requests.push({url, options});
+    return {ok: true, status: 200,
+            json: async () => ({keys: 2, tenants: ['default', 'team-a'], env_interpolated: true})};
+  };
+  requests = [];
+  await context.reloadKeysFromSource();
+  assert.equal(requests[0].url, '/admin/api-keys/reload');
+  assert.equal(requests[0].options.method, 'POST');
+  assert.equal(requests[0].options.headers['x-api-key'], 'lb-key-for-panel-tests');
+  assert.match(element('keysStatus').textContent, /滚动重启/,
+    'env-sourced values still need a restart and the panel must say so');
+  assert.equal(element('keysAdminKey').value, '');
+  assert.ok(!requests.some(r => r.url.includes('lb-key-for-panel-tests')),
+    'the key must never travel in a URL');
+
+  console.log('Dashboard UI: authenticated cleanup, honest errors, safe release identity, key panel passed.');
 })().catch(error => {console.error(error); process.exitCode = 1;});

@@ -144,6 +144,7 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
       <button class="tab-btn" id="nav-copilot" data-tab="copilot" role="tab" aria-controls="tab-copilot" aria-selected="false" tabindex="-1"><span class="nav-icon" aria-hidden="true">GH</span>GitHub Copilot</button>
       <div class="nav-divider" role="presentation"></div>
       <button class="tab-btn" id="nav-history" data-tab="history" role="tab" aria-controls="tab-history" aria-selected="false" tabindex="-1"><span class="nav-icon" aria-hidden="true">↗</span>历史用量</button>
+      <button class="tab-btn" id="nav-keys" data-tab="keys" role="tab" aria-controls="tab-keys" aria-selected="false" tabindex="-1"><span class="nav-icon" aria-hidden="true">⚿</span>密钥与渠道</button>
     </nav>
     <div class="sidebar-bottom"><a href="https://github.com/ZenoRewn/databricks-claude-lb" target="_blank" rel="noopener noreferrer">GitHub 项目 ↗</a><span id="uptimeTag">等待连接网关</span></div>
   </aside>
@@ -180,6 +181,13 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
         <p class="feedback" id="historyStatus" role="status" hidden></p>
         <div id="historyContent"><div class="info-box">切换到此页后读取历史用量。</div></div>
         <details class="maintenance-panel"><summary>数据维护</summary><p>清理保留天数之前的持久化用量。删除后无法通过 Dashboard 撤销；请先确认备份。API Key 只用于本次清理请求，不保存在浏览器中。</p><form class="cleanup-form" id="cleanupForm"><label class="field" for="cleanDays">保留最近天数<input id="cleanDays" type="number" value="30" min="1" max="3650" required></label><label class="field field-key" for="managementKey">LB API Key<input id="managementKey" type="password" autocomplete="off" maxlength="4096" placeholder="仅用于这一次操作" required></label><button class="btn btn-danger" id="cleanupButton" type="submit">清理历史数据</button></form><div class="feedback" id="cleanupStatus" role="status"></div></details>
+      </section>
+      <section class="tab-panel" id="tab-keys" role="tabpanel" aria-labelledby="nav-keys">
+        <div class="history-toolbar"><label class="field field-key" for="keysAdminKey">LB API Key<input id="keysAdminKey" type="password" autocomplete="off" maxlength="4096" placeholder="仅用于这些操作" required></label><button class="btn btn-primary" id="loadKeys" type="button">读取密钥</button><button class="btn" id="reloadKeys" type="button">从源重读密钥</button></div>
+        <p class="scope-note">只显示密钥身份：掩码与 sha256 前缀，<strong>不显示也不返回明文</strong>；过短的密钥连掩码都不给。请求数与最后使用时间是<strong>本进程</strong>计数，重启归零，不代表密钥未被使用。渠道限制只做减法，不会让某渠道服务它本来不支持的模型。API Key 只用于当次请求，不保存在浏览器中。</p>
+        <p class="feedback" id="keysStatus" role="status" hidden></p>
+        <div id="keysPolicyState"></div>
+        <div id="keysContent"><div class="info-box">输入 API Key 后读取已激活的密钥。</div></div>
       </section>
       <footer class="page-footer"><span>Author: Zeno Ren</span><span>金额均为估算 · 流式 HTTP 200 不代表生成完成</span></footer>
     </main>
@@ -270,12 +278,13 @@ const TAB_INFO = {
   anthropic: ['Databricks','请求及 Token 累计包含启动恢复用量；模型与费用为今日累计，端点分布为本进程累计。'],
   azure: ['Azure OpenAI','Azure 渠道的请求分布与端点表现。此页为当前进程累计，不等同于资源配额或历史账单。'],
   copilot: ['GitHub Copilot','Copilot 渠道的请求、账户端点与费用估算。此页为当前进程累计，未知价格不会按零费用处理。'],
-  history: ['历史用量','查看已持久化的每日请求和模型用量，跨进程保留；未落盘的内存事件不在历史记录中。']
+  history: ['历史用量','查看已持久化的每日请求和模型用量，跨进程保留；未落盘的内存事件不在历史记录中。'],
+  keys: ['密钥与渠道','按 API Key 限制可用后端渠道，并查看已激活密钥的身份。只显示掩码与指纹，不显示明文；轮换在源头进行，网关只负责重读。']
 };
 function switchTab(tab) {
   if (!TAB_INFO[tab]) return;
   activeTab = tab;
-  document.getElementById('refreshControls').hidden = tab === 'history';
+  document.getElementById('refreshControls').hidden = tab === 'history' || tab === 'keys';
   document.querySelectorAll('.tab-btn').forEach(button => {
     const selected = button.dataset.tab === tab;
     button.classList.toggle('active', selected);
@@ -783,6 +792,134 @@ async function cleanupHistory() {
   }
 }
 
+// ---------- API keys & provider allow-lists ----------
+// Same contract as cleanupHistory: the key is read from the field for one
+// request and cleared in finally. Never stored, never put in a URL.
+let keysInFlight = false;
+let keyProviders = [];
+let keyProviderLabels = {};
+
+function readAdminKey(status) {
+  const field = document.getElementById('keysAdminKey');
+  const key = field.value.trim();
+  if (!key) { status.dataset.state = 'error'; status.hidden = false; status.textContent = '请输入 API Key。'; field.focus?.(); }
+  return key;
+}
+
+function renderPolicyState(policy) {
+  const box = document.getElementById('keysPolicyState');
+  if (!policy) { box.innerHTML = ''; return; }
+  const wording = {
+    loaded: ['ok', '策略存储已加载，限制按设置生效。'],
+    stale: ['warn', '策略存储刷新失败，仍在执行最后一次成功读取的策略（可能已过时）。'],
+    unavailable: ['warn', '策略存储从未成功加载，当前**不施加任何渠道限制**。这是有意的降级 —— 限制层不应让网关整体不可用。'],
+    disabled: ['warn', '未配置策略存储，当前不施加渠道限制。']
+  }[policy.state] || ['warn', '策略存储状态未知。'];
+  box.innerHTML = '<div class="info-box" data-state="' + wording[0] + '">' + escapeHtml(wording[1])
+    + ' <span class="scope-note">后端 ' + escapeHtml(policy.backend || 'unknown')
+    + ' · 已设置租户 ' + escapeHtml(String(policy.tenants ?? 0)) + '</span></div>';
+}
+
+function renderKeys(payload) {
+  keyProviders = Array.isArray(payload.providers) ? payload.providers : [];
+  keyProviderLabels = payload.provider_labels || {};
+  renderPolicyState(payload.policy);
+  const rows = (payload.keys || []).map(item => {
+    const boxes = keyProviders.map(pid => {
+      const on = (item.providers || []).includes(pid);
+      const label = keyProviderLabels[pid] || pid;
+      return '<label class="field"><input type="checkbox" data-tenant="' + escapeHtml(item.tenant)
+        + '" data-provider="' + escapeHtml(pid) + '"' + (on ? ' checked' : '') + '> '
+        + escapeHtml(label) + '</label>';
+    }).join(' ');
+    const used = item.last_used_at ? new Date(item.last_used_at * 1000).toLocaleString() : '本进程内未使用';
+    return '<tr><td>' + escapeHtml(item.tenant) + '</td>'
+      + '<td><code>' + escapeHtml(item.masked || '（过短，不展示掩码）') + '</code></td>'
+      + '<td><code>' + escapeHtml(item.fingerprint) + '</code></td>'
+      + '<td>' + boxes + '</td>'
+      + '<td>' + escapeHtml(String(item.requests ?? 0)) + '</td>'
+      + '<td>' + escapeHtml(used) + '</td>'
+      + '<td><button class="btn" type="button" data-save="' + escapeHtml(item.tenant) + '">保存</button></td></tr>';
+  }).join('');
+  document.getElementById('keysContent').innerHTML = rows
+    ? '<div class="table-wrap"><div class="table-scroll"><table id="keysTable"><thead><tr><th>租户</th><th>掩码</th><th>指纹</th><th>允许渠道</th><th>本进程请求</th><th>最后使用</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>'
+    : '<div class="info-box">没有已注册的 API Key。</div>';
+  document.querySelectorAll('#keysTable [data-save]').forEach(button => {
+    button.addEventListener('click', () => saveTenantProviders(button.dataset.save));
+  });
+}
+
+async function loadKeys() {
+  if (keysInFlight) return;
+  const status = document.getElementById('keysStatus');
+  const field = document.getElementById('keysAdminKey');
+  const key = readAdminKey(status);
+  if (!key) return;
+  keysInFlight = true;
+  status.hidden = false; status.dataset.state = 'pending'; status.textContent = '正在读取密钥身份…';
+  try {
+    const payload = await fetchJSON('/admin/api-keys', {headers: {'x-api-key': key}});
+    renderKeys(payload);
+    status.dataset.state = 'success';
+    status.textContent = '已读取 ' + (payload.keys || []).length + ' 个密钥身份（不含明文）。';
+  } catch (error) {
+    status.dataset.state = 'error';
+    status.textContent = error.status === 401 ? 'API Key 无效。' : '未能读取密钥：' + error.message;
+  } finally { field.value = ''; keysInFlight = false; }
+}
+
+async function saveTenantProviders(tenant) {
+  if (keysInFlight) return;
+  const status = document.getElementById('keysStatus');
+  const field = document.getElementById('keysAdminKey');
+  const key = readAdminKey(status);
+  if (!key) return;
+  const providers = Array.from(document.querySelectorAll('#keysTable [data-tenant="' + tenant + '"]'))
+    .filter(box => box.checked).map(box => box.dataset.provider);
+  if (!providers.length) {
+    status.hidden = false; status.dataset.state = 'error';
+    status.textContent = '至少要允许一个渠道，否则该租户将无法发起任何请求。';
+    field.value = ''; return;
+  }
+  if (!confirm('将限制租户 ' + tenant + ' 只能使用：' + providers.join('、') + '。立即生效。确认继续？')) { field.value = ''; return; }
+  keysInFlight = true;
+  status.hidden = false; status.dataset.state = 'pending'; status.textContent = '正在保存渠道限制…';
+  try {
+    const result = await fetchJSON('/admin/api-keys/' + encodeURIComponent(tenant) + '/providers',
+      {method: 'PUT', headers: {'x-api-key': key, 'content-type': 'application/json'},
+       body: JSON.stringify({providers})});
+    status.dataset.state = 'success';
+    status.textContent = '租户 ' + tenant + ' 现在允许：' + (result.providers || []).join('、') + '。';
+    renderPolicyState(result.policy);
+  } catch (error) {
+    status.dataset.state = 'error';
+    status.textContent = error.status === 401 ? 'API Key 无效。' : '未能保存，执行中的策略保持不变：' + error.message;
+  } finally { field.value = ''; keysInFlight = false; }
+}
+
+async function reloadKeysFromSource() {
+  if (keysInFlight) return;
+  const status = document.getElementById('keysStatus');
+  const field = document.getElementById('keysAdminKey');
+  const key = readAdminKey(status);
+  if (!key) return;
+  if (!confirm('将从配置源重读客户端密钥。请先在源头（K8s Secret / env / 文件）完成轮换 —— 网关不会生成密钥。重读后旧密钥可能立即失效。确认继续？')) { field.value = ''; return; }
+  keysInFlight = true;
+  status.hidden = false; status.dataset.state = 'pending'; status.textContent = '正在从源重读…';
+  try {
+    const result = await fetchJSON('/admin/api-keys/reload', {method: 'POST', headers: {'x-api-key': key}});
+    status.dataset.state = 'success';
+    let text = '已重读 ' + result.keys + ' 个密钥，租户：' + (result.tenants || []).join('、') + '。';
+    if (result.env_interpolated) text += ' 注意：有 ${ENV} 形式的值取自进程环境，文件更新不改变它们，仍需滚动重启。';
+    status.textContent = text;
+    document.getElementById('keysContent').innerHTML = '<div class="info-box">密钥已重读，请重新输入新的 API Key 后读取列表。</div>';
+  } catch (error) {
+    status.dataset.state = 'error';
+    status.textContent = error.status === 401 ? 'API Key 无效。'
+      : '重读未生效，原有密钥仍然有效：' + error.message;
+  } finally { field.value = ''; keysInFlight = false; }
+}
+
 // ---------- Refresh ----------
 const REFRESH_MS = 5000;
 let refreshDeadline = Date.now() + REFRESH_MS;
@@ -1081,6 +1218,8 @@ document.getElementById('pauseRefresh').addEventListener('click', event => {
 });
 document.getElementById('refreshHistory').addEventListener('click', () => loadHistory(Number(document.getElementById('histDays').value)));
 document.getElementById('cleanupForm').addEventListener('submit', event => { event.preventDefault(); cleanupHistory(); });
+document.getElementById('loadKeys').addEventListener('click', loadKeys);
+document.getElementById('reloadKeys').addEventListener('click', reloadKeysFromSource);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && !refreshPaused) refresh(true); });
 refresh();
 setInterval(refresh, REFRESH_MS);

@@ -56,3 +56,37 @@ class BuildIdentityTests(unittest.TestCase):
         from build_metadata import RUNTIME_FILES
         from operations.release.model import APP_FILES
         self.assertEqual(set(RUNTIME_FILES), set(APP_FILES) | {'requirements.lock', 'requirements.txt'})
+
+    # The check above only compares the two manifests to each other, so adding a
+    # module to neither keeps it green while the image would fail on import.
+    # These two close that gap from both ends: what the code needs, and what the
+    # image actually ships.
+
+    def test_every_module_main_imports_is_in_the_manifest(self):
+        import ast
+
+        from build_metadata import RUNTIME_FILES
+        root = Path(__file__).resolve().parent.parent
+        tree = ast.parse((root / 'main.py').read_text())
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split('.')[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imported.add(node.module.split('.')[0])
+        local = {f'{name}.py' for name in imported if (root / f'{name}.py').is_file()}
+        missing = sorted(local - set(RUNTIME_FILES))
+        self.assertEqual(missing, [], 'main.py imports these but the runtime manifest omits them')
+
+    def test_dockerfile_ships_every_runtime_module(self):
+        from build_metadata import RUNTIME_FILES
+        root = Path(__file__).resolve().parent.parent
+        dockerfile = (root / 'Dockerfile').read_text()
+        # requirements are copied by their own earlier COPY layer.
+        expected = set(RUNTIME_FILES) - {'requirements.lock', 'requirements.txt'}
+        copied = set()
+        for line in dockerfile.splitlines():
+            if line.startswith('COPY '):
+                copied.update(line.split()[1:-1])
+        missing = sorted(expected - copied)
+        self.assertEqual(missing, [], 'runtime manifest lists these but the image never copies them')

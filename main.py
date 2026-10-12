@@ -30,6 +30,9 @@ from usage_store import (IO_TIMEOUT as USAGE_IO_TIMEOUT_SECONDS,
                          MAX_BUFFER_EVENTS as USAGE_MAX_BUFFER_EVENTS,
                          FLUSH_BATCH_EVENTS as USAGE_FLUSH_BATCH_EVENTS)
 from gateway_lifecycle import sync_drain, DRAIN_MARKER_FILE
+from key_policy import (ALL_PROVIDERS, PROVIDER_IDS, PROVIDER_LABELS, KeyPolicyStore,
+                        fingerprint as key_fingerprint, mask as key_mask,
+                        normalise_providers)
 from response_semantics import assess_json, reported_usage, failure_reason, enrich_error, decode_json_response, invalid_stream_type, is_html as is_html_content_type
 from request_telemetry import note_reason
 from cleanup_observability import CLEANUP
@@ -7008,6 +7011,42 @@ proxy: Optional[ClaudeProxy] = None
 azure_proxy: Optional[AzureOpenAIProxy] = None
 copilot_proxy: Optional[CopilotProxy] = None
 usage_store: Optional[UsageDataStore] = None
+key_policy_store: Optional[KeyPolicyStore] = None
+
+# 每租户的进程内请求计数。重启归零，不代表密钥未被使用；Dashboard 与 admin
+# 响应都按此措辞标注。租户名不是凭据，这里不保存任何密钥材料。
+TENANT_USAGE: Dict[str, dict] = {}
+
+
+def _note_tenant_request(tenant: str) -> None:
+    item = TENANT_USAGE.setdefault(tenant, {'requests': 0, 'last_used_at': None})
+    item['requests'] += 1
+    item['last_used_at'] = time.time()
+
+
+def _allowed_providers(tenant: str) -> frozenset:
+    """未配置策略存储时不施加限制，保持既有 key 行为不变。"""
+    if key_policy_store is None:
+        return ALL_PROVIDERS
+    return key_policy_store.allowed(tenant)
+
+
+def _provider_allowed(provider: str, tenant: Optional[str] = None) -> bool:
+    return provider in _allowed_providers(tenant if tenant is not None else _CURRENT_TENANT.get())
+
+
+def _reject_provider(allowed: frozenset, model: str = ""):
+    """策略拒绝用 403，与「无可用端点」的 404 区分，便于客户端分清原因。"""
+    raise HTTPException(
+        status_code=403,
+        detail={"error": {
+            "code": "provider_not_allowed",
+            "message": (f"This API key is not allowed to use the provider required for model "
+                        f"'{model}'." if model else
+                        "This API key is not allowed to use the required provider."),
+            "allowed_providers": sorted(allowed),
+        }},
+    )
 
 
 async def _stop_runtime(tasks, store, clients):
@@ -7044,7 +7083,7 @@ async def _stop_runtime(tasks, store, clients):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global proxy, azure_proxy, copilot_proxy, usage_store
+    global proxy, azure_proxy, copilot_proxy, usage_store, key_policy_store
     app.state.lb_initialized = False
     # P3.1: OpenTelemetry tracing — opt-in via OTEL_ENABLED=true. Must run before
     # FastAPIInstrumentor sees any traffic, i.e. inside lifespan startup.
@@ -7059,6 +7098,18 @@ async def lifespan(app: FastAPI):
 
     usage_store = create_usage_store(storage_config)
     await usage_store.start()
+
+    # 独立于账本的小连接池：授权策略不该因为用量账本不健康而不可用。
+    # 加载失败不阻止启动 —— 此时不施加任何渠道限制，状态在 /stats 与
+    # Dashboard 上显式暴露，而不是静默。
+    key_policy_store = KeyPolicyStore(storage_config)
+    await key_policy_store.start()
+    policy_state = key_policy_store.status()
+    logger.info("[Policy] provider allow-list store: backend=%s state=%s tenants=%d",
+                policy_state["backend"], policy_state["state"], policy_state["tenants"])
+    if policy_state["state"] != "loaded":
+        logger.warning("[Policy] provider allow-lists are NOT being enforced (state=%s)",
+                       policy_state["state"])
 
     restore = usage_store.get_today_data()
     if restore and restore.get("models"):
@@ -7224,6 +7275,11 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
     # P3.2: 记录租户名到 request.state，供 metrics / structured log 打 label
     request.state.tenant = _lookup_tenant(actual_key) or "default"
     _CURRENT_TENANT.set(request.state.tenant)
+    _note_tenant_request(request.state.tenant)
+    # 这个入口只由 Databricks 服务；不允许该渠道的 key 在此明确被拒。
+    allowed_providers = _allowed_providers(request.state.tenant)
+    if 'databricks' not in allowed_providers:
+        _reject_provider(allowed_providers)
     set_parameter_policy(request.headers.get('x-lb-strict-parameters'), image_trim=request.headers.get('x-lb-image-trim'))
 
     # 读取原始请求体，先做粗暴上限保护避免 OOM，然后尝试压图
@@ -7336,14 +7392,15 @@ def _extract_api_key(request: Request, x_api_key: Optional[str] = None) -> str:
 API_KEY_TO_TENANT: Dict[str, str] = {}
 
 
-def _register_api_keys(single_key: str, keys_dict: Optional[dict]) -> None:
-    """P3.2: 把配置里的 api_key/api_keys 规范化到 API_KEY_TO_TENANT。
-    - `auth.api_key: str`（旧配置）→ tenant "default"
-    - `auth.api_keys: {name: key}`（新配置）→ tenant name from dict key
-    两种可以共存；重复 key 后者覆盖前者并 log 一次警告。"""
-    API_KEY_TO_TENANT.clear()
+def _build_api_key_map(single_key: str, keys_dict: Optional[dict]) -> Dict[str, str]:
+    """把配置里的 api_key/api_keys 规范化成一份新的 map，不改全局状态。
+
+    单独拆出来是因为重读必须「先全部校验通过再替换」：旧实现一上来就
+    clear()，配置写坏时会把所有调用方锁在门外。
+    """
+    built: Dict[str, str] = {}
     if single_key:
-        API_KEY_TO_TENANT[single_key] = "default"
+        built[single_key] = "default"
     if keys_dict:
         for tenant_name, raw_key in keys_dict.items():
             key = expand_env_vars(raw_key) if isinstance(raw_key, str) else raw_key
@@ -7351,12 +7408,26 @@ def _register_api_keys(single_key: str, keys_dict: Optional[dict]) -> None:
                 raise ValueError(f"auth.api_keys tenant name must be non-empty string, got {tenant_name!r}")
             if not isinstance(key, str) or not key:
                 raise ValueError(f"auth.api_keys[{tenant_name!r}] value must be non-empty string")
-            if key in API_KEY_TO_TENANT and API_KEY_TO_TENANT[key] != tenant_name:
+            if key in built and built[key] != tenant_name:
                 logger.warning(
                     "auth.api_keys: tenant %r reuses same key as %r; last-writer-wins",
-                    tenant_name, API_KEY_TO_TENANT[key],
+                    tenant_name, built[key],
                 )
-            API_KEY_TO_TENANT[key] = tenant_name.strip()
+            built[key] = tenant_name.strip()
+    return built
+
+
+def _register_api_keys(single_key: str, keys_dict: Optional[dict]) -> None:
+    """P3.2: 把配置里的 api_key/api_keys 规范化到 API_KEY_TO_TENANT。
+    - `auth.api_key: str`（旧配置）→ tenant "default"
+    - `auth.api_keys: {name: key}`（新配置）→ tenant name from dict key
+    两种可以共存；重复 key 后者覆盖前者并 log 一次警告。
+
+    校验全部通过后才就地替换，所以解析失败不会留下空 map。保持同一个 dict
+    对象（调用方与测试持有它的引用）。"""
+    built = _build_api_key_map(single_key, keys_dict)
+    API_KEY_TO_TENANT.clear()
+    API_KEY_TO_TENANT.update(built)
 
 
 def _lookup_tenant(actual_key: str) -> Optional[str]:
@@ -7834,6 +7905,18 @@ async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Opt
 
     azure_supports = _azure_supports_model(model)
     copilot_can = copilot_proxy is not None and copilot_proxy.can_handle(model, api_type)
+
+    # per-key 渠道限制：**只做减法**。不新增候选、不改 Copilot 优先 → Azure
+    # fallback 的既有顺序，所以不触碰 CLAUDE.md 的路由不变量。
+    allowed = _allowed_providers(_CURRENT_TENANT.get())
+    if allowed != ALL_PROVIDERS:
+        could_serve = copilot_can or azure_supports
+        copilot_can = copilot_can and 'copilot' in allowed
+        azure_supports = azure_supports and 'azure_openai' in allowed
+        # 过滤前有人能服务、过滤后没有 → 是策略拒绝，不是容量问题。
+        if could_serve and not (copilot_can or azure_supports):
+            _reject_provider(allowed, model)
+
     rid = request_id or "-"
     copilot_status = _summarize_copilot_status(model, api_type)
 
@@ -8103,6 +8186,7 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
     request.state.tenant = _lookup_tenant(actual_key) or "default"  # P3.2
     _CURRENT_TENANT.set(request.state.tenant)
+    _note_tenant_request(request.state.tenant)
     set_parameter_policy(request.headers.get('x-lb-strict-parameters'), image_trim=request.headers.get('x-lb-image-trim'))
 
     body_bytes = await _read_bounded_request_body(request)
@@ -8149,6 +8233,7 @@ async def chat_completions(request: Request, x_api_key: Optional[str] = Header(N
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
     request.state.tenant = _lookup_tenant(actual_key) or "default"  # P3.2
     _CURRENT_TENANT.set(request.state.tenant)
+    _note_tenant_request(request.state.tenant)
     set_parameter_policy(request.headers.get('x-lb-strict-parameters'), image_trim=request.headers.get('x-lb-image-trim'))
 
     body_bytes = await _read_bounded_request_body(request)
@@ -8692,9 +8777,149 @@ async def admin_copilot_reload(request: Request, x_api_key: Optional[str] = Head
     return {"endpoints": results}
 
 
+def _require_admin_key(request: Request, x_api_key: Optional[str]) -> str:
+    actual_key = _extract_api_key(request, x_api_key)
+    if not _verify_lb_api_key(actual_key):
+        raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
+    return actual_key
+
+
+def _policy_status_view() -> dict:
+    if key_policy_store is None:
+        return {"state": "disabled", "backend": "none", "tenants": 0,
+                "last_loaded_at": None, "last_error_type": None,
+                "unrestricted_when_unavailable": True}
+    return key_policy_store.status()
+
+
+@app.get("/admin/api-keys")
+async def admin_api_keys(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：列出已激活密钥的**身份**与渠道限制。
+
+    只返回掩码与 sha256 前缀，绝不返回密钥明文；短密钥连掩码都不给，因为
+    露出 8/10 个字符等于交出大半个秘密。请求数与最后使用时间是**进程内**
+    计数，Pod 重启归零，不代表密钥未被使用。
+    """
+    _require_admin_key(request, x_api_key)
+    keys = []
+    for key, tenant in sorted(API_KEY_TO_TENANT.items(), key=lambda item: item[1]):
+        usage = TENANT_USAGE.get(tenant) or {}
+        allowed = _allowed_providers(tenant)
+        keys.append({
+            "tenant": tenant,
+            "masked": key_mask(key),
+            "fingerprint": key_fingerprint(key),
+            "providers": sorted(allowed),
+            "restricted": allowed != ALL_PROVIDERS,
+            "requests": usage.get("requests", 0),
+            "last_used_at": usage.get("last_used_at"),
+        })
+    return {
+        "keys": keys,
+        "providers": list(PROVIDER_IDS),
+        "provider_labels": dict(PROVIDER_LABELS),
+        "policy": _policy_status_view(),
+        "counters_are_process_local": True,
+        "note": ("Masked identity and fingerprint only; plaintext keys are never returned. "
+                 "Request counts are process-local and reset on restart."),
+    }
+
+
+@app.put("/admin/api-keys/{tenant}/providers")
+async def admin_set_tenant_providers(tenant: str, request: Request,
+                                     x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：设置某租户允许使用的后端 provider（allowlist）。
+
+    allowlist 只做减法 —— 它不能让某 provider 服务它本来不支持的模型。
+    """
+    _require_admin_key(request, x_api_key)
+    if key_policy_store is None:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "policy_store_unavailable",
+            "message": "Provider policy storage is not configured."}})
+    if tenant not in set(API_KEY_TO_TENANT.values()):
+        raise HTTPException(status_code=404, detail={"error": {
+            "message": f"Tenant '{tenant}' has no registered API key"}})
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail={"error": {"message": "Body must be JSON"}})
+    try:
+        providers = normalise_providers((payload or {}).get("providers"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"error": {
+            "code": "invalid_providers", "message": str(e)}})
+    try:
+        stored = await key_policy_store.set_providers(tenant, providers)
+    except Exception as e:
+        # 写失败时执行中的策略保持不变，不假装成功。
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "policy_write_failed", "message": f"{type(e).__name__}"}})
+    return {"tenant": tenant, "providers": list(stored), "policy": _policy_status_view()}
+
+
+@app.post("/admin/api-keys/reload")
+async def admin_api_keys_reload(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：从源（CONFIG_PATH）重读客户端密钥，无需重启 Pod。
+
+    与 /admin/copilot/reload 同一个模型：**在源头轮换，再让网关重读**。网关
+    不生成也不存储客户端密钥。
+
+    只重读 auth 段，不重建 proxy —— 重建会影响在途请求，超出轮换需要。
+    解析或校验失败时保留原有注册，绝不留下空 map。`${ENV}` 形式的值取自
+    进程环境，文件更新不会改变它们，仍需滚动重启。
+    """
+    _require_admin_key(request, x_api_key)
+    config_path = os.getenv("CONFIG_PATH", "config.yaml")
+    try:
+        raw = Path(config_path).read_text()
+    except OSError as e:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "config_source_unreadable", "message": f"{type(e).__name__}"}})
+    try:
+        document = yaml.safe_load(raw)
+        if not isinstance(document, dict):
+            raise ValueError("configuration root must be a mapping")
+        auth_config = document.get("auth") or {}
+        if not isinstance(auth_config, dict):
+            raise ValueError("auth section must be a mapping")
+        single = expand_env_vars(auth_config.get("api_key", "") or "")
+        keys_dict = auth_config.get("api_keys")
+        env_interpolated = any(
+            isinstance(value, str) and "${" in value
+            for value in [auth_config.get("api_key", "") or "", *((keys_dict or {}).values())])
+        built = _build_api_key_map(single, keys_dict)
+        if not built:
+            raise ValueError("source declares no usable API key")
+    except Exception as e:
+        # 校验在替换之前，所以此处旧密钥仍然有效。
+        raise HTTPException(status_code=400, detail={"error": {
+            "code": "invalid_key_source", "message": str(e)}})
+
+    before = sorted(set(API_KEY_TO_TENANT.values()))
+    API_KEY_TO_TENANT.clear()
+    API_KEY_TO_TENANT.update(built)
+    after = sorted(set(API_KEY_TO_TENANT.values()))
+    logger.info("[Auth] api keys re-read from source: %d key(s), tenants=%s", len(built), after)
+    return {
+        "reloaded": True,
+        "source": config_path,
+        "keys": len(built),
+        "tenants": after,
+        "tenants_added": sorted(set(after) - set(before)),
+        "tenants_removed": sorted(set(before) - set(after)),
+        "env_interpolated": env_interpolated,
+        "note": ("Only the auth section was re-read; providers and pools are untouched. "
+                 "Values written as ${ENV} come from the process environment, so a file "
+                 "update alone does not change them — those still need a rolling restart."),
+    }
+
+
 @app.get("/stats")
 async def stats():
     result = proxy.get_stats()
+    # 渠道限制的降级要可见：未加载时不施加限制，这里如实报告而不是静默。
+    result["provider_policy"] = _policy_status_view()
     # 端点级 per-model Est. Cost 仍反映本次会话内的负载分布
     for ep in result.get("endpoints", []):
         for model_name, mstats in (ep.get("model_stats") or {}).items():
