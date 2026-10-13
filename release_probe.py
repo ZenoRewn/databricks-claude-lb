@@ -119,7 +119,7 @@ def validate_schema(schema):
             raise ValueError('policy_schema_unique_keys_mismatch')
     # Same absent-is-accepted rule: the account table is also created lazily.
     if schema.get('account_columns'):
-        expected={'account':['varchar','NO',190],'enabled':['tinyint','NO',None],
+        expected={'account':['varchar','NO',190],'enabled':['tinyint','YES',None],
                   'allowed_models':['text','YES',65535],'capability':['text','YES',65535],
                   'capability_at':['timestamp','YES',None],'updated_at':['timestamp','NO',None]}
         if schema['account_columns']!=expected:raise ValueError('account_schema_columns_mismatch')

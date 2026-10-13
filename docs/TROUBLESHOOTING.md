@@ -655,7 +655,7 @@ COPILOT_STRIP_INPUT_ITEM_IDS=false    # 恢复原样透传
 `encrypted_content` 的**归属**，主动剥 id 结构上防不住。正确读法见 [第 17 节](#17-上游拒绝-opaque-state-时的有界恢复阶梯)。
 
 另外：会话被永久毒化的原因**不是** LB 重启换 session token —— 那条假设已被实测否证，见
-[第 16 节](#16-重启会让客户端手里的会话状态失效--实测不成立)。
+[第 16 节](#restart-does-not-invalidate-session-state)。
 
 ---
 
@@ -763,6 +763,8 @@ copilot_upstream_401_total{scope="endpoint"} > 0               # 真凭证问题
 ```
 
 ---
+
+<a id="restart-does-not-invalidate-session-state"></a>
 
 ## 16. 「重启会让客户端手里的会话状态失效」—— 实测不成立
 

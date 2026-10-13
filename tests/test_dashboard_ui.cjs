@@ -204,6 +204,30 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   assert.match(element('accountsContent').innerHTML, /尚未发现能力/);
   assert.match(element('accountsContent').innerHTML, /已停用/);
 
+  // An account shipped inert reads differently from one an operator switched
+  // off: both are out of service, but only the second was a decision.
+  context.renderAccounts({policy: {state: 'loaded', backend: 'mysql', tenants: 0},
+    accounts: [{account: 'fresh', enabled: false, enabled_in_config: false,
+                enablement_source: 'config', token_source: 'file', requests: 0,
+                configured_models: [], capability: [], capability_at: null, allowed_models: null}]});
+  let inert = element('accountsContent').innerHTML;
+  assert.match(inert, /配置声明不投入服务/, 'an inert account must not read as operator-disabled');
+  assert.doesNotMatch(inert, /已停用/);
+  assert.match(inert, /启用前先「刷新能力」/, 'enabling it blind would make it a candidate for everything');
+  assert.match(inert, /data-needs-capability="1"/, 'the guard must be reachable from the control');
+
+  // Once capability is known the warning goes away; discovery alone must not
+  // flip the account to enabled.
+  context.renderAccounts({policy: {state: 'loaded', backend: 'mysql', tenants: 0},
+    accounts: [{account: 'fresh', enabled: false, enabled_in_config: false,
+                enablement_source: 'config', token_source: 'file', requests: 0,
+                configured_models: [], capability: ['gpt-4o'], capability_at: 1700000000,
+                allowed_models: null}]});
+  inert = element('accountsContent').innerHTML;
+  assert.match(inert, /配置声明不投入服务/, 'discovery is not an enablement');
+  assert.doesNotMatch(inert, /data-needs-capability/, 'capability is known now');
+  assert.doesNotMatch(inert, /启用前先「刷新能力」/);
+
   // Unchecking every model must not reach the server — disabling is a separate control.
   const accountNodes = [];
   context.document.querySelectorAll = selector => {
@@ -218,6 +242,35 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   await context.saveAccount('biz');
   assert.equal(requests.length, 0, 'an all-unchecked save must be refused locally');
   assert.match(element('keysStatus').textContent, /取消「启用」/);
+  assert.equal(element('keysAdminKey').value, '');
+
+  // Enabling an inert account with no capability must not reach the server:
+  // it would be a wildcard candidate for every model until discovery runs.
+  element('keysAdminKey').value = 'lb-key-for-account-tests';
+  accountNodes.length = 0;
+  accountNodes.push({selector: '#accountsTable [data-enable="fresh"]', checked: true,
+                     dataset: {needsCapability: '1'}});
+  requests = [];
+  await context.saveAccount('fresh');
+  assert.equal(requests.length, 0, 'enabling without capability must be refused locally');
+  assert.match(element('keysStatus').textContent, /先点「刷新能力」/);
+  assert.equal(element('keysAdminKey').value, '');
+
+  // Disabling that same account is always allowed — the guard is about enabling.
+  element('keysAdminKey').value = 'lb-key-for-account-tests';
+  accountNodes.length = 0;
+  accountNodes.push({selector: '#accountsTable [data-enable="fresh"]', checked: false,
+                     dataset: {needsCapability: '1'}});
+  requests = [];
+  context.fetch = async (url, options) => {
+    requests.push({url, options});
+    return {ok: true, status: 200, json: async () => ({account: {account: 'fresh', enabled: false,
+      enabled_in_config: false, enablement_source: 'operator', capability: []},
+      policy: {state: 'loaded', backend: 'mysql', tenants: 0}})};
+  };
+  await context.saveAccount('fresh');
+  assert.equal(requests.length, 1, 'an explicit disable must still be sendable');
+  assert.equal(JSON.parse(requests[0].options.body).enabled, false);
   assert.equal(element('keysAdminKey').value, '');
 
   element('keysAdminKey').value = 'lb-key-for-account-tests';

@@ -10,6 +10,27 @@ Author: Zeno Ren
 
 上游凭据可使用环境变量或已有 Secret 挂载。在现有 AKS 中改凭据来源、挂载路径或 `envFrom` 必须核对现场配置，不能只复制示例的一半。见 [AKS 指南](AKS.md)。
 
+<a id="policy-degradation-config-is-the-baseline"></a>
+
+### 策略降级：配置是基线，存储是 overlay
+
+运行时策略（按密钥限渠道、模型→provider 优先序、GHCP 账户启用与勾选）全部存在用量存储里，而它们**都是叠在配置之上的 overlay**。只有一条降级规则：
+
+> **overlay 缺失或未加载时，回落到配置基线。**
+
+| 层 | overlay 不可用时的结果 | 回落到的基线 |
+|---|---|---|
+| 按密钥限渠道 | 允许全部渠道 | config 里配置了哪些 provider |
+| 模型 → provider 优先序 | 默认顺序 | Copilot 优先 → Azure fallback |
+| GHCP `allowed_models` | 本层不施加约束 | 端点的 `models` 列表 |
+| GHCP 账户启用态 | 保持 inert 或启用 | 端点的 `enabled` 声明 |
+
+前三行看起来像 "fail-open"，那只是因为它们的基线恰好宽松。规则本身是**回落基线**而非**放行** —— 最后一行的基线可以是 `enabled: false`，于是同一条规则给出的是「保持不投入服务」。把它读成例外会得出错误结论。
+
+理由是限制层不应把数据库故障放大成网关整体不可用，但同样不该把故障变成一次意料之外的扩权。两种状态都显式暴露：从未成功加载为 `unavailable`，加载过但刷新失败为 `stale`（继续执行最后一次成功读取的策略），在 `/stats` 与 Dashboard 可见，不静默。
+
+跨层的回归断言在 `tests/test_key_policy.py::DegradationFallsBackToTheConfigBaselineTests` —— 四层放在一个类里断言，任何一层改成真正的 fail-open 都会红。
+
 ### 按密钥限制后端渠道
 
 渠道 id 为 `databricks`(ADB) / `copilot`(GHCP) / `azure_openai`(Foundry)，与用量记录里的 `provider` 取值一致。设置入口是 Dashboard「密钥与渠道」页或 `PUT /admin/api-keys/{tenant}/providers`，存在用量存储中，立即生效并跨重启保留。**未设置的租户默认允许全部渠道**，所以既有密钥行为不变。
@@ -18,7 +39,7 @@ allowlist **只做减法**：它从候选里移除渠道，不新增候选、不
 
 存储层保存的是**租户名与渠道 id**，不含任何密钥材料。
 
-降级是有意的：策略存储从未成功加载时**不施加任何限制**，状态为 `unavailable`；加载过但刷新失败则继续执行最后一次成功读取的策略，状态为 `stale`。理由是限制层不应把数据库故障放大成网关整体不可用。状态在 `/stats` 的 `provider_policy` 与 Dashboard 上显式暴露，不静默。发布预检会校验该表的列宽与主键，但表不存在时不报错 —— 它由应用首次使用时惰性创建，引入它的那次发布之前本就不存在。
+降级按[统一规则](#policy-degradation-config-is-the-baseline)回落到配置基线，对这一层即「允许全部渠道」；状态在 `/stats` 的 `provider_policy` 与 Dashboard 上显式暴露，不静默。发布预检会校验该表的列宽与主键，但表不存在时不报错 —— 它由应用首次使用时惰性创建，引入它的那次发布之前本就不存在。
 
 ### 密钥身份与轮换
 
@@ -119,9 +140,30 @@ device flow 的 `device_code` 只存在进程内并带 TTL，不落库、不进�
 
 停用账户用启用开关，不要靠清空勾选 —— 空列表会被拒，否则两种语义会混淆。
 
-与 `/models` 目录的关系：目录由启用账户的有效集派生。通配端点（`models: []`）若已发现 capability，就用 capability 而非静态核验表，因为前者更准。
+#### 先落地、确认后再启用
 
-降级语义与密钥策略一致：存储从未加载成功则不施加限制并标 `unavailable`，刷新失败则继续执行最后已知策略并标 `stale`，状态在 `/stats` 与 Dashboard 暴露。发布预检会校验 `copilot_account_policy` 的列与主键，表不存在时放行（它由首次使用惰性创建）。
+账户的启用态是**三态**，不是开关：
+
+| 状态 | 来自 | 接流量 |
+|---|---|---|
+| 未启用 | 配置写了 `enabled: false`，且运维从未做过决定 | 否 |
+| 已启用 | 运维通过 `PUT /admin/copilot/accounts/{account}` 显式启用 | 是 |
+| 已停用 | 运维显式停用 | 否 |
+
+`enablement_source` 字段说明这个值现在由谁决定（`config` 或 `operator`）。配置只给**基线**，一次显式写入之后由存储接管，两个方向都归它裁决。
+
+需要 `enabled: false` 是因为别无他法：token 来自只读的 Secret 挂载，端点又只在启动时构建，所以不把账户写进配置就根本没有可供 Dashboard 操作的对象 —— 而写进去在过去就等于立刻投入服务。
+
+两点容易被误读，但都是[统一降级规则](#policy-degradation-config-is-the-baseline)的直接结果，不是特例：
+
+- **存储不可用时保持配置声明的基线。** 规则是「回落基线」而不是「放行」；这里的基线是 `enabled: false`，所以结果是保持 inert。放行一个从未被启用过的账户不是「恢复既有行为」，而是把一个按设计不该接流量的账户推上线。
+- **发现能力不等于启用。** `discover` 是对上游的只读查询，它会创建记录但**不写** `enabled` —— 沿用本节开头「capability 是上游事实且只读，allowed_models 是运维意图」的同一条分离。存储层因此把 `enabled` 持久化为可空列（`NULL` = 尚无决定）；否则一次「刷新能力」就会把 inert 账户推上线。
+
+启用一个配置声明为 inert 且没有 `models`、也从未发现过 capability 的账户会被拒（400 `capability_unknown`）：它没有任何边界，启用即通配，会成为每个模型的候选 —— 包括自己席位没有的那些。顺序是**先发现能力 → 勾选 → 启用**。
+
+与 `/models` 目录的关系：目录由启用账户的有效集派生。通配端点（`models: []`）若已发现 capability，就用 capability 而非静态核验表，因为前者更准。未启用的账户不贡献任何模型，也不会触发通配回落。
+
+降级按[统一规则](#policy-degradation-config-is-the-baseline)回落到配置基线：`allowed_models` 这一层不再施加约束（端点的 `models` 仍然生效），启用态保持配置声明的那个值。发布预检会校验 `copilot_account_policy` 的列与主键，表不存在时放行（它由首次使用惰性创建）。
 
 实测提示：同一 SKU 的账户模型集合可能完全一致（2026-10-12 实测 4 个 business seat 账户各 38 个模型、零差异），差异主要在 SKU 层。逐账户勾选在同 SKU 之间不产生区分效果。
 

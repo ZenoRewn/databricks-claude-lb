@@ -2266,8 +2266,8 @@ def _copilot_account_policy(name: str) -> dict:
     """账户的生效策略视图；无存储时等价于「启用且不限制」。"""
     store = key_policy_store
     if store is None:
-        return {"enabled": True, "allowed_models": None, "capability": (),
-                "capability_at": None, "configured": False}
+        return {"enabled": True, "enabled_decided": False, "allowed_models": None,
+                "capability": (), "capability_at": None, "configured": False}
     return store.account_policy(name)
 
 
@@ -2281,6 +2281,26 @@ def _copilot_account_allows(name: str, model: str) -> bool:
     if store is None:
         return True
     return store.account_allows(name, model)
+
+
+def _copilot_account_enabled(endpoint) -> bool:
+    """账户是否在服务中：配置是基线，运维的显式决定接管之后的状态。
+
+    这是全项目统一的那条降级规则的一个实例：**overlay 缺失或未加载时回落到
+    配置基线**。provider allowlist 回落到「config 配了哪些 provider」、模型偏好
+    回落到默认顺序、allowed_models 回落到 config 的 models 列表 —— 它们看着像
+    fail-open 只是因为那些基线恰好宽松。这里的基线是 ``enabled: false``，所以
+    同一条规则给出的是「保持 inert」，不是例外。
+
+    合并发生在这里而不是 key_policy，因为策略存储不认识配置 —— 它只知道运维
+    做过什么决定。两个方向都由存储裁决：启用能抬起 inert 基线，停用也能压下
+    启用的基线。判据是 ``enabled_decided`` 而非「有记录」：发现能力也会建记录，
+    拿它当启用依据会让一次只读的上游查询把账户推上线。
+    """
+    policy = _copilot_account_policy(getattr(endpoint, "name", ""))
+    if policy.get("enabled_decided"):
+        return policy["enabled"]
+    return bool(getattr(endpoint, "enabled_in_config", True))
 
 
 def _validate_copilot_api_types(value):
@@ -2297,6 +2317,7 @@ class CopilotEndpoint:
     github_token: str  # long-lived OAuth token（device flow 拿到的；运行时可被 reload_github_token 替换）
     weight: int = 1
     # 可选限定模型；空列表 = 接受所有模型，遇到不支持的 400 再降级 Azure
+    # 初始启用态见文件末尾的 enabled_in_config（追加在那里以保留位置参数顺序）。
     models: list = field(default_factory=list)
 
     def __post_init__(self):
@@ -2306,7 +2327,8 @@ class CopilotEndpoint:
         # 运行时账户策略放在这里，而不是逐个调用点 —— supports() 是所有候选判断
         # 的唯一收口（含会话亲和用的「配置态合格集合」）。漏掉亲和那一处会让
         # 已禁用账户仍参与哈希，再回落时把所有会话重新洗牌。
-        return (_copilot_account_allows(self.name, model)
+        return (_copilot_account_enabled(self)
+                and _copilot_account_allows(self.name, model)
                 and (not self.models or model in self.models)
                 and (api_type is None or api_type in self.api_types))
 
@@ -2362,6 +2384,11 @@ class CopilotEndpoint:
     upstream_html_events_total: int = field(default=0, repr=False)
     # Append to preserve legacy positional construction of existing fields.
     api_types: tuple = ("responses", "chat")
+    # 配置声明的初始启用态。写 false 表示「部署但不投入服务」：端点照常构建、
+    # 在 /admin/copilot/accounts 里可见可操作，但在被显式启用前不进任何候选集。
+    # 这是账户唯一「先落地再启用」的途径 —— token 来自只读 Secret 挂载，端点又
+    # 只在启动时构建，所以不写进配置就根本没有可供 Dashboard 操作的对象。
+    enabled_in_config: bool = True
 
 
 @dataclass
@@ -7018,6 +7045,10 @@ def load_config(config_path: str = "config.yaml") -> tuple:
             if gh_token in resolved_tokens:
                 raise ValueError("Duplicate Copilot credential resolution; refusing repeated account/legacy fallback")
             resolved_tokens.add(gh_token)
+            enabled_in_config = ep_cfg.get("enabled", True)
+            if not isinstance(enabled_in_config, bool):
+                raise ValueError(
+                    f"Copilot endpoint '{ep_cfg.get('name')}': enabled must be true or false")
             copilot_endpoints.append(CopilotEndpoint(
                 name=ep_cfg["name"],
                 github_token=gh_token,
@@ -7025,8 +7056,13 @@ def load_config(config_path: str = "config.yaml") -> tuple:
                 weight=ep_cfg.get("weight", 1),
                 models=ep_cfg.get("models", []) or [],
                 api_types=ep_cfg.get("api_types", ("responses", "chat")),
+                enabled_in_config=enabled_in_config,
             ))
-            logger.info(f"Loaded Copilot endpoint: {ep_cfg['name']} (models: {ep_cfg.get('models') or 'all'}, source: {token_source.get('type')})")
+            # inert 的账户不接流量，但仍然加载 —— 否则 Dashboard 没有可启用的对象。
+            # 日志必须说清楚，不然运维会以为写进配置就已经在服务了。
+            state = "in service" if enabled_in_config else "INERT (enabled: false in config)"
+            logger.info(f"Loaded Copilot endpoint: {ep_cfg['name']} [{state}] "
+                        f"(models: {ep_cfg.get('models') or 'all'}, source: {token_source.get('type')})")
 
         if copilot_endpoints:
             copilot_lb = LoadBalancer(
@@ -7627,7 +7663,7 @@ def _collect_model_catalog(azure=None, copilot=None, databricks=None) -> dict:
         for ep in getattr(getattr(copilot, "load_balancer", None), "endpoints", []):
             name = getattr(ep, "name", "")
             policy = _copilot_account_policy(name)
-            if not policy["enabled"]:
+            if not _copilot_account_enabled(ep):
                 continue  # 目录要反映「现在真能用什么」，不是配置里写了什么
             models = [str(m) for m in (getattr(ep, "models", []) or []) if m]
             if not models:
@@ -9326,7 +9362,12 @@ def _copilot_account_view(endpoint: "CopilotEndpoint") -> dict:
     policy = _copilot_account_policy(endpoint.name)
     return {
         "account": endpoint.name,
-        "enabled": policy["enabled"],
+        # 生效态 = 配置基线，被显式写入接管后由写入决定。enablement_source 说明
+        # 这个值现在由谁决定 —— 「未启用」与「已停用」都不接流量，但只有后者
+        # 是运维的决定，两者混为一谈会让人以为自己关过某个从没开过的账户。
+        "enabled": _copilot_account_enabled(endpoint),
+        "enabled_in_config": bool(getattr(endpoint, "enabled_in_config", True)),
+        "enablement_source": "operator" if policy.get("enabled_decided") else "config",
         "configured_models": list(endpoint.models or []),
         "api_types": list(endpoint.api_types),
         "capability": list(policy["capability"]),
@@ -9385,6 +9426,15 @@ async def admin_set_copilot_account(account: str, request: Request,
     if not kwargs:
         raise HTTPException(status_code=400, detail={"error": {
             "message": "Provide 'enabled' and/or 'allowed_models'"}})
+    # 配置声明为 inert 的账户没有 configured_models，直接启用就等于通配：它会
+    # 成为每个模型的候选，包括自己席位没有的那些。先发现能力，再启用。
+    if (kwargs.get("enabled") is True and not getattr(endpoint, "enabled_in_config", True)
+            and not endpoint.models and not _copilot_account_policy(account)["capability"]):
+        raise HTTPException(status_code=400, detail={"error": {
+            "code": "capability_unknown",
+            "message": (f"Account '{account}' is declared inert in config and has no discovered "
+                        "capability, so enabling it would make it a candidate for every model. "
+                        f"POST /admin/copilot/accounts/{account}/discover first.")}})
     try:
         await key_policy_store.set_account(account, **kwargs)
     except ValueError as e:
