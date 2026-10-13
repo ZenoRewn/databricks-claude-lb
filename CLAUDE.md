@@ -11,6 +11,8 @@ Author: Zeno Ren
 - `claude-*` 默认只走 Databricks 的 `/v1/messages`。**例外是逐模型 opt-in**：给某个 claude 模型显式配置指向 Copilot/Azure 的优先序后，该模型在 OpenAI 风格入口放行（Copilot 原生服务其 Responses/Chat 形状）。没配就保持 400，既有行为不变。`/v1/messages` 仍然只走 Databricks —— 从 Copilot 提供 Anthropic Messages 协议需要双向适配器，本仓库只有解析没有合成。
 - **上游凭据可以由运维录入并持久化，但只以封装形式存储。** 这是对早先「网关从不存储凭据」的有意变更：AKS 上 Secret 挂载与 config 都是只读，应用 SA 无 secret 写权限，用量库是唯一可写的持久存储。AES-256-GCM，密钥取自 `LB_CREDENTIAL_KEY`（留在 Secret、不入库），每条独立 nonce，`provider|account` 作为 AAD 绑定行身份。**未配密钥时录入功能整体不可用（503），绝不退化为存明文。** 任何端点都不返回明文或密文。加密没有消除风险：运行进程内存里有明文，密钥丢失则凭据不可恢复。
 - 凭据**录入时即向上游校验**，不通过不入库；端点仍在**启动时**统一构建（配置 + 已存凭据两个来源），所以新录入需一次滚动重启才生效。不做运行时增删端点 —— 那会重洗会话亲和哈希并打乱账户 pinning。
+- 所有策略层共用一条降级规则：**配置是基线，策略存储是 overlay；overlay 缺失或未加载时回落配置基线。** provider allowlist 回落到「config 配了哪些 provider」、模型偏好回落到默认顺序、`allowed_models` 回落到 config 的 `models`。这些看着像 fail-open 只是因为那些基线恰好宽松 —— 规则本身是「回落基线」，不是「放行」。
+- Copilot 账户启用态是该规则下的三态：`enabled: false` 声明「部署但不投入服务」，端点照常构建、在 Dashboard 可操作，但在被**显式启用**前不进任何候选集；基线是限制性的，所以同一条规则给出「保持 inert」。一次显式写入后由存储接管，启用与停用两个方向都归它裁决。判据是「运维决定过」而不是「有记录」：`discover` 是对上游的只读查询，它建记录但**不写** `enabled`（该列可空，`NULL` = 尚无决定），否则一次刷新能力就会把 inert 账户推上线。这沿用既有的「capability 是上游事实且只读，allowed_models 是运维意图」分离。
 - 计价按**记录的模型名**区分渠道：`databricks-claude-*`（及裸 `opus-/sonnet-/haiku-/fable-` 旧别名）按 Anthropic 公开 API 价与「input 不含 cache」口径；裸 `claude-*` 来自 Copilot，按 copilot_pricing 分档价与 inclusive-input 口径。两者不可混用。
 - HTTP 200 或首个 SSE chunk 不代表生成完成。保留成功终态、失败、incomplete、refusal 和工具语义，见 [流协议](docs/STREAM_PROTOCOL.md)。
 - MySQL 账本幂等防止已持久批次重复累计；尚未 flush 的内存事件仍可能丢失，不能承诺零 RPO。JSON 后端只支持单写者。
@@ -59,8 +61,8 @@ Copilot 的 opaque-state 拒绝是请求级问题，不应污染账户熔断；�
 | `/admin/model-routing` | GET | 需要 | per-model 的 provider 优先序与生效顺序 |
 | `/admin/model-routing/{model}` | PUT | 需要 | 设置优先序（**顺序即偏好**，不去重不重排）。偏好只重排不筛除，fallback 保留；给 `claude-*` 配指向 Copilot/Azure 的偏好会在 OpenAI 风格入口放行该模型 |
 | `/admin/model-routing/{model}` | DELETE | 需要 | 清除偏好回到默认顺序；`claude-*` 随之重新被 OpenAI 风格入口拒绝 |
-| `/admin/copilot/accounts` | GET | 需要 | Copilot 账户的启用态、已发现能力（capability）与允许模型；只返回账户名与模型名，不返回 token。请求数为进程内累计 |
-| `/admin/copilot/accounts/{account}` | PUT | 需要 | 切换账户启用态与允许模型。**只能在已发现 capability 内勾选**，空列表被拒（停用请用 `enabled: false`）；写失败时执行中的策略不变 |
+| `/admin/copilot/accounts` | GET | 需要 | Copilot 账户的启用态、已发现能力（capability）与允许模型；只返回账户名与模型名，不返回 token。启用态是**三态**：`enabled` 是生效值，`enabled_in_config` 是配置声明的初始态，`policy_configured` 表明运维是否真的决定过。请求数为进程内累计 |
+| `/admin/copilot/accounts/{account}` | PUT | 需要 | 切换账户启用态与允许模型。**只能在已发现 capability 内勾选**，空列表被拒（停用请用 `enabled: false`）；启用一个配置声明 inert、无 `models`、也从未发现过 capability 的账户返回 400 `capability_unknown`（启用即通配）；写失败时执行中的策略不变 |
 | `/admin/copilot/accounts/{account}/discover` | POST | 需要 | 向上游重新发现该账户的模型能力并存快照。时点发现，不是能力认证；需带 editor 头部，否则 GitHub 返 403 |
 | `/admin/api-keys` | GET | 需要 | 已激活密钥的**身份**与渠道限制：掩码 + sha256 前缀，**绝不返回明文**，短密钥连掩码都不给。请求数与最后使用时间是进程内计数，重启归零 |
 | `/admin/api-keys/{tenant}/providers` | PUT | 需要 | 设置该租户允许的后端 provider（allowlist，只做减法）。写失败时执行中的策略保持不变，不假装成功 |

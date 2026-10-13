@@ -18,6 +18,14 @@ something it does not have.
 
 The policy only ever removes candidates. It does not reorder Copilot-first →
 Azure-fallback and cannot make an account serve a model outside its capability.
+
+A third layer sits under both: `enabled: false` in config. An account's token
+lives in the mounted Secret and endpoints are built at startup only, so naming
+an account in config is the only way to get an endpoint object the Dashboard can
+act on at all — which also means naming it is otherwise identical to putting it
+in service. The config flag is the initial state, and an explicit write through
+the API is what lifts it; thereafter the stored record decides, in both
+directions.
 """
 import asyncio
 import unittest
@@ -44,8 +52,9 @@ def _store(**accounts):
     return asyncio.run(_make_store(**accounts))
 
 
-def _endpoint(name, models=()):
-    return main.CopilotEndpoint(name=name, github_token='synthetic', models=list(models))
+def _endpoint(name, models=(), enabled=True):
+    return main.CopilotEndpoint(name=name, github_token='synthetic', models=list(models),
+                                enabled_in_config=enabled)
 
 
 class AccountPolicyStoreTests(unittest.IsolatedAsyncioTestCase):
@@ -345,6 +354,185 @@ class AdminEndpointTests(unittest.TestCase):
         with patch.object(main, '_discover_copilot_capability', fake):
             self.client.post('/admin/copilot/accounts/biz/discover', headers=self.H)
         self.assertEqual(self.store.account_policy('biz')['allowed_models'], ('gpt-4o',))
+
+
+class ConfigParsingTests(unittest.TestCase):
+    """load_config is where `enabled` becomes enabled_in_config.
+
+    Covered separately because every other test constructs the endpoint
+    directly: a parsing typo would leave all of them green while the deployed
+    config silently put an account into service.
+    """
+
+    def _load(self, endpoints):
+        import tempfile
+
+        import yaml
+        config = {
+            'databricks': {'endpoints': [{'name': 'db', 'api_base': 'https://x.invalid',
+                                          'token': 'synthetic'}]},
+            'auth': {'api_key': 'lb-synthetic-admin-key-1'},
+            'github_copilot': {'endpoints': endpoints},
+        }
+        with tempfile.NamedTemporaryFile('w', suffix='.yaml', delete=False) as handle:
+            yaml.safe_dump(config, handle)
+            path = handle.name
+        self.addCleanup(lambda: __import__('os').unlink(path))
+        _, _, copilot, _ = main.load_config(path)
+        return copilot
+
+    def test_enabled_false_reaches_the_endpoint(self):
+        copilot = self._load([{'name': 'inert', 'github_token': 'synthetic-a', 'enabled': False},
+                              {'name': 'live', 'github_token': 'synthetic-b'}])
+        by_name = {ep.name: ep for ep in copilot.load_balancer.endpoints}
+        self.assertFalse(by_name['inert'].enabled_in_config)
+        self.assertTrue(by_name['live'].enabled_in_config, 'omitting the key must stay enabled')
+
+    def test_a_non_boolean_enabled_fails_startup_rather_than_being_coerced(self):
+        # 'false' and 0 are the shapes a hand-edited ConfigMap produces, and
+        # truthiness would read 'false' as enabled.
+        for bad in ('false', 0, 1, None, []):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    self._load([{'name': 'x', 'github_token': 'synthetic', 'enabled': bad}])
+
+
+class ConfigDeclaredInertAccountTests(unittest.TestCase):
+    """`enabled: false` ships an account without putting it in service."""
+
+    def setUp(self):
+        self.store = _store(biz=BUSINESS)
+        p = patch.object(main, 'key_policy_store', self.store)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_an_inert_account_is_a_candidate_for_nothing(self):
+        endpoint = _endpoint('biz', enabled=False)
+        for model in BUSINESS:
+            with self.subTest(model=model):
+                self.assertFalse(endpoint.supports(model, 'responses'))
+
+    def test_a_config_enabled_account_is_unaffected(self):
+        self.assertTrue(_endpoint('biz').supports('gpt-6-astra', 'responses'))
+
+    def test_an_explicit_enable_lifts_the_config_default(self):
+        endpoint = _endpoint('biz', enabled=False)
+        asyncio.run(self.store.set_account('biz', enabled=True))
+        self.assertTrue(endpoint.supports('gpt-6-astra', 'responses'))
+
+    def test_a_later_disable_takes_it_back_out_of_service(self):
+        endpoint = _endpoint('biz', enabled=False)
+        asyncio.run(self.store.set_account('biz', enabled=True))
+        asyncio.run(self.store.set_account('biz', enabled=False))
+        self.assertFalse(endpoint.supports('gpt-6-astra', 'responses'))
+
+    def test_enabling_still_cannot_reach_outside_capability(self):
+        endpoint = _endpoint('biz', enabled=False)
+        asyncio.run(self.store.set_account('biz', enabled=True))
+        self.assertFalse(endpoint.supports('gpt-5.4', 'responses'))
+
+    def test_the_flag_holds_without_a_policy_store(self):
+        # Otherwise `enabled: false` would be a lie precisely when no store is
+        # configured: the account would serve traffic from first boot.
+        with patch.object(main, 'key_policy_store', None):
+            self.assertFalse(_endpoint('biz', enabled=False).supports('gpt-4o', 'responses'))
+
+    def test_an_unavailable_store_leaves_an_inert_account_inert(self):
+        # Failing open is right for a restriction layer, but this is not a
+        # restriction being lost — nothing ever enabled the account.
+        self.store._state = 'unavailable'
+        self.assertFalse(_endpoint('biz', enabled=False).supports('gpt-4o', 'responses'))
+        self.assertTrue(_endpoint('biz').supports('gpt-4o', 'responses'),
+                        'a config-enabled account must still fail open')
+
+    def test_an_inert_wildcard_account_does_not_open_the_whole_catalog(self):
+        # The hazard this guards: a never-discovered wildcard endpoint makes
+        # _collect_model_catalog fall back to the full static table, so an
+        # account that serves nothing would advertise everything.
+        copilot = main.CopilotProxy.__new__(main.CopilotProxy)
+        copilot.load_balancer = main.LoadBalancer([_endpoint('fresh', enabled=False)])
+        catalog = main._collect_model_catalog(azure=None, copilot=copilot, databricks=None)
+        self.assertEqual(catalog, {})
+
+    def test_an_inert_account_contributes_no_models_to_the_catalog(self):
+        copilot = main.CopilotProxy.__new__(main.CopilotProxy)
+        copilot.load_balancer = main.LoadBalancer([
+            _endpoint('ZenoRewn', models=list(ENTERPRISE)),
+            _endpoint('biz', models=list(BUSINESS), enabled=False)])
+        catalog = main._collect_model_catalog(azure=None, copilot=copilot, databricks=None)
+        self.assertNotIn('gpt-6-astra', catalog)
+        self.assertIn('gpt-5.4', catalog, 'the enabled account is unaffected')
+
+
+class InertAccountAdminTests(unittest.TestCase):
+    KEY = 'lb-copilot-inert-key-0123'
+
+    def setUp(self):
+        from starlette.testclient import TestClient
+
+        class _Stub:
+            api_key = InertAccountAdminTests.KEY
+
+            def verify_api_key(self, key):
+                return bool(key) and key == self.api_key
+
+        self.store = _store()
+        self.endpoint = _endpoint('fresh', enabled=False)
+        copilot = main.CopilotProxy.__new__(main.CopilotProxy)
+        copilot.load_balancer = main.LoadBalancer([self.endpoint])
+        copilot.api_key = self.KEY
+        copilot.verify_api_key = _Stub().verify_api_key
+        main.API_KEY_TO_TENANT.clear()
+        main.API_KEY_TO_TENANT[self.KEY] = 'default'
+        self.addCleanup(main.API_KEY_TO_TENANT.clear)
+        for attr, value in (('proxy', _Stub()), ('copilot_proxy', copilot),
+                            ('key_policy_store', self.store)):
+            p = patch.object(main, attr, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.client = TestClient(main.app, raise_server_exceptions=False)
+        self.H = {'x-api-key': self.KEY}
+
+    def _view(self):
+        return self.client.get('/admin/copilot/accounts', headers=self.H).json()['accounts'][0]
+
+    def test_the_listing_separates_the_config_default_from_the_effective_state(self):
+        view = self._view()
+        self.assertFalse(view['enabled'], 'effective state must not claim to be live')
+        self.assertFalse(view['enabled_in_config'])
+        self.assertEqual(view['enablement_source'], 'config',
+                         'no operator decision has been recorded yet')
+
+    def test_enabling_before_discovery_is_refused_rather_than_going_wildcard(self):
+        # An inert account carries no configured models, so enabling it without
+        # a capability snapshot would make it a candidate for every model —
+        # including the ones its seat does not have.
+        r = self.client.put('/admin/copilot/accounts/fresh', headers=self.H, json={'enabled': True})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()['detail']['error']['code'], 'capability_unknown')
+        self.assertFalse(self.endpoint.supports('gpt-4o', 'responses'))
+
+    def test_enabling_after_discovery_puts_it_in_service_within_its_capability(self):
+        async def fake(endpoint):
+            return list(BUSINESS)
+        with patch.object(main, '_discover_copilot_capability', fake):
+            self.assertEqual(
+                self.client.post('/admin/copilot/accounts/fresh/discover', headers=self.H).status_code, 200)
+        r = self.client.put('/admin/copilot/accounts/fresh', headers=self.H, json={'enabled': True})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()['account']['enabled'])
+        self.assertEqual(r.json()['account']['enablement_source'], 'operator')
+        self.assertTrue(self.endpoint.supports('gpt-6-astra', 'responses'))
+        self.assertFalse(self.endpoint.supports('gpt-5.4', 'responses'),
+                         'capability is still the outer bound')
+
+    def test_discovery_alone_does_not_put_an_inert_account_in_service(self):
+        async def fake(endpoint):
+            return list(BUSINESS)
+        with patch.object(main, '_discover_copilot_capability', fake):
+            self.client.post('/admin/copilot/accounts/fresh/discover', headers=self.H)
+        self.assertFalse(self.endpoint.supports('gpt-6-astra', 'responses'))
+        self.assertFalse(self._view()['enabled'])
 
 
 if __name__ == '__main__':

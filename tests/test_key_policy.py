@@ -8,9 +8,12 @@ The store holds tenant names and provider ids only. No client credential
 material is ever written to it, matching the project rule that artifacts carry
 identity and fingerprints rather than credential contents.
 
-Enforcement reads an in-memory cache. If the store was never loaded the gateway
-applies no restriction and reports the state, a deliberate fail-open: a
-restriction layer must not turn a database outage into a total outage.
+Enforcement reads an in-memory cache. Degradation follows the project's single
+rule — an overlay that is missing or unloaded falls back to the config baseline
+— which for this layer means no restriction at all: a restriction layer must
+not turn a database outage into a total outage. See DegradationFallsBackToThe
+ConfigBaselineTests at the bottom, which pins that rule across every layer so
+it cannot drift back into per-layer folklore.
 """
 import asyncio
 import unittest
@@ -244,6 +247,76 @@ class MessagesEnforcementTests(unittest.TestCase):
                                   'messages': [{'role': 'user', 'content': 'hi'}]})
         self.assertEqual(r.status_code, 403)
         self.assertEqual(r.json()['detail']['error']['code'], 'provider_not_allowed')
+
+
+class DegradationFallsBackToTheConfigBaselineTests(unittest.IsolatedAsyncioTestCase):
+    """One rule, every layer: an unavailable overlay yields the config baseline.
+
+    Three of these baselines happen to be permissive, which is why the rule has
+    been mistaken for "fail-open" before. It is not: GHCP account enablement has
+    a baseline that can be restrictive, and the same rule then keeps the account
+    out of service. Asserting all four together is what stops the next reader
+    from treating one of them as an exception.
+    """
+
+    async def asyncSetUp(self):
+        self.store = key_policy.KeyPolicyStore(None)
+        await self.store.start()
+        await self.store.set_providers('tenant-a', ['copilot'])
+        await self.store.set_model_preference('gpt-4o', ['azure_openai'])
+        await self.store.set_account_capability('acct', ('gpt-4o',))
+        await self.store.set_account('acct', allowed_models=['gpt-4o'])
+        patcher = patch.object(main, 'key_policy_store', self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _unavailable(self):
+        self.store._state = 'unavailable'
+
+    async def test_every_overlay_is_in_force_while_the_store_is_loaded(self):
+        # Guards the test itself: if nothing were in force, the assertions below
+        # would pass for the wrong reason.
+        self.assertEqual(self.store.allowed('tenant-a'), frozenset({'copilot'}))
+        self.assertEqual(self.store.model_preference('gpt-4o'), ('azure_openai',))
+        self.assertFalse(self.store.account_allows('acct', 'kimi-k3'))
+
+    async def test_provider_allowlist_falls_back_to_every_configured_provider(self):
+        self._unavailable()
+        self.assertEqual(self.store.allowed('tenant-a'), key_policy.ALL_PROVIDERS)
+
+    async def test_model_preference_falls_back_to_the_default_order(self):
+        self._unavailable()
+        self.assertEqual(self.store.model_preference('gpt-4o'), ())
+        self.assertEqual(main._openai_provider_order('gpt-4o'), main.OPENAI_STYLE_PROVIDERS)
+
+    async def test_allowed_models_falls_back_to_the_endpoints_configured_models(self):
+        self._unavailable()
+        # The overlay stops subtracting, but config's own limit still holds.
+        endpoint = main.CopilotEndpoint(name='acct', github_token='synthetic', models=['gpt-4o'])
+        self.assertTrue(endpoint.supports('gpt-4o', 'responses'))
+        self.assertFalse(endpoint.supports('kimi-k3', 'responses'),
+                         "config's models list is the baseline, not the overlay")
+
+    async def test_account_enablement_falls_back_to_the_config_declaration(self):
+        self._unavailable()
+        inert = main.CopilotEndpoint(name='acct', github_token='synthetic',
+                                     enabled_in_config=False)
+        live = main.CopilotEndpoint(name='acct', github_token='synthetic')
+        self.assertFalse(main._copilot_account_enabled(inert),
+                         'a restrictive baseline must survive the outage too')
+        self.assertTrue(main._copilot_account_enabled(live))
+
+    async def test_a_recorded_decision_survives_the_outage_in_both_directions(self):
+        # Degradation drops the overlay's *cache*, not an explicit decision that
+        # is still in memory — otherwise a disabled account would come back.
+        await self.store.set_account('acct', enabled=False)
+        self._unavailable()
+        self.assertFalse(main._copilot_account_enabled(
+            main.CopilotEndpoint(name='acct', github_token='synthetic')))
+
+    async def test_the_status_view_reports_the_degraded_state_rather_than_hiding_it(self):
+        self._unavailable()
+        self.assertEqual(self.store.status()['state'], 'unavailable')
 
 
 if __name__ == '__main__':

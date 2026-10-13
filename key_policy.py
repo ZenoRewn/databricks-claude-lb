@@ -219,10 +219,22 @@ class KeyPolicyStore:
     # -- Copilot account enablement --------------------------------------
 
     def account_policy(self, name: str) -> dict:
-        """Effective record for one account; defaults keep existing config intact."""
+        """Effective record for one account; defaults keep existing config intact.
+
+        ``enabled`` is three-state because this store holds operator intent
+        while ``capability`` holds upstream fact — the separation the rest of
+        this module already keeps. A record exists as soon as capability is
+        discovered, so "has a record" cannot mean "an operator decided to use
+        this account"; reading it that way would let a read-only discovery call
+        put an account into service. ``enabled_decided`` is the only signal
+        that an operator actually chose, and callers merging in a
+        config-declared baseline must branch on it rather than on
+        ``configured``.
+        """
         record = self._accounts.get(name) or {}
         return {
             'enabled': bool(record.get('enabled', True)),
+            'enabled_decided': 'enabled' in record,
             'allowed_models': record.get('allowed_models'),
             'capability': tuple(record.get('capability') or ()),
             'capability_at': record.get('capability_at'),
@@ -263,7 +275,9 @@ class KeyPolicyStore:
             record = dict(self._accounts.get(name.strip()) or {})
             record['capability'] = discovered
             record['capability_at'] = time.time()
-            record.setdefault('enabled', True)
+            # Deliberately no `enabled` default: discovery is a read of upstream,
+            # not a decision to use the account. Writing one here would enable an
+            # account that config declared inert.
             record.setdefault('allowed_models', None)
             # Capability can shrink; drop allow-list entries upstream no longer
             # offers rather than keeping a selection that cannot be served.
@@ -286,11 +300,14 @@ class KeyPolicyStore:
         current = dict(self._accounts.get(key) or {})
         capability = tuple(current.get('capability') or ())
         record = {
-            'enabled': current.get('enabled', True),
             'allowed_models': current.get('allowed_models'),
             'capability': capability,
             'capability_at': current.get('capability_at'),
         }
+        # Carry an existing decision forward, but do not invent one: setting only
+        # an allow-list must not silently enable an account declared inert.
+        if 'enabled' in current:
+            record['enabled'] = current['enabled']
         if enabled is not None:
             if not isinstance(enabled, bool):
                 raise ValueError('enabled must be a boolean')
@@ -430,22 +447,28 @@ class KeyPolicyStore:
     @staticmethod
     def _decode_account(enabled, allowed, capability, capability_at) -> dict:
         allowed_list = json.loads(allowed) if allowed else None
-        return {
-            'enabled': bool(enabled),
+        record = {
             'allowed_models': tuple(allowed_list) if allowed_list else None,
             'capability': tuple(json.loads(capability) if capability else ()),
             'capability_at': float(capability_at) if capability_at is not None else None,
         }
+        # NULL is "no operator decision recorded"; it must survive a round trip
+        # or a restart would turn an inert account into an enabled one.
+        if enabled is not None:
+            record['enabled'] = bool(enabled)
+        return record
 
     @staticmethod
     def _normalise_account(value: dict) -> dict:
         allowed = value.get('allowed_models')
-        return {
-            'enabled': bool(value.get('enabled', True)),
+        record = {
             'allowed_models': tuple(allowed) if allowed else None,
             'capability': tuple(value.get('capability') or ()),
             'capability_at': value.get('capability_at'),
         }
+        if value.get('enabled') is not None:
+            record['enabled'] = bool(value['enabled'])
+        return record
 
     async def _backend_write_account(self, account: str, record: dict) -> None:
         if self.backend == 'mysql':
@@ -460,7 +483,7 @@ class KeyPolicyStore:
                         'ON DUPLICATE KEY UPDATE enabled = VALUES(enabled), '
                         'allowed_models = VALUES(allowed_models), '
                         'capability = VALUES(capability), capability_at = VALUES(capability_at)',
-                        (account, 1 if record.get('enabled', True) else 0,
+                        (account, (1 if record['enabled'] else 0) if 'enabled' in record else None,
                          json.dumps(list(allowed)) if allowed else None,
                          json.dumps(list(record.get('capability') or ())),
                          record.get('capability_at')))
@@ -468,7 +491,7 @@ class KeyPolicyStore:
         if self.backend == 'json':
             merged = {**{n: dict(v) for n, v in self._accounts.items()}, account: dict(record)}
             self._atomic_write_json(self._accounts_path(), {
-                name: {'enabled': bool(value.get('enabled', True)),
+                name: {'enabled': bool(value['enabled']) if 'enabled' in value else None,
                        'allowed_models': list(value['allowed_models']) if value.get('allowed_models') else None,
                        'capability': list(value.get('capability') or ()),
                        'capability_at': value.get('capability_at')}
@@ -550,7 +573,8 @@ class KeyPolicyStore:
                 await cur.execute("""
                     CREATE TABLE IF NOT EXISTS copilot_account_policy (
                         account VARCHAR(190) NOT NULL,
-                        enabled TINYINT NOT NULL DEFAULT 1,
+                        -- NULL = 运维尚未决定；启用态由 config 的初始声明兜底。
+                        enabled TINYINT NULL DEFAULT NULL,
                         allowed_models TEXT NULL,
                         capability TEXT NULL,
                         capability_at TIMESTAMP NULL DEFAULT NULL,

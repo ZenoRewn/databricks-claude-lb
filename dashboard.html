@@ -961,9 +961,22 @@ function renderAccounts(payload) {
         }).join(' ')
       : '<span class="scope-note">尚未发现能力，先点「刷新能力」</span>';
     const at = a.capability_at ? new Date(a.capability_at * 1000).toLocaleString() : '未发现';
+    // 三态：已启用 / 已停用（运维明确关过）/ 未启用（配置声明 inert，还没人决定过）。
+    // 后两者都不接流量，但区分它们才能看出「是我关的」还是「从没开过」。
+    const label = a.enabled ? '已启用'
+      : (a.enablement_source === 'config' && a.enabled_in_config === false
+        ? '未启用 · 配置声明不投入服务' : '已停用');
+    // 与服务端 capability_unknown 同一个条件：配置声明 inert、没有 configured
+    // models、也没发现过能力 —— 这三者同时成立时启用就等于通配。配置里写了
+    // models 的账户不受影响，它已经有边界了。
+    const needsDiscovery = a.enabled_in_config === false
+      && !(a.configured_models || []).length && !capability.length;
     return '<tr><td>' + escapeHtml(a.account) + '</td>'
       + '<td><label class="field"><input type="checkbox" data-enable="' + escapeHtml(a.account) + '"'
-      + (a.enabled ? ' checked' : '') + '> ' + (a.enabled ? '已启用' : '已停用') + '</label></td>'
+      + (needsDiscovery ? ' data-needs-capability="1"' : '')
+      + (a.enabled ? ' checked' : '') + '> ' + escapeHtml(label) + '</label>'
+      + (needsDiscovery ? '<br><span class="scope-note">启用前先「刷新能力」，否则它会成为所有模型的候选</span>' : '')
+      + '</td>'
       + '<td>' + escapeHtml(String(a.token_source || '未知')) + '</td>'
       + '<td>' + escapeHtml(String(capability.length)) + ' 个<br><span class="scope-note">'
       + escapeHtml(at) + '</span></td>'
@@ -1015,6 +1028,13 @@ async function saveAccount(account) {
   if (enabled && boxes.length && !chosen.length) {
     status.hidden = false; status.dataset.state = 'error';
     status.textContent = '至少要勾选一个模型；要停用该账户请取消「启用」而不是清空勾选。';
+    field.value = ''; return;
+  }
+  // 没有已发现能力就启用 = 通配，该账户会成为每个模型的候选，包括它席位没有的。
+  // 服务端也会拒（capability_unknown），这里先说清楚，省一次往返。
+  if (enabled && enableBox && enableBox.dataset.needsCapability === '1') {
+    status.hidden = false; status.dataset.state = 'error';
+    status.textContent = '该账户尚无已发现能力，启用会让它成为所有模型的候选。请先点「刷新能力」。';
     field.value = ''; return;
   }
   const body = {enabled};
