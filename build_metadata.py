@@ -11,7 +11,7 @@ RUNTIME_FILES = ('main.py', 'build_metadata.py', 'chat_adapter.py', 'model_capab
                  'request_telemetry.py', 'safe_diagnostics.py', 'request_timing.py', 'request_budget.py',
                  'admission.py', 'gateway_lifecycle.py', 'upstream_body.py', 'usage_store.py', 'otel_setup.py',
                  'dashboard.html', 'response_semantics.py', 'cleanup_observability.py', 'copilot_pricing.py',
-                 'release_probe.py', 'key_policy.py', 'requirements.lock', 'requirements.txt')
+                 'release_probe.py', 'key_policy.py', 'provider_credentials.py', 'requirements.lock', 'requirements.txt')
 
 
 def source_hashes(root, files=RUNTIME_FILES):

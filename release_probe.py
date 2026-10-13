@@ -82,6 +82,12 @@ async def check_schema(storage):
             schema['account_columns']={row[0]:list(row[1:]) for row in await cur.fetchall()}
             await cur.execute("SELECT COLUMN_NAME,DATA_TYPE,IS_NULLABLE,CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='model_provider_preference'")
             schema['routing_columns']={row[0]:list(row[1:]) for row in await cur.fetchall()}
+            await cur.execute("SELECT COLUMN_NAME,DATA_TYPE,IS_NULLABLE,CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='provider_credential'")
+            schema['credential_columns']={row[0]:list(row[1:]) for row in await cur.fetchall()}
+            await cur.execute("SELECT INDEX_NAME,COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='provider_credential' AND NON_UNIQUE=0 ORDER BY INDEX_NAME,SEQ_IN_INDEX")
+            cred_indexes={}
+            for index,column in await cur.fetchall():cred_indexes.setdefault(index,[]).append(column)
+            schema['credential_unique_indexes']=cred_indexes
             await cur.execute("SELECT INDEX_NAME,COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='copilot_account_policy' AND NON_UNIQUE=0 ORDER BY INDEX_NAME,SEQ_IN_INDEX")
             account_indexes={}
             for index,column in await cur.fetchall():account_indexes.setdefault(index,[]).append(column)
@@ -123,6 +129,17 @@ def validate_schema(schema):
         expected={'model':['varchar','NO',190],'providers':['varchar','NO',255],
                   'updated_at':['timestamp','NO',None]}
         if schema['routing_columns']!=expected:raise ValueError('routing_schema_columns_mismatch')
+    # Credential rows hold sealed upstream secrets; a silently widened column or a
+    # lost primary key would change which record a request resolves to.
+    if schema.get('credential_columns'):
+        expected={'provider':['varchar','NO',32],'account':['varchar','NO',190],
+                  'sealed':['text','NO',65535],'key_fingerprint':['char','NO',12],
+                  'secret_fingerprint':['char','NO',12],'meta':['text','YES',65535],
+                  'validated_at':['timestamp','YES',None],'validation':['text','YES',65535],
+                  'updated_at':['timestamp','NO',None]}
+        if schema['credential_columns']!=expected:raise ValueError('credential_schema_columns_mismatch')
+        if schema.get('credential_unique_indexes')!={'PRIMARY':['provider','account']}:
+            raise ValueError('credential_schema_unique_keys_mismatch')
 
 
 def success_payload(payload,api):

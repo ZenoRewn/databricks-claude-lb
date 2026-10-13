@@ -9,3 +9,5 @@ pyyaml>=6.0
 Pillow>=10.0.0
 # MySQL 存储后端（可选，仅 usage_storage.type=mysql 时需要）
 aiomysql>=0.2.0
+# 凭据录入的应用层封装（AES-GCM）；密钥来自 LB_CREDENTIAL_KEY，不入库
+cryptography>=46.0.0

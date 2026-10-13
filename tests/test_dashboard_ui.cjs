@@ -310,5 +310,90 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   assert.match(element('keysStatus').textContent, /偏好保持不变/,
     'a failed clear must not claim the preference changed');
 
-  console.log('Dashboard UI: authenticated cleanup, honest errors, safe release identity, key panel, accounts, routing passed.');
+  // ---- upstream credentials ----
+  assert.match(html, /id="credentialsContent"/, 'credential area needs a container');
+  assert.match(html, /不会退化为存明文/, 'the no-plaintext-fallback rule must be stated');
+  assert.match(html, /不显示也不返回明文/, 'the panel must state plaintext is never shown');
+  assert.match(html, /需一次滚动重启才生效/, 'activation semantics must be stated');
+  assert.match(html, /type="password"[^>]*id="credSecret"|id="credSecret"[^>]*type="password"/,
+    'the credential field must be a password input');
+
+  context.renderCredentials({store: {key: 'present', key_fingerprint: 'abc123def456', unopenable: 0},
+    credentials: [{provider: 'databricks', account: 'ws-9', secret_fingerprint: 'deadbeefcafe',
+                   key_state: 'ok', active: false,
+                   validation: {ok: true, model_count: 3}, meta: {api_base: 'https://x.invalid'}}]});
+  assert.match(element('credentialsContent').innerHTML, /ws-9/);
+  assert.match(element('credentialsContent').innerHTML, /deadbeefcafe/);
+  assert.match(element('credentialsContent').innerHTML, /待重启生效/,
+    'a stored-but-inactive credential must not look live');
+  assert.doesNotMatch(element('credentialsContent').innerHTML, /dapi-|ghu_|sealed/,
+    'no secret or ciphertext may be rendered');
+
+  context.renderCredentials({store: {key: 'missing', unopenable: 0}, credentials: []});
+  assert.match(element('credentialsContent').innerHTML, /不会退化为存明文/,
+    'a missing sealing key must be reported prominently');
+
+  context.renderCredentials({store: {key: 'present', key_fingerprint: 'k', unopenable: 2}, credentials: []});
+  assert.match(element('credentialsContent').innerHTML, /无法用当前密钥解开/,
+    'records sealed with another key must be surfaced, not hidden');
+
+  context.renderCredentials({store: {key: 'present', key_fingerprint: 'k', unopenable: 0},
+    credentials: [{provider: 'copilot', account: '<img onerror=bad>', secret_fingerprint: 'f',
+                   key_state: 'sealed_with_other_key', active: false, validation: {ok: false, reason: 'rejected'}}]});
+  assert.doesNotMatch(element('credentialsContent').innerHTML, /<img onerror/, 'account names escaped');
+  assert.match(element('credentialsContent').innerHTML, /由另一把密钥封装/);
+
+  // A submitted credential must not linger in the DOM, and a 409 must be explained.
+  element('credProvider').value = 'databricks';
+  element('credAccount').value = 'ws-config';
+  element('credSecret').value = 'dapi-should-not-persist';
+  element('credApiBase').value = 'https://x.invalid';
+  element('credDeployments').value = '';
+  element('keysAdminKey').value = 'lb-key-for-cred-tests';
+  requests = [];
+  context.fetch = async (url, options) => {
+    requests.push({url, options});
+    return {ok: false, status: 409, json: async () => ({detail: {error: {code: 'account_declared_in_config'}}})};
+  };
+  await context.submitCredential();
+  assert.equal(requests[0].options.method, 'PUT');
+  assert.equal(JSON.parse(requests[0].options.body).secret, 'dapi-should-not-persist');
+  assert.match(element('keysStatus').textContent, /静默遮蔽/, 'a 409 must explain the shadowing rule');
+  assert.equal(element('credSecret').value, '', 'the credential field must be cleared after submit');
+  assert.equal(element('keysAdminKey').value, '');
+  assert.ok(!requests.some(r => r.url.includes('dapi-should-not-persist')),
+    'the credential must never travel in a URL');
+
+  // Device flow: pending is not a failure, and expiry resets the handle.
+  element('keysAdminKey').value = 'lb-key-for-cred-tests';
+  context.fetch = async (url, options) => {
+    requests.push({url, options});
+    return {ok: true, status: 200, json: async () => ({handle: 'h1', user_code: 'WXYZ-9876',
+      verification_uri: 'https://github.com/login/device', expires_in: 899})};
+  };
+  requests = [];
+  await context.startDeviceFlow();
+  assert.match(element('deviceStatus').textContent, /WXYZ-9876/);
+  assert.match(element('deviceStatus').textContent, /github\.com\/login\/device/);
+
+  element('deviceAccount').value = 'gh-account-5';
+  element('keysAdminKey').value = 'lb-key-for-cred-tests';
+  context.fetch = async () => ({ok: true, status: 200, json: async () => ({pending: true, interval: 5})});
+  await context.pollDeviceFlow();
+  assert.match(element('deviceStatus').textContent, /尚未授权完成/,
+    'authorization_pending must read as waiting, not as an error');
+
+  element('keysAdminKey').value = 'lb-key-for-cred-tests';
+  context.fetch = async () => ({ok: false, status: 410, json: async () => ({detail: {error: {code: 'device_flow_expired'}}})});
+  await context.pollDeviceFlow();
+  assert.match(element('deviceStatus').textContent, /已过期/);
+
+  element('keysAdminKey').value = 'lb-key-for-cred-tests';
+  element('deviceAccount').value = 'gh-account-5';
+  requests = [];
+  context.fetch = async (url, options) => { requests.push({url, options}); return {ok: true, status: 200, json: async () => ({}) }; };
+  await context.pollDeviceFlow();
+  assert.equal(requests.length, 0, 'an expired flow must not keep polling with a stale handle');
+
+  console.log('Dashboard UI: authenticated cleanup, honest errors, safe release identity, key panel, accounts, routing, credentials passed.');
 })().catch(error => {console.error(error); process.exitCode = 1;});

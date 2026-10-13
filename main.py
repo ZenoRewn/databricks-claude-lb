@@ -33,6 +33,8 @@ from gateway_lifecycle import sync_drain, DRAIN_MARKER_FILE
 from key_policy import (ALL_PROVIDERS, PROVIDER_IDS, PROVIDER_LABELS, KeyPolicyStore,
                         fingerprint as key_fingerprint, mask as key_mask,
                         normalise_providers)
+from provider_credentials import (CredentialKeyError, CredentialStore, DeviceFlowExpired,
+                                  DeviceFlowRegistry)
 from response_semantics import assess_json, reported_usage, failure_reason, enrich_error, decode_json_response, invalid_stream_type, is_html as is_html_content_type
 from request_telemetry import note_reason
 from cleanup_observability import CLEANUP
@@ -2242,6 +2244,24 @@ COPILOT_AUTH_DIR = Path.home() / ".config" / "databricks-claude-lb"
 COPILOT_LEGACY_AUTH_FILE = Path.home() / ".config" / "copilot-lb" / "auth.json"
 
 
+AZURE_V1_PATHS = {"responses": "/openai/v1/responses", "chat": "/openai/v1/chat/completions"}
+
+
+def azure_request_url(endpoint, api_type: str) -> str:
+    """Azure Foundry 的 v1 GA 请求 URL。
+
+    v1 GA **不带 `api-version`**，部署名作为 body 里的 `model` 而非 URL 路径的一段
+    （Microsoft api-version lifecycle 文档，2026-10-13 核对）。body 原样透传且已含
+    model —— Responses 路径本来就依赖这一点，所以 chat 切过来不需要改造 body。
+
+    三个调用点（首发与两条重试路径）共用这里，避免再出现版本号只改了一半的情况。
+    """
+    path = AZURE_V1_PATHS.get(api_type)
+    if path is None:
+        raise ValueError(f'unsupported Azure api_type: {api_type!r}')
+    return f"{str(endpoint.endpoint).rstrip('/')}{path}"
+
+
 def _copilot_account_policy(name: str) -> dict:
     """账户的生效策略视图；无存储时等价于「启用且不限制」。"""
     store = key_policy_store
@@ -3720,15 +3740,8 @@ class AzureOpenAIProxy:
                 )
                 attempt_ended = True
 
-            if api_type == "responses":
-                url = f"{endpoint.endpoint}/openai/v1/responses"
-                label = "Responses"
-            else:
-                url = (
-                    f"{endpoint.endpoint}/openai/deployments/{model}/chat/completions"
-                    "?api-version=2024-10-21"
-                )
-                label = "Chat"
+            url = azure_request_url(endpoint, api_type)
+            label = "Responses" if api_type == "responses" else "Chat"
             headers = {"api-key": endpoint.api_key, "Content-Type": "application/json"}
             logger.info(f"[Azure {label}][{model}] -> {endpoint.name} (attempt {attempt + 1})")
 
@@ -3907,9 +3920,9 @@ class AzureOpenAIProxy:
                             if new_endpoint:
                                 current_endpoint = new_endpoint
                                 if api_type == "responses":
-                                    current_url = f"{current_endpoint.endpoint}/openai/v1/responses"
+                                    current_url = azure_request_url(current_endpoint, "responses")
                                 else:
-                                    current_url = f"{current_endpoint.endpoint}/openai/deployments/{model}/chat/completions?api-version=2024-10-21"
+                                    current_url = azure_request_url(current_endpoint, "chat")
                                 current_headers = {"api-key": current_endpoint.api_key, "Content-Type": "application/json"}
                                 rejection = await start_current_request(current_endpoint)
                                 if rejection is not None:
@@ -3968,9 +3981,9 @@ class AzureOpenAIProxy:
                         if new_endpoint:
                             current_endpoint = new_endpoint
                             if api_type == "responses":
-                                current_url = f"{current_endpoint.endpoint}/openai/v1/responses"
+                                current_url = azure_request_url(current_endpoint, "responses")
                             else:
-                                current_url = f"{current_endpoint.endpoint}/openai/deployments/{model}/chat/completions?api-version=2024-10-21"
+                                current_url = azure_request_url(current_endpoint, "chat")
                             current_headers = {"api-key": current_endpoint.api_key, "Content-Type": "application/json"}
                             rejection = await start_current_request(current_endpoint)
                             if rejection is not None:
@@ -7047,6 +7060,14 @@ azure_proxy: Optional[AzureOpenAIProxy] = None
 copilot_proxy: Optional[CopilotProxy] = None
 usage_store: Optional[UsageDataStore] = None
 key_policy_store: Optional[KeyPolicyStore] = None
+credential_store: Optional[CredentialStore] = None
+
+# 进程内的 device flow 流水；device_code 只在这里，不落库不进日志。
+DEVICE_FLOWS = DeviceFlowRegistry()
+
+# 启动时由存储凭据构建出来的端点名，按 provider 分组。用于区分「配置声明」与
+# 「凭据录入」两个来源 —— 录入时拒绝与配置同名，避免静默遮蔽。
+CREDENTIAL_SOURCED_ACCOUNTS: Dict[str, tuple] = {}
 
 # 每租户的进程内请求计数。重启归零，不代表密钥未被使用；Dashboard 与 admin
 # 响应都按此措辞标注。租户名不是凭据，这里不保存任何密钥材料。
@@ -7118,7 +7139,7 @@ async def _stop_runtime(tasks, store, clients):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global proxy, azure_proxy, copilot_proxy, usage_store, key_policy_store
+    global proxy, azure_proxy, copilot_proxy, usage_store, key_policy_store, credential_store
     app.state.lb_initialized = False
     # P3.1: OpenTelemetry tracing — opt-in via OTEL_ENABLED=true. Must run before
     # FastAPIInstrumentor sees any traffic, i.e. inside lifespan startup.
@@ -7145,6 +7166,46 @@ async def lifespan(app: FastAPI):
     if policy_state["state"] != "loaded":
         logger.warning("[Policy] provider allow-lists are NOT being enforced (state=%s)",
                        policy_state["state"])
+
+    # 凭据录入的端点在这里并入：此刻还没有在途请求、没有既有熔断与会话亲和
+    # 状态，所以端点集合依然"固定在启动时"，只是来源从一处变两处。运行时增删
+    # 端点会重洗会话亲和哈希并打乱账户 pinning，那是有意避开的。
+    credential_store = CredentialStore(storage_config)
+    await credential_store.start()
+    cred_status = credential_store.status()
+    logger.info("[Credentials] backend=%s state=%s key=%s records=%d",
+                cred_status["backend"], cred_status["state"], cred_status["key"],
+                cred_status["records"])
+    if cred_status["records"] and cred_status["unopenable"]:
+        logger.warning("[Credentials] %d stored credential(s) cannot be unsealed; "
+                       "their endpoints are NOT created", cred_status["unopenable"])
+    CREDENTIAL_SOURCED_ACCOUNTS.clear()
+    for provider_id, owner, factory in (
+            ("databricks", proxy, WorkspaceEndpoint),
+            ("azure_openai", azure_proxy, AzureOpenAIEndpoint),
+            ("copilot", copilot_proxy, CopilotEndpoint)):
+        specs = credential_store.endpoint_specs(provider_id)
+        if not specs or owner is None:
+            if specs:
+                logger.warning("[Credentials] %d %s credential(s) stored but that provider is not "
+                               "configured; skipping", len(specs), provider_id)
+            continue
+        added = []
+        existing = {getattr(ep, "name", "") for ep in owner.load_balancer.endpoints}
+        for spec in specs:
+            if spec["name"] in existing:
+                logger.warning("[Credentials] %s/%s collides with a configured endpoint; skipping",
+                               provider_id, spec["name"])
+                continue
+            kwargs = dict(spec)
+            if provider_id == "azure_openai":
+                kwargs["endpoint"] = kwargs.pop("api_base", "") or ""
+            owner.load_balancer.endpoints.append(factory(**kwargs))
+            added.append(spec["name"])
+        if added:
+            CREDENTIAL_SOURCED_ACCOUNTS[provider_id] = tuple(added)
+            logger.info("[Credentials] %s endpoints from stored credentials: %s",
+                        provider_id, ", ".join(added))
 
     restore = usage_store.get_today_data()
     if restore and restore.get("models"):
@@ -8881,6 +8942,283 @@ async def admin_copilot_reload(request: Request, x_api_key: Optional[str] = Head
             item["error"] = f"{type(e).__name__}: {e}"
         results.append(item)
     return {"endpoints": results}
+
+
+async def _validate_credential(provider: str, account: str, secret: str, meta: dict) -> dict:
+    """向上游证明凭据可用。失败就返回失败，不入库。
+
+    三个 provider 都用最便宜的只读调用，不发推理请求：Databricks 列 serving
+    endpoints、Foundry 用 v1 的 OpenAI 兼容模型清单、Copilot 换会话 token。
+    """
+    if provider == "copilot":
+        headers = {"Authorization": f"Bearer {secret}", "Accept": "application/json",
+                   "User-Agent": COPILOT_HEADERS["User-Agent"],
+                   "Editor-Version": COPILOT_HEADERS["Editor-Version"],
+                   "Editor-Plugin-Version": COPILOT_HEADERS["Editor-Plugin-Version"]}
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            exchange = await client.get(COPILOT_TOKEN_URL, headers=headers)
+            if exchange.status_code != 200:
+                # GitHub 对缺少 editor 头部的请求回 403 "approved clients"，
+                # 上面已带齐，所以这里的失败是凭据本身的问题。
+                return {"ok": False, "status": exchange.status_code,
+                        "reason": "token_exchange_rejected"}
+            data = decode_json_response(exchange) or {}
+            base = (data.get("endpoints") or {}).get("api") or COPILOT_DEFAULT_BASE_URL
+            models_response = await client.get(
+                base.rstrip("/") + "/models",
+                headers={"Authorization": f"Bearer {data.get('token', '')}",
+                         "Accept": "application/json",
+                         "Editor-Version": COPILOT_HEADERS["Editor-Version"],
+                         "Copilot-Integration-Id": COPILOT_HEADERS["Copilot-Integration-Id"]})
+        models = []
+        if models_response.status_code == 200:
+            payload = decode_json_response(models_response) or {}
+            models = sorted({str(item.get("id")) for item in (payload.get("data") or [])
+                             if isinstance(item, dict) and item.get("id")
+                             and (item.get("capabilities") or {}).get("type") == "chat"})
+        return {"ok": True, "sku": data.get("sku"), "chat_enabled": data.get("chat_enabled"),
+                "models": models, "model_count": len(models)}
+
+    if provider == "databricks":
+        api_base = str(meta.get("api_base") or "").rstrip("/")
+        if not api_base:
+            return {"ok": False, "reason": "api_base_required"}
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            response = await client.get(api_base, headers={"Authorization": f"Bearer {secret}"})
+        return ({"ok": True, "status": response.status_code} if response.status_code == 200
+                else {"ok": False, "status": response.status_code, "reason": "rejected_by_workspace"})
+
+    api_base = str(meta.get("api_base") or "").rstrip("/")
+    if not api_base:
+        return {"ok": False, "reason": "api_base_required"}
+    async with httpx.AsyncClient(timeout=25.0) as client:
+        response = await client.get(f"{api_base}/openai/v1/models", headers={"api-key": secret})
+    if response.status_code != 200:
+        return {"ok": False, "status": response.status_code, "reason": "rejected_by_resource"}
+    payload = decode_json_response(response) or {}
+    models = sorted({str(item.get("id")) for item in (payload.get("data") or [])
+                     if isinstance(item, dict) and item.get("id")})
+    return {"ok": True, "models": models, "model_count": len(models)}
+
+
+def _credential_store_or_503():
+    if credential_store is None:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "credential_store_unavailable",
+            "message": "Credential storage is not configured."}})
+    if not credential_store.sealing_available:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "credential_key_missing",
+            "message": ("LB_CREDENTIAL_KEY is not configured. Credentials are only stored "
+                        "sealed, so entry is disabled rather than writing plaintext.")}})
+    return credential_store
+
+
+def _config_declared_accounts(provider: str) -> set:
+    proxies = {"databricks": proxy, "azure_openai": azure_proxy, "copilot": copilot_proxy}
+    target = proxies.get(provider)
+    endpoints = getattr(getattr(target, "load_balancer", None), "endpoints", []) if target else []
+    return {getattr(ep, "name", "") for ep in endpoints} - set(CREDENTIAL_SOURCED_ACCOUNTS.get(provider, ()))
+
+
+@app.get("/admin/credentials")
+async def admin_credentials(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：已录入凭据的**身份**与校验结果。绝不返回明文或密文。"""
+    _require_admin_key(request, x_api_key)
+    if credential_store is None:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "credential_store_unavailable", "message": "Credential storage is not configured."}})
+    active = {p: sorted(CREDENTIAL_SOURCED_ACCOUNTS.get(p, ())) for p in PROVIDER_IDS}
+    return {
+        "credentials": [{**item, "active": item["account"] in active.get(item["provider"], [])}
+                        for item in credential_store.listing()],
+        "providers": list(PROVIDER_IDS),
+        "store": credential_store.status(),
+        "note": ("Identity and validation result only; neither plaintext nor ciphertext is "
+                 "returned. A newly entered credential becomes active on the next rolling "
+                 "restart — endpoints are built at startup by design."),
+    }
+
+
+@app.put("/admin/credentials/{provider}/{account}")
+async def admin_put_credential(provider: str, account: str, request: Request,
+                               x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：录入凭据。先向上游校验，通过才封装入库。"""
+    _require_admin_key(request, x_api_key)
+    store = _credential_store_or_503()
+    if provider not in PROVIDER_IDS:
+        raise HTTPException(status_code=400, detail={"error": {
+            "code": "unknown_provider", "message": f"Unknown provider '{provider}'"}})
+    if account in _config_declared_accounts(provider):
+        # 静默遮蔽配置里的端点会让人无法判断某个请求用的是哪份凭据。
+        raise HTTPException(status_code=409, detail={"error": {
+            "code": "account_declared_in_config",
+            "message": (f"'{account}' is already declared for {provider} in config; rename it or "
+                        f"remove the config entry instead of shadowing it.")}})
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail={"error": {"message": "Body must be JSON"}})
+    payload = payload or {}
+    secret = payload.get("secret")
+    meta = {k: v for k, v in (payload.get("meta") or {}).items()
+            if k in ("api_base", "deployments", "weight")}
+    if not isinstance(secret, str) or not secret.strip():
+        raise HTTPException(status_code=400, detail={"error": {
+            "code": "secret_required", "message": "Provide the credential as 'secret'"}})
+    try:
+        validation = await _validate_credential(provider, account, secret, meta)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={"error": {
+            "code": "validation_unreachable", "message": f"{type(e).__name__}"}})
+    if not validation.get("ok"):
+        raise HTTPException(status_code=400, detail={"error": {
+            "code": "credential_rejected_upstream",
+            "message": "Upstream did not accept this credential; nothing was stored.",
+            "validation": validation}})
+    try:
+        stored = await store.put(provider, account, secret, meta, validation=validation)
+    except (ValueError, CredentialKeyError) as e:
+        raise HTTPException(status_code=400, detail={"error": {
+            "code": "invalid_credential", "message": str(e)}})
+    except Exception as e:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "credential_write_failed", "message": f"{type(e).__name__}"}})
+    # Copilot 的校验顺带带回模型清单，直接喂给账户 capability。
+    if provider == "copilot" and key_policy_store is not None and validation.get("models"):
+        try:
+            await key_policy_store.set_account_capability(account, validation["models"])
+        except Exception as e:
+            logger.warning("credentials: capability write failed for %s: %s", account, type(e).__name__)
+    return {"credential": stored, "validation": validation, "store": store.status(),
+            "activation": "next rolling restart"}
+
+
+@app.delete("/admin/credentials/{provider}/{account}")
+async def admin_delete_credential(provider: str, account: str, request: Request,
+                                  x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：删除已录入凭据（已生效的端点要到下次重启才消失）。"""
+    _require_admin_key(request, x_api_key)
+    store = _credential_store_or_503()
+    try:
+        await store.delete(provider, account)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "credential_write_failed", "message": f"{type(e).__name__}"}})
+    return {"provider": provider, "account": account, "deleted": True,
+            "store": store.status(), "activation": "next rolling restart"}
+
+
+@app.post("/admin/credentials/{provider}/{account}/validate")
+async def admin_validate_credential(provider: str, account: str, request: Request,
+                                    x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：对已存凭据重新校验（会调一次上游）。"""
+    _require_admin_key(request, x_api_key)
+    store = _credential_store_or_503()
+    secret = store.resolve(provider, account)
+    if secret is None:
+        raise HTTPException(status_code=404, detail={"error": {
+            "code": "credential_unavailable",
+            "message": f"No openable credential stored for {provider}/{account}"}})
+    entry = store.listing_for(provider, account)
+    try:
+        validation = await _validate_credential(provider, account, secret, entry.get("meta") or {})
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={"error": {
+            "code": "validation_unreachable", "message": f"{type(e).__name__}"}})
+    try:
+        updated = await store.note_validation(provider, account, validation)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "credential_write_failed", "message": f"{type(e).__name__}"}})
+    return {"credential": updated, "validation": validation}
+
+
+@app.post("/admin/credentials/copilot/device/start")
+async def admin_device_start(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：启动 GitHub device flow。device_code 只留在进程内。"""
+    _require_admin_key(request, x_api_key)
+    _credential_store_or_503()
+    DEVICE_FLOWS.prune()
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.post(
+            COPILOT_DEVICE_CODE_URL, headers={"Accept": "application/json"},
+            json={"client_id": COPILOT_CLIENT_ID, "scope": "read:user"})
+    if response.status_code != 200:
+        raise HTTPException(status_code=502, detail={"error": {
+            "code": "device_flow_start_failed", "message": f"GitHub returned {response.status_code}"}})
+    payload = decode_json_response(response) or {}
+    if not payload.get("device_code"):
+        raise HTTPException(status_code=502, detail={"error": {
+            "code": "device_flow_start_failed", "message": "No device code returned"}})
+    handle = DEVICE_FLOWS.start(payload)
+    return {**DEVICE_FLOWS.view(handle),
+            "note": "Authorise in the browser, then poll. The device code never leaves the gateway."}
+
+
+@app.post("/admin/credentials/copilot/device/poll")
+async def admin_device_poll(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：轮询一次 device flow；成功则校验后封装入库。"""
+    _require_admin_key(request, x_api_key)
+    store = _credential_store_or_503()
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail={"error": {"message": "Body must be JSON"}})
+    payload = payload or {}
+    handle = payload.get("handle")
+    account = (payload.get("account") or "").strip()
+    if not handle or not account:
+        raise HTTPException(status_code=400, detail={"error": {
+            "message": "Provide 'handle' and the 'account' name to store it under"}})
+    if account in _config_declared_accounts("copilot"):
+        raise HTTPException(status_code=409, detail={"error": {
+            "code": "account_declared_in_config",
+            "message": f"'{account}' is already declared for copilot in config"}})
+    try:
+        device_code = DEVICE_FLOWS.device_code(handle)
+    except DeviceFlowExpired as e:
+        raise HTTPException(status_code=410, detail={"error": {
+            "code": "device_flow_expired", "message": str(e)}})
+    except KeyError:
+        raise HTTPException(status_code=404, detail={"error": {
+            "code": "device_flow_unknown", "message": "No such device flow; start a new one"}})
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.post(
+            COPILOT_ACCESS_TOKEN_URL, headers={"Accept": "application/json"},
+            json={"client_id": COPILOT_CLIENT_ID, "device_code": device_code,
+                  "grant_type": "urn:ietf:params:oauth:grant-type:device_code"})
+    body = decode_json_response(response) or {}
+    token = body.get("access_token")
+    if not token:
+        # authorization_pending / slow_down 是正常的中间态，不是错误。
+        error = body.get("error") or "unknown"
+        pending = error in ("authorization_pending", "slow_down")
+        return {"pending": pending, "error": None if pending else error,
+                "interval": DEVICE_FLOWS.view(handle)["interval"] if pending else None}
+    try:
+        validation = await _validate_credential("copilot", account, token, {})
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={"error": {
+            "code": "validation_unreachable", "message": f"{type(e).__name__}"}})
+    if not validation.get("ok"):
+        raise HTTPException(status_code=400, detail={"error": {
+            "code": "credential_rejected_upstream",
+            "message": "GitHub issued a token but Copilot did not accept it; nothing was stored.",
+            "validation": validation}})
+    try:
+        stored = await store.put("copilot", account, token, {}, validation=validation)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "credential_write_failed", "message": f"{type(e).__name__}"}})
+    DEVICE_FLOWS.finish(handle)
+    if key_policy_store is not None and validation.get("models"):
+        try:
+            await key_policy_store.set_account_capability(account, validation["models"])
+        except Exception as e:
+            logger.warning("credentials: capability write failed for %s: %s", account, type(e).__name__)
+    return {"pending": False, "credential": stored, "validation": validation,
+            "activation": "next rolling restart"}
 
 
 @app.get("/admin/model-routing")
