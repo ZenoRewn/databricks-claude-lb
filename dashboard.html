@@ -196,6 +196,23 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
         <p class="scope-note">偏好<strong>只重排不筛除</strong>：列出的 Provider 提到前面，未列出的按默认顺序接在后面，fallback 能力保留。筛除是上面「允许渠道」的职责。<strong>给 claude-* 配指向 GHCP/Foundry 的偏好会在 OpenAI 风格入口放行该模型</strong>（逐模型 opt-in，不是整族开闸）；<code>/v1/messages</code> 仍然只走 ADB。计价按渠道分开：<code>databricks-claude-*</code> 用公开 API 价，裸 <code>claude-*</code> 用 GHCP 分档价。</p>
         <div class="history-toolbar"><button class="btn btn-primary" id="loadRouting" type="button">读取优先序</button><label class="field" for="routeModel">模型<input id="routeModel" type="text" maxlength="190" placeholder="如 gpt-5.4 或 claude-opus-5.5"></label><label class="field" for="routeProviders">顺序<input id="routeProviders" type="text" maxlength="190" placeholder="如 azure_openai,copilot"></label><button class="btn" id="saveRouting" type="button">保存</button></div>
         <div id="routingContent"><div class="info-box">输入上面的 API Key 后读取模型优先序。</div></div>
+        <h3>上游凭据录入</h3>
+        <p class="scope-note">凭据以 AES-256-GCM <strong>封装后</strong>存入用量库，密钥取自 <code>LB_CREDENTIAL_KEY</code>（留在 K8s Secret、不入库）；未配密钥时录入整体不可用，<strong>不会退化为存明文</strong>。录入时先向上游校验，不通过不入库。<strong>页面只显示指纹与校验结果，不显示也不返回明文。</strong> 封装没有消除风险：运行进程内存里有明文，密钥丢失则凭据不可恢复。<strong>录入后需一次滚动重启才生效</strong> —— 端点在启动时统一构建。</p>
+        <div class="history-toolbar"><button class="btn btn-primary" id="loadCredentials" type="button">读取凭据</button></div>
+        <div id="credentialsContent"><div class="info-box">输入上面的 API Key 后读取已录入凭据。</div></div>
+        <details class="maintenance-panel"><summary>录入新凭据</summary>
+          <form class="cleanup-form" id="credentialForm">
+            <label class="field" for="credProvider">Provider<select id="credProvider"><option value="databricks">ADB (databricks)</option><option value="azure_openai">Foundry (azure_openai)</option><option value="copilot">GHCP (copilot)</option></select></label>
+            <label class="field" for="credAccount">账户名<input id="credAccount" type="text" maxlength="190" placeholder="与配置中已有端点不可同名" required></label>
+            <label class="field field-key" for="credSecret">凭据<input id="credSecret" type="password" autocomplete="off" maxlength="4096" placeholder="token / api key" required></label>
+            <label class="field" for="credApiBase">api_base<input id="credApiBase" type="text" maxlength="400" placeholder="ADB/Foundry 必填；GHCP 留空"></label>
+            <label class="field" for="credDeployments">deployments<input id="credDeployments" type="text" maxlength="400" placeholder="Foundry 用，逗号分隔"></label>
+            <button class="btn" id="credentialSubmit" type="submit">校验并录入</button>
+          </form>
+          <p class="scope-note">GHCP 也可以用下面的 device flow，无需手工粘贴 token。</p>
+          <div class="history-toolbar"><label class="field" for="deviceAccount">GHCP 账户名<input id="deviceAccount" type="text" maxlength="190" placeholder="如 gh-account-5"></label><button class="btn" id="deviceStart" type="button">开始 device flow</button><button class="btn" id="devicePoll" type="button">我已授权，检查一次</button></div>
+          <div class="feedback" id="deviceStatus" role="status"></div>
+        </details>
       </section>
       <footer class="page-footer"><span>Author: Zeno Ren</span><span>金额均为估算 · 流式 HTTP 200 不代表生成完成</span></footer>
     </main>
@@ -1146,6 +1163,192 @@ async function clearRouting(model) {
   } finally { field.value = ''; keysInFlight = false; }
 }
 
+// ---------- Upstream credentials ----------
+// The entered credential travels with one request and is cleared in finally,
+// exactly like the LB API Key fields. Nothing here ever renders plaintext.
+let deviceHandle = null;
+
+function renderCredentials(payload) {
+  const store = payload.store || {};
+  const keyBox = store.key === 'present'
+    ? '<div class="info-box" data-state="ok">封装密钥已配置（指纹 ' + escapeHtml(String(store.key_fingerprint || '')) + '）。</div>'
+    : '<div class="info-box" data-state="warn">未配置 <code>LB_CREDENTIAL_KEY</code>，录入功能不可用 —— 不会退化为存明文。</div>';
+  const warn = store.unopenable
+    ? '<div class="info-box" data-state="warn">有 ' + escapeHtml(String(store.unopenable))
+      + ' 条凭据无法用当前密钥解开，其端点不会被创建。</div>'
+    : '';
+  const rows = (payload.credentials || []).map(c => {
+    const state = {ok: '可用', no_key: '缺密钥', sealed_with_other_key: '由另一把密钥封装'}[c.key_state] || c.key_state;
+    const v = c.validation || {};
+    const count = v.model_count != null ? '（' + escapeHtml(String(v.model_count)) + ' 个模型）' : '';
+    const verdict = v.ok === true ? '通过' + count
+      : v.ok === false ? '失败 ' + escapeHtml(String(v.reason || v.status || ''))
+      : '未校验';
+    return '<tr><td>' + escapeHtml(c.provider) + '</td><td>' + escapeHtml(c.account) + '</td>'
+      + '<td><code>' + escapeHtml(String(c.secret_fingerprint || '')) + '</code></td>'
+      + '<td>' + escapeHtml(state) + '</td>'
+      + '<td>' + verdict + '</td>'
+      + '<td>' + (c.active ? '已生效' : '待重启生效') + '</td>'
+      + '<td><button class="btn" type="button" data-revalidate="' + escapeHtml(c.provider + '/' + c.account) + '">重新校验</button>'
+      + ' <button class="btn btn-danger" type="button" data-delcred="' + escapeHtml(c.provider + '/' + c.account) + '">删除</button></td></tr>';
+  }).join('');
+  document.getElementById('credentialsContent').innerHTML = keyBox + warn + (rows
+    ? '<div class="table-wrap"><div class="table-scroll"><table id="credentialsTable"><thead><tr><th>Provider</th><th>账户</th><th>凭据指纹</th><th>密钥状态</th><th>校验</th><th>生效</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>'
+    : '<div class="info-box">尚未录入任何上游凭据。</div>');
+  document.querySelectorAll('#credentialsTable [data-revalidate]').forEach(b => {
+    b.addEventListener('click', () => credentialAction(b.dataset.revalidate, 'validate'));
+  });
+  document.querySelectorAll('#credentialsTable [data-delcred]').forEach(b => {
+    b.addEventListener('click', () => credentialAction(b.dataset.delcred, 'delete'));
+  });
+}
+
+async function loadCredentials() {
+  if (keysInFlight) return;
+  const status = document.getElementById('keysStatus');
+  const field = document.getElementById('keysAdminKey');
+  const key = readAdminKey(status);
+  if (!key) return;
+  keysInFlight = true;
+  status.hidden = false; status.dataset.state = 'pending'; status.textContent = '正在读取凭据…';
+  try {
+    const payload = await fetchJSON('/admin/credentials', {headers: {'x-api-key': key}});
+    renderCredentials(payload);
+    status.dataset.state = 'success';
+    status.textContent = '已读取 ' + (payload.credentials || []).length + ' 条凭据身份（不含明文）。';
+  } catch (error) {
+    status.dataset.state = 'error';
+    status.textContent = error.status === 401 ? 'API Key 无效。' : '未能读取凭据：' + error.message;
+  } finally { field.value = ''; keysInFlight = false; }
+}
+
+async function submitCredential() {
+  if (keysInFlight) return;
+  const status = document.getElementById('keysStatus');
+  const field = document.getElementById('keysAdminKey');
+  const secretField = document.getElementById('credSecret');
+  const provider = document.getElementById('credProvider').value;
+  const account = document.getElementById('credAccount').value.trim();
+  const secret = secretField.value;
+  const apiBase = document.getElementById('credApiBase').value.trim();
+  const deployments = document.getElementById('credDeployments').value.split(',')
+    .map(s => s.trim()).filter(Boolean);
+  status.hidden = false;
+  if (!account || !secret) {
+    status.dataset.state = 'error'; status.textContent = '请填写账户名与凭据。'; return;
+  }
+  if (provider !== 'copilot' && !apiBase) {
+    status.dataset.state = 'error'; status.textContent = 'ADB 与 Foundry 需要填 api_base。'; return;
+  }
+  const key = readAdminKey(status);
+  if (!key) return;
+  if (!confirm('录入 ' + provider + ' / ' + account + '。凭据会先向上游校验，通过后封装入库；生效需一次滚动重启。确认继续？')) {
+    secretField.value = ''; field.value = ''; return;
+  }
+  const meta = {};
+  if (apiBase) meta.api_base = apiBase;
+  if (deployments.length) meta.deployments = deployments;
+  keysInFlight = true;
+  status.dataset.state = 'pending'; status.textContent = '正在向上游校验…';
+  try {
+    const result = await fetchJSON('/admin/credentials/' + encodeURIComponent(provider) + '/' + encodeURIComponent(account),
+      {method: 'PUT', headers: {'x-api-key': key, 'content-type': 'application/json'},
+       body: JSON.stringify({secret, meta})});
+    status.dataset.state = 'success';
+    status.textContent = '已录入 ' + provider + '/' + account + '，校验通过。生效需一次滚动重启。';
+    renderCredentials({credentials: [], store: result.store || {}});
+  } catch (error) {
+    status.dataset.state = 'error';
+    status.textContent = error.status === 401 ? 'API Key 无效。'
+      : error.status === 409 ? '该账户名已在配置里声明，请改名或移除配置项，避免静默遮蔽。'
+      : '未录入（上游未接受或存储失败）：' + error.message;
+  } finally {
+    // The credential must not linger in the DOM after one submission.
+    secretField.value = ''; field.value = ''; keysInFlight = false;
+  }
+}
+
+async function credentialAction(id, action) {
+  if (keysInFlight) return;
+  const status = document.getElementById('keysStatus');
+  const field = document.getElementById('keysAdminKey');
+  const key = readAdminKey(status);
+  if (!key) return;
+  const [provider, account] = id.split('/');
+  if (action === 'delete' && !confirm('删除 ' + id + ' 的凭据。已生效的端点要到下次重启才消失。确认继续？')) {
+    field.value = ''; return;
+  }
+  keysInFlight = true;
+  status.hidden = false; status.dataset.state = 'pending';
+  status.textContent = action === 'delete' ? '正在删除…' : '正在重新校验…';
+  const path = '/admin/credentials/' + encodeURIComponent(provider) + '/' + encodeURIComponent(account)
+    + (action === 'validate' ? '/validate' : '');
+  try {
+    const result = await fetchJSON(path, {method: action === 'delete' ? 'DELETE' : 'POST',
+                                          headers: {'x-api-key': key}});
+    status.dataset.state = 'success';
+    status.textContent = action === 'delete'
+      ? (id + ' 已删除，端点到下次重启才消失。')
+      : (id + ' 校验' + (result.validation && result.validation.ok ? '通过' : '失败') + '。');
+  } catch (error) {
+    status.dataset.state = 'error';
+    status.textContent = error.status === 401 ? 'API Key 无效。' : '操作未生效，凭据保持不变：' + error.message;
+  } finally { field.value = ''; keysInFlight = false; }
+}
+
+async function startDeviceFlow() {
+  if (keysInFlight) return;
+  const status = document.getElementById('deviceStatus');
+  const field = document.getElementById('keysAdminKey');
+  status.dataset.state = 'error'; status.hidden = false;
+  const key = readAdminKey(document.getElementById('keysStatus'));
+  if (!key) { status.textContent = '请先在上方输入 LB API Key。'; return; }
+  keysInFlight = true;
+  status.dataset.state = 'pending'; status.textContent = '正在向 GitHub 申请验证码…';
+  try {
+    const result = await fetchJSON('/admin/credentials/copilot/device/start',
+      {method: 'POST', headers: {'x-api-key': key}});
+    deviceHandle = result.handle;
+    status.dataset.state = 'success';
+    status.textContent = '请在浏览器打开 ' + result.verification_uri + ' 并输入验证码 '
+      + result.user_code + '（' + result.expires_in + ' 秒内有效），授权后点「我已授权，检查一次」。';
+  } catch (error) {
+    status.dataset.state = 'error';
+    status.textContent = error.status === 401 ? 'API Key 无效。' : '未能启动：' + error.message;
+  } finally { field.value = ''; keysInFlight = false; }
+}
+
+async function pollDeviceFlow() {
+  if (keysInFlight) return;
+  const status = document.getElementById('deviceStatus');
+  const field = document.getElementById('keysAdminKey');
+  const account = document.getElementById('deviceAccount').value.trim();
+  status.hidden = false;
+  if (!deviceHandle) { status.dataset.state = 'error'; status.textContent = '请先开始 device flow。'; return; }
+  if (!account) { status.dataset.state = 'error'; status.textContent = '请填写要存成的 GHCP 账户名。'; return; }
+  const key = readAdminKey(document.getElementById('keysStatus'));
+  if (!key) return;
+  keysInFlight = true;
+  status.dataset.state = 'pending'; status.textContent = '正在检查授权状态…';
+  try {
+    const result = await fetchJSON('/admin/credentials/copilot/device/poll',
+      {method: 'POST', headers: {'x-api-key': key, 'content-type': 'application/json'},
+       body: JSON.stringify({handle: deviceHandle, account})});
+    if (result.pending) {
+      status.dataset.state = 'pending';
+      status.textContent = '尚未授权完成，请在浏览器完成后再检查（建议间隔 ' + (result.interval || 5) + ' 秒）。';
+    } else {
+      deviceHandle = null;
+      status.dataset.state = 'success';
+      status.textContent = '已录入 copilot/' + account + '，校验通过。生效需一次滚动重启。';
+    }
+  } catch (error) {
+    status.dataset.state = 'error';
+    if (error.status === 410) { deviceHandle = null; status.textContent = '授权窗口已过期，请重新开始。'; }
+    else status.textContent = error.status === 401 ? 'API Key 无效。' : '未完成：' + error.message;
+  } finally { field.value = ''; keysInFlight = false; }
+}
+
 // ---------- Refresh ----------
 const REFRESH_MS = 5000;
 let refreshDeadline = Date.now() + REFRESH_MS;
@@ -1449,6 +1652,10 @@ document.getElementById('reloadKeys').addEventListener('click', reloadKeysFromSo
 document.getElementById('loadAccounts').addEventListener('click', loadAccounts);
 document.getElementById('loadRouting').addEventListener('click', loadRouting);
 document.getElementById('saveRouting').addEventListener('click', saveRouting);
+document.getElementById('loadCredentials').addEventListener('click', loadCredentials);
+document.getElementById('credentialForm').addEventListener('submit', event => { event.preventDefault(); submitCredential(); });
+document.getElementById('deviceStart').addEventListener('click', startDeviceFlow);
+document.getElementById('devicePoll').addEventListener('click', pollDeviceFlow);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && !refreshPaused) refresh(true); });
 refresh();
 setInterval(refresh, REFRESH_MS);

@@ -9,6 +9,8 @@ Author: Zeno Ren
 - 推理 POST 的执行状态不明、已输出内容或可能产生工具副作用时，不自动重放；不能通过重新推理补账。见 [可靠性契约](docs/RESILIENCE.md)。
 - 保留 provider/model 兼容性、账户 pinning 和会话亲和。默认 Copilot 优先；仅明确未准入或不支持模型等既有分支允许 Azure fallback，不能泛化成任意 503 后重试。per-model 优先序可以**重排**这两个 provider（`/admin/model-routing`），但只重排不筛除，fallback 必须保留；筛除是 per-key allowlist 的职责。
 - `claude-*` 默认只走 Databricks 的 `/v1/messages`。**例外是逐模型 opt-in**：给某个 claude 模型显式配置指向 Copilot/Azure 的优先序后，该模型在 OpenAI 风格入口放行（Copilot 原生服务其 Responses/Chat 形状）。没配就保持 400，既有行为不变。`/v1/messages` 仍然只走 Databricks —— 从 Copilot 提供 Anthropic Messages 协议需要双向适配器，本仓库只有解析没有合成。
+- **上游凭据可以由运维录入并持久化，但只以封装形式存储。** 这是对早先「网关从不存储凭据」的有意变更：AKS 上 Secret 挂载与 config 都是只读，应用 SA 无 secret 写权限，用量库是唯一可写的持久存储。AES-256-GCM，密钥取自 `LB_CREDENTIAL_KEY`（留在 Secret、不入库），每条独立 nonce，`provider|account` 作为 AAD 绑定行身份。**未配密钥时录入功能整体不可用（503），绝不退化为存明文。** 任何端点都不返回明文或密文。加密没有消除风险：运行进程内存里有明文，密钥丢失则凭据不可恢复。
+- 凭据**录入时即向上游校验**，不通过不入库；端点仍在**启动时**统一构建（配置 + 已存凭据两个来源），所以新录入需一次滚动重启才生效。不做运行时增删端点 —— 那会重洗会话亲和哈希并打乱账户 pinning。
 - 计价按**记录的模型名**区分渠道：`databricks-claude-*`（及裸 `opus-/sonnet-/haiku-/fable-` 旧别名）按 Anthropic 公开 API 价与「input 不含 cache」口径；裸 `claude-*` 来自 Copilot，按 copilot_pricing 分档价与 inclusive-input 口径。两者不可混用。
 - HTTP 200 或首个 SSE chunk 不代表生成完成。保留成功终态、失败、incomplete、refusal 和工具语义，见 [流协议](docs/STREAM_PROTOCOL.md)。
 - MySQL 账本幂等防止已持久批次重复累计；尚未 flush 的内存事件仍可能丢失，不能承诺零 RPO。JSON 后端只支持单写者。
@@ -48,6 +50,12 @@ Copilot 的 opaque-state 拒绝是请求级问题，不应污染账户熔断；�
 | `/admin/copilot/reload` | POST | 需要 | 运维端点：从源重读所有 Copilot endpoint 的 long-lived token + 强制刷新 session（K8s Secret rotation 后立刻生效） |
 | `/admin/copilot/reset-pool` | POST | 需要 | 运维端点：重建共享 httpx.AsyncClient，逐出所有 keepalive/半开连接 |
 | `/admin/model-capabilities` | GET | 需要 | 渠道/模型/API 能力目录、来源与有效期；未验证或过期能力不自动变成硬限额 |
+| `/admin/credentials` | GET | 需要 | 已录入上游凭据的**身份**与校验结果；不返回明文也不返回密文，并标明哪些尚未生效 |
+| `/admin/credentials/{provider}/{account}` | PUT | 需要 | 录入凭据：**先向上游校验，通过才封装入库**。与配置同名的 account 返回 409，不允许静默遮蔽；未配 `LB_CREDENTIAL_KEY` 时 503 |
+| `/admin/credentials/{provider}/{account}` | DELETE | 需要 | 删除凭据（已生效端点到下次重启才消失） |
+| `/admin/credentials/{provider}/{account}/validate` | POST | 需要 | 对已存凭据重新校验，会调一次上游 |
+| `/admin/credentials/copilot/device/start` | POST | 需要 | 启动 GitHub device flow，返回验证码与授权链接；`device_code` 只留进程内，不落库不进日志不进响应 |
+| `/admin/credentials/copilot/device/poll` | POST | 需要 | 轮询一次；`authorization_pending` 是正常中间态，拿到 token 后先校验再入库 |
 | `/admin/model-routing` | GET | 需要 | per-model 的 provider 优先序与生效顺序 |
 | `/admin/model-routing/{model}` | PUT | 需要 | 设置优先序（**顺序即偏好**，不去重不重排）。偏好只重排不筛除，fallback 保留；给 `claude-*` 配指向 Copilot/Azure 的偏好会在 OpenAI 风格入口放行该模型 |
 | `/admin/model-routing/{model}` | DELETE | 需要 | 清除偏好回到默认顺序；`claude-*` 随之重新被 OpenAI 风格入口拒绝 |

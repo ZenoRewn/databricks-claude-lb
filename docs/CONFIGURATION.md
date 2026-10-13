@@ -58,6 +58,34 @@ Claude 模型使用 `/v1/messages`。在 OpenAI 风格入口传入 Claude 模型
 
 目录里的模型必须至少能被 `MODEL_PRICING` 或 `copilot_pricing` 之一计价，否则成本会静默漏统计。两张表分工不同：前者是公开 API 价（历史/通用口径），后者是 Copilot 官方分档价并用于实时估算，所以 Copilot 专属模型（如 grok、mai-code）只在后者有价，不应为其臆造公开 API 价。
 
+### 录入上游凭据（ADB / Foundry / GHCP）
+
+三个 provider 都可以由运维录入认证信息；GHCP 另外支持由网关驱动 GitHub device flow。入口是 `/admin/credentials/*` 或 Dashboard「密钥与渠道」页。
+
+**这是对早先「网关从不存储凭据」的有意变更。** 原因是现场约束：AKS 上 Secret 挂载是只读 tmpfs、`config.yaml` 只读、应用 ServiceAccount 没有 secret 写权限 —— 用量库是网关唯一可写的持久存储。
+
+因此封装是强制的，不是可选项：
+
+- **AES-256-GCM**，密钥来自 `LB_CREDENTIAL_KEY`（base64 32 字节）。密钥留在 Kubernetes Secret 里、**不进数据库**，所以单独拖走数据库或备份不足以解开
+- 每次写入独立随机 nonce，相同凭据不会产生相同密文
+- `provider|account` 作为 AAD 参与认证，密文**无法被挪到另一行**解开
+- **未配密钥时录入功能整体返回 503**，绝不退化为存明文
+- 任何端点都不返回明文或密文；只给指纹、校验结果与非敏感元数据
+
+封装**没有**消除的风险（不要据此认为凭据绝对安全）：运行中的进程内存里有明文，能在 Pod 内执行命令的人仍可取得；没有托管 KMS、没有自动轮换；**密钥丢失则已存凭据不可恢复**，只能重新录入。密钥换了之后旧记录会被标为 `sealed_with_other_key` 并跳过建端点，而不是抛一个裸的解密错误。
+
+**录入时即校验**，不通过不入库。各 provider 用最便宜的只读调用，不发推理请求：
+
+| Provider | 校验 |
+|---|---|
+| `databricks` | `GET {api_base}` 列 serving endpoints |
+| `azure_openai` | `GET {api_base}/openai/v1/models` |
+| `copilot` | token 交换（带 editor 头部）→ SKU；再取模型清单，顺带写入该账户的 capability |
+
+**生效需一次滚动重启。** 端点仍在启动时统一构建，来源是「配置 + 已存凭据」两处；运行时增删端点会重洗会话亲和哈希并打乱账户 pinning，是有意避开的。Dashboard 会标出哪些凭据尚未生效。与配置中已声明的端点同名会被拒（409），不允许静默遮蔽。
+
+device flow 的 `device_code` 只存在进程内并带 TTL，不落库、不进日志、不出现在响应里；`authorization_pending` 是正常中间态而非错误。发布预检会校验 `provider_credential` 的列与主键，表不存在时放行。
+
 ### 模型 → Provider 优先序
 
 `PUT /admin/model-routing/{model}` 给单个模型设置 provider 顺序（Dashboard「密钥与渠道」页也可操作）。**顺序即偏好**，不去重也不重排，重复项会被拒。
