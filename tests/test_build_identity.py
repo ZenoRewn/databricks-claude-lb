@@ -78,6 +78,17 @@ class BuildIdentityTests(unittest.TestCase):
         missing = sorted(local - set(RUNTIME_FILES))
         self.assertEqual(missing, [], 'main.py imports these but the runtime manifest omits them')
 
+    def test_the_test_lock_covers_every_runtime_dependency(self):
+        # requirements-test.in does `-r requirements.in`, but the lock next to it
+        # is flat and hand-maintained, so adding a runtime dependency without
+        # adding it here passes locally and fails only in CI on import.
+        import re
+        root = Path(__file__).resolve().parent.parent
+        pinned = lambda name: set(re.findall(r'^([A-Za-z0-9_.-]+)==',
+                                             (root / name).read_text(), re.M))
+        missing = sorted(pinned('requirements.lock') - pinned('requirements-test.lock'))
+        self.assertEqual(missing, [], 'runtime dependencies absent from the test lock')
+
     def test_dockerfile_ships_every_runtime_module(self):
         from build_metadata import RUNTIME_FILES
         root = Path(__file__).resolve().parent.parent
