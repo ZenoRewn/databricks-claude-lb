@@ -8,6 +8,7 @@ function section(from, to) {
   return html.slice(html.indexOf(from), html.indexOf(to));
 }
 const elements = new Map();
+function clearElements(ids) { for (const id of ids) element(id).innerHTML = ''; }
 function element(id) {
   if (!elements.has(id)) elements.set(id, {textContent: '', innerHTML: '', value: '', hidden: false,
     dataset: {}, classList: {add() {}, remove() {}, toggle() {}}, setAttribute(k, v) {this[k] = v;},
@@ -121,18 +122,33 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   assert.match(html, /不显示也不返回明文/, 'panel must state plaintext is never shown');
   assert.match(html, /本进程/, 'panel must label counters as process-local');
 
-  // The key is now held in page memory while unlocked, which is a change from
-  // the one-request contract — so the page has to say so, and must still never
-  // reach for a browser store or a URL.
-  assert.match(html, /留在本页内存里/, 'the retention change must be stated, not silent');
-  assert.match(html, /自动锁定/, 'the idle timeout must be stated');
+  // The session now rides an HttpOnly cookie, so the page has to say what it
+  // holds (nothing) and where the credential comes from.
+  assert.match(html, /HttpOnly cookie/, 'the session mechanism must be stated');
+  assert.match(html, /页面脚本本身不持有任何凭据/, 'the no-credential property must be stated');
+  assert.match(html, /LB_DASHBOARD_PASSWORD/, 'the password source must be named');
+  assert.match(html, /不会退化为无密码放行/, 'the no-fallback-to-open rule must be stated');
+  assert.match(html, /id="panelPassword"/, 'the panel needs a password field');
+  assert.match(html, /type="password"[^>]*id="panelPassword"|id="panelPassword"[^>]*type="password"/,
+    'the panel password must be a password input');
   // Scoped to this panel's own code: the theme toggle legitimately persists a
   // preference, so a whole-file check would be meaningless. Matching usage
   // (`x.`) rather than the bare word keeps the prose that names these stores.
   const keyPanelJs = section('// ---------- API keys & provider allow-lists',
                              '// ---------- Refresh ----------');
   assert.doesNotMatch(keyPanelJs, /localStorage\s*\.|sessionStorage\s*\.|document\s*\.\s*cookie/,
-    'the panel key must never reach a browser store');
+    'the panel must never reach a browser store');
+  // The strongest form of "scripts hold no credential" is that there is no
+  // variable to hold one. Writes must not attach an api-key header either —
+  // except the one login call that trades a key for a cookie.
+  assert.doesNotMatch(keyPanelJs, /let\s+adminKey|adminKeyAt/,
+    'no variable may retain a credential any more');
+  const keyHeaderUses = keyPanelJs.match(/'x-api-key'/g) || [];
+  assert.equal(keyHeaderUses.length, 1,
+    'only the login exchange may send an api-key header; found ' + keyHeaderUses.length);
+  assert.match(keyPanelJs.slice(keyPanelJs.indexOf("'x-api-key'") - 400,
+                                keyPanelJs.indexOf("'x-api-key'")),
+    /\/admin\/session/, 'that single use must be the session exchange');
 
   context.renderKeys({providers: ['databricks', 'copilot'],
     provider_labels: {databricks: 'ADB', copilot: 'GHCP'},
@@ -171,9 +187,10 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   assert.doesNotMatch(element('keysContent').innerHTML, /data-reset/,
     'an unrestricted tenant has nothing to reset');
 
-  // ---- unlock / lock ----
-  // One unlock reads all four sections; a write afterwards must not need the
-  // key retyped. That is the whole point of the change.
+  // ---- panel session: unlock / lock ----
+  // Unlocking trades a credential for an HttpOnly cookie once, then reads all
+  // four sections. Nothing afterwards carries a credential: the browser owns
+  // the session and these scripts cannot read it.
   const PANEL_URLS = ['/admin/api-keys', '/admin/model-routing',
                       '/admin/copilot/accounts', '/admin/credentials'];
   const PANEL_PAYLOADS = {
@@ -192,30 +209,55 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
     '/admin/credentials': {store: {key: 'present', key_fingerprint: 'kf', unopenable: 0},
       credentials: []},
   };
-  const panelFetch = (overrides = {}) => async (url, options) => {
+  // Mirrors the server: GET reports state, POST mints a session, DELETE drops it.
+  let session = {authenticated: false, password_configured: true};
+  const ok = payload => ({ok: true, status: 200, json: async () => payload});
+  const panelFetch = (overrides = {}) => async (url, options = {}) => {
     requests.push({url, options});
     if (overrides[url]) return overrides[url];
+    if (url === '/admin/session') {
+      const method = (options.method || 'GET').toUpperCase();
+      if (method === 'POST') { session = {...session, authenticated: true}; return ok({authenticated: true, expires_in: 1800}); }
+      if (method === 'DELETE') { session = {...session, authenticated: false}; return ok({authenticated: false}); }
+      return ok({authenticated: session.authenticated, expires_in: session.authenticated ? 1800 : 0,
+                 password_configured: session.password_configured});
+    }
+    if (!session.authenticated) return {ok: false, status: 401, json: async () => ({detail: 'no session'})};
     const payload = PANEL_PAYLOADS[url];
     if (!payload) return {ok: false, status: 404, json: async () => ({detail: 'no stub'})};
-    return {ok: true, status: 200, json: async () => payload};
+    return ok(payload);
   };
 
-  element('keysAdminKey').value = 'lb-panel-key';
+  // A password unlock sends the password once and never a key header.
+  session = {authenticated: false, password_configured: true};
+  element('panelPassword').value = 'panel-password-value';
+  element('keysAdminKey').value = '';
   requests = [];
   context.fetch = panelFetch();
   await context.unlockPanels();
-  assert.deepEqual(requests.map(r => r.url).sort(), [...PANEL_URLS].sort(),
-    'unlocking reads every section exactly once');
-  assert.ok(requests.every(r => r.options.headers['x-api-key'] === 'lb-panel-key'));
-  assert.ok(!requests.some(r => r.url.includes('lb-panel-key')), 'the key must never travel in a URL');
-  assert.equal(element('keysAdminKey').value, '', 'the field is cleared; the key lives in memory now');
+  const login = requests[0];
+  assert.equal(login.url, '/admin/session');
+  assert.equal(login.options.method, 'POST');
+  assert.equal(JSON.parse(login.options.body).password, 'panel-password-value');
+  assert.equal(login.options.headers['x-api-key'], undefined,
+    'a password login must not also send a key');
+  assert.ok(!requests.some(r => r.url.includes('panel-password-value')),
+    'the password must never travel in a URL');
+  assert.deepEqual(requests.filter(r => PANEL_URLS.includes(r.url)).map(r => r.url).sort(),
+    [...PANEL_URLS].sort(), 'unlocking reads every section exactly once');
+  assert.ok(requests.filter(r => PANEL_URLS.includes(r.url))
+    .every(r => !(r.options.headers || {})['x-api-key']),
+    'section reads ride the cookie, not a header');
+  assert.equal(element('panelPassword').value, '', 'the password field is cleared after use');
   assert.match(element('keysStatus').textContent, /已解锁/);
   assert.match(element('keysContent').innerHTML, /team-a/);
   assert.match(element('accountsContent').innerHTML, /acct-a/);
   assert.match(element('ruleModel').innerHTML, /gpt-4o/, 'the model dropdown is populated on unlock');
   assert.match(element('ruleAccounts').innerHTML, /acct-a/, 'the account checkboxes are populated');
+  assert.match(element('panelSessionBar').textContent, /已解锁/, 'the session bar shows the state');
+  assert.match(element('panelSessionBar').textContent, /分钟/, 'and how long is left');
 
-  // A write now reuses the held key without the field being touched.
+  // A write afterwards carries no credential at all.
   nodes = [{selector: '#keysTable [data-tenant="team-a"]', checked: true, dataset: {provider: 'copilot'}}];
   requests = [];
   context.fetch = panelFetch({'/admin/api-keys/team-a/providers': {ok: true, status: 200,
@@ -223,10 +265,22 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
                         policy: {state: 'loaded', backend: 'mysql', tenants: 1}})}});
   await context.saveTenantProviders('team-a');
   assert.equal(requests[0].url, '/admin/api-keys/team-a/providers');
-  assert.equal(requests[0].options.headers['x-api-key'], 'lb-panel-key',
-    'the held key is reused; nobody retypes it');
+  assert.equal((requests[0].options.headers || {})['x-api-key'], undefined,
+    'the cookie authorises the write; no credential is in the page');
   assert.equal(requests[1].url, '/admin/api-keys',
     'the section re-reads itself so the result is visible without a button');
+
+  // A live session survives a reload: no field, no click, contents restored.
+  session = {authenticated: true, password_configured: true};
+  clearElements(['keysContent', 'routingContent', 'accountsContent', 'credentialsContent']);
+  requests = [];
+  context.fetch = panelFetch();
+  const restored = await context.refreshPanelSession();
+  assert.equal(restored, true, 'a live session must be detected on load');
+  await context.loadAllPanels(element('keysStatus'));
+  assert.match(element('keysContent').innerHTML, /team-a/,
+    'the panel restores itself without any credential being entered');
+  assert.ok(!requests.some(r => (r.options.headers || {})['x-api-key']));
 
   // Reset is a DELETE and must be confirmed.
   requests = [];
@@ -265,7 +319,7 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   assert.match(element('keysStatus').textContent, /至少要允许一个渠道/);
   assert.match(element('keysStatus').textContent, /重置/, 'it must point at the control that does work');
 
-  // Rotating the source may invalidate the very key held in memory, so the
+  // Rotating the source may invalidate the key behind the session, so the
   // panel locks rather than keeping something that may no longer work.
   requests = [];
   context.fetch = panelFetch({'/admin/api-keys/reload': {ok: true, status: 200,
@@ -277,57 +331,91 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
     'env-sourced values still need a restart and the panel must say so');
   assert.match(element('keysStatus').textContent, /已自动锁定/);
   assert.match(element('keysContent').innerHTML, /已锁定/, 'locking clears the identity material');
+  assert.ok(requests.some(r => r.url === '/admin/session' && (r.options.method || '') === 'DELETE'),
+    'locking must invalidate the session server-side, not just locally');
+
   nodes = [{selector: '#keysTable [data-tenant="team-a"]', checked: true, dataset: {provider: 'copilot'}}];
   requests = [];
   await context.saveTenantProviders('team-a');
-  assert.equal(requests.length, 0, 'a locked panel must not issue writes');
-  assert.match(element('keysStatus').textContent, /请先输入 API Key/);
+  assert.equal(requests.filter(r => r.url !== '/admin/session').length, 0,
+    'a locked panel must not issue writes');
+  assert.match(element('keysStatus').textContent, /请先解锁/);
 
-  // Lock clears every section, not just the key.
-  element('keysAdminKey').value = 'lb-panel-key';
+  // Lock clears every section, not just the session.
+  session = {authenticated: false, password_configured: true};
+  element('panelPassword').value = 'panel-password-value';
   context.fetch = panelFetch();
   await context.unlockPanels();
   assert.match(element('accountsContent').innerHTML, /acct-a/);
-  context.lockPanels();
+  await context.lockPanels();
   for (const id of ['keysContent', 'routingContent', 'accountsContent', 'credentialsContent']) {
     assert.match(element(id).innerHTML, /已锁定/, id + ' must be cleared on lock');
   }
   assert.equal(element('keysPolicyState').innerHTML, '');
   assert.equal(element('ruleAccounts').innerHTML, '');
 
-  // An idle timeout locks on the next action instead of sending a stale key.
-  let clock = 5_000_000;
-  context.panelClock = () => clock;
-  element('keysAdminKey').value = 'lb-panel-key';
+  // Where no password is configured, the API Key is the way in — and it is
+  // exchanged for the same cookie rather than kept in the page.
+  session = {authenticated: false, password_configured: false};
+  await context.refreshPanelSession();
+  element('panelPassword').value = '';
+  element('keysAdminKey').value = 'lb-fallback-key';
+  requests = [];
   context.fetch = panelFetch();
   await context.unlockPanels();
-  clock += 11 * 60 * 1000;
-  nodes = [{selector: '#keysTable [data-tenant="team-a"]', checked: true, dataset: {provider: 'copilot'}}];
-  requests = [];
-  await context.saveTenantProviders('team-a');
-  assert.equal(requests.length, 0, 'an expired key must not be sent');
-  assert.match(element('keysStatus').textContent, /闲置超过 10 分钟/);
-  assert.match(element('keysContent').innerHTML, /已锁定/);
+  assert.equal(requests[0].url, '/admin/session');
+  assert.equal(requests[0].options.headers['x-api-key'], 'lb-fallback-key');
+  assert.equal(element('keysAdminKey').value, '', 'the key field is cleared after the exchange');
+  assert.ok(requests.filter(r => PANEL_URLS.includes(r.url))
+    .every(r => !(r.options.headers || {})['x-api-key']),
+    'after the exchange even the fallback path holds nothing');
+  assert.match(element('keysContent').innerHTML, /team-a/);
 
-  // Activity inside the window renews it rather than expiring on a fixed clock.
-  clock = 6_000_000;
-  element('keysAdminKey').value = 'lb-panel-key';
-  context.fetch = panelFetch();
+  // Neither field filled in: refuse locally and name the one that applies.
+  session = {authenticated: false, password_configured: false};
+  await context.refreshPanelSession();
+  element('panelPassword').value = '';
+  element('keysAdminKey').value = '';
+  requests = [];
   await context.unlockPanels();
-  clock += 9 * 60 * 1000;
+  assert.equal(requests.filter(r => r.url !== '/admin/session').length, 0);
+  assert.match(element('keysStatus').textContent, /LB API Key/,
+    'with no password configured the prompt must point at the key');
+  session = {authenticated: false, password_configured: true};
+  await context.refreshPanelSession();
+  await context.unlockPanels();
+  assert.match(element('keysStatus').textContent, /面板密码/,
+    'with a password configured the prompt must point at the password');
+
+  // A rejected password must leave the panel locked and say which it was.
+  element('panelPassword').value = 'wrong-password';
+  context.fetch = panelFetch({'/admin/session': {ok: false, status: 401,
+    json: async () => ({detail: {error: {code: 'invalid_panel_password'}}})}});
+  await context.unlockPanels();
+  assert.match(element('keysStatus').textContent, /密码不正确/);
   requests = [];
-  context.fetch = panelFetch({'/admin/api-keys/team-a/providers': {ok: true, status: 200,
-    json: async () => ({tenant: 'team-a', providers: ['copilot'], policy: {state: 'loaded'}})}});
+  nodes = [{selector: '#keysTable [data-tenant="team-a"]', checked: true, dataset: {provider: 'copilot'}}];
   await context.saveTenantProviders('team-a');
-  assert.ok(requests.length > 0, 'activity within the window must be allowed');
-  clock += 9 * 60 * 1000;
-  requests = [];
-  await context.saveTenantProviders('team-a');
-  assert.ok(requests.length > 0, 'the idle window is renewed by activity, not fixed at unlock');
-  context.panelClock = () => Date.now();
+  assert.equal(requests.filter(r => r.url !== '/admin/session').length, 0,
+    'a rejected login must not leave the panel usable');
+
+  // A lockout is a distinct, actionable message rather than "invalid".
+  element('panelPassword').value = 'wrong-password';
+  context.fetch = panelFetch({'/admin/session': {ok: false, status: 429,
+    json: async () => ({detail: {error: {code: 'too_many_attempts'}}})}});
+  await context.unlockPanels();
+  assert.match(element('keysStatus').textContent, /过于频繁/);
+
+  // A password typed where none is configured must explain the fallback.
+  element('panelPassword').value = 'panel-password-value';
+  context.fetch = panelFetch({'/admin/session': {ok: false, status: 503,
+    json: async () => ({detail: {error: {code: 'panel_password_not_configured'}}})}});
+  await context.unlockPanels();
+  assert.match(element('keysStatus').textContent, /LB API Key/);
 
   // A section that fails must not take the rest of the page down with it.
-  element('keysAdminKey').value = 'lb-panel-key';
+  session = {authenticated: false, password_configured: true};
+  element('panelPassword').value = 'panel-password-value';
   requests = [];
   context.fetch = panelFetch({'/admin/credentials': {ok: false, status: 503,
     json: async () => ({detail: 'storage down'})}});
@@ -337,7 +425,8 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   assert.match(element('keysStatus').textContent, /其余各块可用/);
 
   // A channel that is simply not configured reads as a fact, not a failure.
-  element('keysAdminKey').value = 'lb-panel-key';
+  session = {authenticated: false, password_configured: true};
+  element('panelPassword').value = 'panel-password-value';
   context.fetch = panelFetch({'/admin/copilot/accounts': {ok: false, status: 404,
     json: async () => ({detail: {error: {message: 'GitHub Copilot is not configured'}}})}});
   await context.unlockPanels();
@@ -347,7 +436,8 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   // A storage layer that was never set up answers 503 with a code; a broken one
   // answers 503 without. Treating both as a failure made every deployment
   // without credential storage show a warning on every unlock.
-  element('keysAdminKey').value = 'lb-panel-key';
+  session = {authenticated: false, password_configured: true};
+  element('panelPassword').value = 'panel-password-value';
   context.fetch = panelFetch({'/admin/credentials': {ok: false, status: 503,
     json: async () => ({detail: {error: {code: 'credential_store_unavailable',
                                          message: 'Credential storage is not configured.'}}})}});
@@ -356,7 +446,8 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
     'an unconfigured store is not a failure to report');
   assert.doesNotMatch(element('keysStatus').textContent, /读取失败/);
 
-  element('keysAdminKey').value = 'lb-panel-key';
+  session = {authenticated: false, password_configured: true};
+  element('panelPassword').value = 'panel-password-value';
   context.fetch = panelFetch({'/admin/credentials': {ok: false, status: 503,
     json: async () => ({detail: {error: {code: 'storage_unreachable'}}})}});
   await context.unlockPanels();
@@ -364,20 +455,12 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
     'a genuinely broken store must still be reported');
   assert.match(element('keysStatus').textContent, /读取失败/);
 
-  // A wholly invalid key must not be retained, or every later write repeats it.
-  element('keysAdminKey').value = 'wrong-key';
-  const unauthorised = {ok: false, status: 401, json: async () => ({detail: 'Invalid API key'})};
-  context.fetch = panelFetch(Object.fromEntries(PANEL_URLS.map(u => [u, unauthorised])));
-  await context.unlockPanels();
-  assert.match(element('keysStatus').textContent, /API Key 无效/);
-  requests = [];
-  await context.saveTenantProviders('team-a');
-  assert.equal(requests.length, 0, 'a rejected key must not be kept');
-
   // Back to a usable state for the sections below.
-  element('keysAdminKey').value = 'lb-panel-key';
+  session = {authenticated: true, password_configured: true};
+  await context.refreshPanelSession();
   context.fetch = panelFetch();
-  await context.unlockPanels();
+  await context.loadAllPanels(element('keysStatus'));
+
 
   // ---- GHCP accounts ----
   assert.match(html, /id="accountsContent"/, 'account area needs a container');
@@ -734,16 +817,20 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   assert.equal(requests.length, 0, 'an expired flow must not keep polling with a stale handle');
 
   // Locking must also stop the credential controls, not just the visible tables.
-  context.lockPanels();
+  await context.lockPanels();
   element('credSecret').value = 'dapi-after-lock';
   requests = [];
   await context.submitCredential();
-  assert.equal(requests.length, 0, 'a locked panel must not submit credentials');
+  assert.equal(requests.filter(r => r.url !== '/admin/session').length, 0,
+    'a locked panel must not submit credentials');
   assert.equal(element('credSecret').value, '', 'the secret is cleared even on the refusal path');
   requests = [];
   await context.startDeviceFlow();
-  assert.equal(requests.length, 0, 'a locked panel must not start a device flow');
+  assert.equal(requests.filter(r => r.url !== '/admin/session').length, 0,
+    'a locked panel must not start a device flow');
   assert.match(element('deviceStatus').textContent, /请先解锁/);
 
-  console.log('Dashboard UI: authenticated cleanup, honest errors, safe release identity, unlock/lock, key panel, accounts, routing rules, credentials passed.');
+  console.log('Dashboard UI: authenticated cleanup, honest errors, safe release identity, '
+    + 'panel session (password + cookie, zero-interaction restore, key fallback), '
+    + 'key panel, accounts, routing rules, credentials passed.');
 })().catch(error => {console.error(error); process.exitCode = 1;});

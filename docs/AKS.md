@@ -192,6 +192,42 @@ kubectl create secret generic claude-lb-copilot-cache -n $NS \
   --from-file=copilot-auth-gh-account-1.json=$HOME/.config/databricks-claude-lb/copilot-auth-gh-account-1.json
 ```
 
+<a id="panel-password-and-the-controller-role"></a>
+
+#### Dashboard 面板密码：加它之前先看控制器 Role
+
+面板解锁密码取自 `LB_DASHBOARD_PASSWORD`（≥12 字符）。示例 manifest 用 `envFrom.secretRef`
+指向 `claude-lb-secrets`，所以在那条路径上**只需往该 Secret 加一个 key**，Deployment
+模板不变。
+
+**live 集群（zeno-apps）不是这样**：它没有 `claude-lb-secrets`，`envFrom` 为空，env 秘密
+各自用单独的 `secretKeyRef`（当前只有 `LB_CREDENTIAL_KEY` → `claude-lb-credential-key`）。
+所以那里有两个选择，代价不同：
+
+| 做法 | 要动 Deployment 模板 | 要同步控制器 Role |
+|---|---|---|
+| 把 key 加进既有的 `claude-lb-credential-key` | 加一个 env（`secretKeyRef.name` 不变） | **否** —— 该 Secret 名已在 `resourceNames` 白名单里 |
+| 新建一个 Secret（如 `claude-lb-panel-auth`） | 加一个 env + 新的 `secretKeyRef.name` | **是，必须** |
+
+> **给 Deployment 新增任何 ConfigMap/Secret 引用，都要把该对象名加进
+> `Role/lb-release-controller-target` 的 `secrets`（或 `configmaps`）`resourceNames`。**
+> preflight 的 `_verify_references()` 会逐个读取模板引用的每个对象并比对摘要，漏一个
+> 就是 403 —— 2026-10-14 首轮发布就是这么中止的。而 **`plan` 阶段不会暴露这个问题**，
+> 因为 plan 用的是运维自己的身份，不是控制器的 ServiceAccount。
+>
+> 查法（`resourceNames` 必须一起打出来，否则 `can-i` 的结果看着自相矛盾）：
+>
+> ```bash
+> kubectl -n zeno-apps get role lb-release-controller-target -o json \
+>   | python3 -c "import json,sys;[print(r.get('resources'), r.get('verbs'), r.get('resourceNames','(unrestricted)')) for r in json.load(sys.stdin)['rules']]"
+> ```
+>
+> 改 Role 用 `kubectl apply`（从它自己的 `last-applied-configuration` 重建后只改那一处），
+> 不要用 JSON patch —— 该对象由 apply 管理，patch 会让 `last-applied` 失配，下一次
+> apply 就把改动吞回去。
+
+未配置或过短时面板登录整体不可用，页面回落到用 LB API Key 解锁，**不会退化为无密码放行**。
+
 ### 3. （可选）把 ConfigMap 的镜像引用替换成你的 ACR
 
 `deploy/k8s/kustomization.yaml` 改：

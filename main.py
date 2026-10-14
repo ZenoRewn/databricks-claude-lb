@@ -50,7 +50,9 @@ import asyncio
 import math
 import base64
 import hashlib
+import hmac
 import json
+import secrets
 import time
 import random
 import logging
@@ -9088,7 +9090,7 @@ def _config_declared_accounts(provider: str) -> set:
 @app.get("/admin/credentials")
 async def admin_credentials(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
     """运维端点：已录入凭据的**身份**与校验结果。绝不返回明文或密文。"""
-    _require_admin_key(request, x_api_key)
+    _require_admin_access(request, x_api_key)
     if credential_store is None:
         raise HTTPException(status_code=503, detail={"error": {
             "code": "credential_store_unavailable", "message": "Credential storage is not configured."}})
@@ -9108,7 +9110,7 @@ async def admin_credentials(request: Request, x_api_key: Optional[str] = Header(
 async def admin_put_credential(provider: str, account: str, request: Request,
                                x_api_key: Optional[str] = Header(None, alias="x-api-key")):
     """运维端点：录入凭据。先向上游校验，通过才封装入库。"""
-    _require_admin_key(request, x_api_key)
+    _require_admin_access(request, x_api_key)
     store = _credential_store_or_503()
     if provider not in PROVIDER_IDS:
         raise HTTPException(status_code=400, detail={"error": {
@@ -9162,7 +9164,7 @@ async def admin_put_credential(provider: str, account: str, request: Request,
 async def admin_delete_credential(provider: str, account: str, request: Request,
                                   x_api_key: Optional[str] = Header(None, alias="x-api-key")):
     """运维端点：删除已录入凭据（已生效的端点要到下次重启才消失）。"""
-    _require_admin_key(request, x_api_key)
+    _require_admin_access(request, x_api_key)
     store = _credential_store_or_503()
     try:
         await store.delete(provider, account)
@@ -9177,7 +9179,7 @@ async def admin_delete_credential(provider: str, account: str, request: Request,
 async def admin_validate_credential(provider: str, account: str, request: Request,
                                     x_api_key: Optional[str] = Header(None, alias="x-api-key")):
     """运维端点：对已存凭据重新校验（会调一次上游）。"""
-    _require_admin_key(request, x_api_key)
+    _require_admin_access(request, x_api_key)
     store = _credential_store_or_503()
     secret = store.resolve(provider, account)
     if secret is None:
@@ -9201,7 +9203,7 @@ async def admin_validate_credential(provider: str, account: str, request: Reques
 @app.post("/admin/credentials/copilot/device/start")
 async def admin_device_start(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
     """运维端点：启动 GitHub device flow。device_code 只留在进程内。"""
-    _require_admin_key(request, x_api_key)
+    _require_admin_access(request, x_api_key)
     _credential_store_or_503()
     DEVICE_FLOWS.prune()
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -9223,7 +9225,7 @@ async def admin_device_start(request: Request, x_api_key: Optional[str] = Header
 @app.post("/admin/credentials/copilot/device/poll")
 async def admin_device_poll(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
     """运维端点：轮询一次 device flow；成功则校验后封装入库。"""
-    _require_admin_key(request, x_api_key)
+    _require_admin_access(request, x_api_key)
     store = _credential_store_or_503()
     try:
         payload = await request.json()
@@ -9326,7 +9328,7 @@ async def admin_model_routing(request: Request, x_api_key: Optional[str] = Heade
     同时返回两个下拉的数据源，让这一个端点自足 —— Dashboard 把三段呈现为一行，
     分三次请求去凑选项会让「有哪些模型可选」和「规则里写了什么」不同步。
     """
-    _require_admin_key(request, x_api_key)
+    _require_admin_access(request, x_api_key)
     store = key_policy_store
     preferences = store.model_preferences_snapshot() if store is not None else {}
     selections = store.model_accounts_snapshot() if store is not None else {}
@@ -9362,7 +9364,7 @@ async def admin_set_model_routing(model: str, request: Request,
     两段都在任何写入**之前**校验完 —— 第三个字段打错一个字母却让 provider 那半边
     已经生效，是最难排查的一种半应用。
     """
-    _require_admin_key(request, x_api_key)
+    _require_admin_access(request, x_api_key)
     if key_policy_store is None:
         raise HTTPException(status_code=503, detail={"error": {
             "code": "policy_store_unavailable",
@@ -9416,7 +9418,7 @@ async def admin_clear_model_routing(model: str, request: Request,
 
     两个维度一起清：UI 上这是一行，「清除」只清一半会留下看不见的账户限定。
     """
-    _require_admin_key(request, x_api_key)
+    _require_admin_access(request, x_api_key)
     if key_policy_store is None:
         raise HTTPException(status_code=503, detail={"error": {
             "code": "policy_store_unavailable",
@@ -9491,7 +9493,7 @@ async def admin_copilot_accounts(request: Request, x_api_key: Optional[str] = He
     只返回账户名与模型名，**不返回任何 token 或可反推的前缀**。请求数是端点
     的进程内累计，重启归零。
     """
-    _require_admin_key(request, x_api_key)
+    _require_admin_access(request, x_api_key)
     if not copilot_proxy:
         raise HTTPException(status_code=404, detail={"error": {"message": "GitHub Copilot is not configured"}})
     return {
@@ -9507,7 +9509,7 @@ async def admin_copilot_accounts(request: Request, x_api_key: Optional[str] = He
 async def admin_set_copilot_account(account: str, request: Request,
                                     x_api_key: Optional[str] = Header(None, alias="x-api-key")):
     """运维端点：切换账户启用态与允许模型（只能在已发现 capability 内勾选）。"""
-    _require_admin_key(request, x_api_key)
+    _require_admin_access(request, x_api_key)
     if not copilot_proxy:
         raise HTTPException(status_code=404, detail={"error": {"message": "GitHub Copilot is not configured"}})
     if key_policy_store is None:
@@ -9555,7 +9557,7 @@ async def admin_set_copilot_account(account: str, request: Request,
 async def admin_discover_copilot_account(account: str, request: Request,
                                           x_api_key: Optional[str] = Header(None, alias="x-api-key")):
     """运维端点：重新发现该账户的模型能力并存快照。会调用一次上游。"""
-    _require_admin_key(request, x_api_key)
+    _require_admin_access(request, x_api_key)
     if not copilot_proxy:
         raise HTTPException(status_code=404, detail={"error": {"message": "GitHub Copilot is not configured"}})
     if key_policy_store is None:
@@ -9583,6 +9585,232 @@ def _require_admin_key(request: Request, x_api_key: Optional[str]) -> str:
     return actual_key
 
 
+# ---- Dashboard 面板会话 ----
+#
+# 面板的每次写入都需要凭据，而用 LB API Key 充当它意味着要么每保存一次重输一遍，
+# 要么把 key 放在页面脚本的变量里。独立密码配 HttpOnly cookie 同时解决两件事：
+# 会话由浏览器携带，**页面脚本什么都不持有**，XSS 也就没有可偷的东西。
+#
+# 它不替代 API Key —— curl、脚本、以及没配密码的部署仍按 header 鉴权。这是多一条
+# 入口，不是换一条。
+#
+# 为什么必须有长度下限和退避：密码是人设的、天生低熵，所以在线猜测才是现实威胁；
+# 而 `/admin/*` 由没有 OAuth 的那个 ingress 提供，对公网可达。
+PANEL_PASSWORD_ENV = "LB_DASHBOARD_PASSWORD"
+PANEL_SESSION_COOKIE = "lb_panel"
+PANEL_SESSION_TTL_SECONDS = 1800          # 30 分钟滑动窗口
+PANEL_PASSWORD_MIN_LENGTH = 12
+PANEL_LOCKOUT_THRESHOLD = 5
+PANEL_LOCKOUT_BASE_SECONDS = 30
+PANEL_LOCKOUT_MAX_SECONDS = 3600
+
+# token 的 sha256 → 过期时刻。**存摘要不存明文**：真正的 token 只在浏览器 cookie 里，
+# 进程重启后全部会话失效（与「刷新页面即失效」相当，不是故障）。
+_PANEL_SESSIONS: Dict[str, float] = {}
+# 客户端标识 → (连续失败次数, 锁定到期时刻)。进程内，重启归零；它挡的是在线暴力，
+# 不是分布式撞库。
+_PANEL_FAILURES: Dict[str, tuple] = {}
+
+
+def _panel_password() -> Optional[str]:
+    """面板密码；未配置或过短时返回 None —— **功能不可用，不是无需密码**。
+
+    故意不进 `LB_SETTINGS`：`/config/effective` 会把整个 settings 字典返回给任何
+    持有效 key 的调用方。
+    """
+    raw = os.getenv(PANEL_PASSWORD_ENV) or ""
+    if not raw:
+        return None
+    if len(raw) < PANEL_PASSWORD_MIN_LENGTH:
+        # 只报长度要求，不报配了什么。
+        logger.error("panel: %s is shorter than %d characters; panel login stays disabled",
+                     PANEL_PASSWORD_ENV, PANEL_PASSWORD_MIN_LENGTH)
+        return None
+    return raw
+
+
+def _panel_client_id(request: Request) -> str:
+    """退避的计数单位。取直连地址而不是 XFF —— 后者由调用方提供，可以随手伪造，
+    拿它做 key 等于让攻击者自带无限多个配额。"""
+    return getattr(getattr(request, "client", None), "host", None) or "unknown"
+
+
+def _panel_lockout_remaining(client: str) -> int:
+    count, until = _PANEL_FAILURES.get(client, (0, 0.0))
+    if count < PANEL_LOCKOUT_THRESHOLD:
+        return 0
+    remaining = until - time.time()
+    if remaining <= 0:
+        return 0
+    return max(1, int(math.ceil(remaining)))
+
+
+def _panel_note_failure(client: str) -> None:
+    count, _ = _PANEL_FAILURES.get(client, (0, 0.0))
+    count += 1
+    # 到达阈值后每次失败再翻倍，有上限。
+    excess = max(0, count - PANEL_LOCKOUT_THRESHOLD)
+    delay = min(PANEL_LOCKOUT_BASE_SECONDS * (2 ** excess), PANEL_LOCKOUT_MAX_SECONDS)
+    _PANEL_FAILURES[client] = (count, time.time() + delay)
+
+
+def _panel_session_create() -> str:
+    token = secrets.token_urlsafe(32)
+    _PANEL_SESSIONS[hashlib.sha256(token.encode()).hexdigest()] = (
+        time.time() + PANEL_SESSION_TTL_SECONDS)
+    return token
+
+
+def _panel_session_expiry(request: Request, *, renew: bool = False) -> Optional[float]:
+    """该请求携带的会话的到期时刻；无效或过期返回 None。
+
+    `renew=True` 时滑动续期 —— 持续操作不该被踢，闲置才该。
+    """
+    token = request.cookies.get(PANEL_SESSION_COOKIE)
+    if not token:
+        return None
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    expires_at = _PANEL_SESSIONS.get(digest)
+    if expires_at is None:
+        return None
+    if expires_at <= time.time():
+        # 过期条目立刻丢掉，不留在表里。
+        _PANEL_SESSIONS.pop(digest, None)
+        return None
+    if renew:
+        expires_at = time.time() + PANEL_SESSION_TTL_SECONDS
+        _PANEL_SESSIONS[digest] = expires_at
+    return expires_at
+
+
+def _panel_cookie_kwargs(request: Request) -> dict:
+    # Secure 只在 https 下加：本地 http 调试时带 Secure 的 cookie 根本不会被存下来。
+    forwarded = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    secure = request.url.scheme == "https" or forwarded == "https"
+    return {"httponly": True, "samesite": "strict", "secure": secure,
+            # 最小作用域：`/stats/dashboard` 本身不需要这个 cookie。
+            "path": "/admin"}
+
+
+def _require_admin_access(request: Request, x_api_key: Optional[str]) -> str:
+    """面板会话或 API Key，二者之一。
+
+    所有 admin 端点共用这一处收口，所以加一种入口不需要逐个端点改。
+    """
+    if _panel_session_expiry(request, renew=True) is not None:
+        return "panel-session"
+    return _require_admin_key(request, x_api_key)
+
+
+@app.get("/admin/session")
+async def admin_session_status(request: Request):
+    """面板会话状态。**不需要凭据** —— 页面第一个请求就是它，用来回答「要不要登录、
+    怎么登录」；要求凭据才能问这个问题是循环的。
+
+    只回答布尔与剩余秒数，不回显密码、不回显 token。
+    """
+    expires_at = _panel_session_expiry(request)
+    return {
+        "authenticated": expires_at is not None,
+        "expires_in": max(0, int(expires_at - time.time())) if expires_at else 0,
+        "password_configured": _panel_password() is not None,
+        # 让 UI 知道该显示密码框还是回落到 API Key 框。
+        "auth_methods": (["panel_password", "api_key"] if _panel_password() is not None
+                         else ["api_key"]),
+        "session_ttl_seconds": PANEL_SESSION_TTL_SECONDS,
+        "note": ("The session cookie is HttpOnly, so page scripts never hold a credential. "
+                 "Sessions are process-local and do not survive a restart."),
+    }
+
+
+@app.post("/admin/session")
+async def admin_session_login(request: Request,
+                              x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """用面板密码**或**一个有效的 API Key 换一个 HttpOnly 会话 cookie。
+
+    为什么 API Key 也能换：没配面板密码的部署要回落到 key，而如果那条路径让页面
+    脚本一直持着 key，「脚本不持有凭据」就只在一半情况下成立。两条入口都换成
+    同一种会话，这个性质才是无条件的。安全上也等价 —— 能出示有效 key 的人本来
+    就能直接调用每个 admin 端点。
+
+    退避只计密码路径：API Key 是高熵的，而且拿面板的失败去锁住运维脚本是另一种
+    自伤。
+    """
+    password = _panel_password()
+    client = _panel_client_id(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        # 纯 API Key 登录不需要 body，所以无法解析不等于出错。
+        payload = {}
+    supplied = (payload or {}).get("password")
+
+    if isinstance(supplied, str) and supplied:
+        if password is None:
+            raise HTTPException(status_code=503, detail={"error": {
+                "code": "panel_password_not_configured",
+                "message": (f"{PANEL_PASSWORD_ENV} is not set, or is shorter than "
+                            f"{PANEL_PASSWORD_MIN_LENGTH} characters. Panel login is "
+                            "disabled; use an API key.")}})
+        remaining = _panel_lockout_remaining(client)
+        if remaining:
+            # 锁定期内连正确密码也拒 —— 否则退避只是减速带，第六次猜对照样进得去。
+            # 响应也不区分对错，不然它就成了一个旁路的密码预言机。
+            raise HTTPException(status_code=429, headers={"Retry-After": str(remaining)},
+                                detail={"error": {
+                                    "code": "too_many_attempts",
+                                    "message": "Too many attempts. Try again later."}})
+        if not hmac.compare_digest(supplied, password):
+            _panel_note_failure(client)
+            raise HTTPException(status_code=401, detail={"error": {
+                "code": "invalid_panel_password", "message": "Incorrect password."}})
+        _PANEL_FAILURES.pop(client, None)
+    else:
+        key = _extract_api_key(request, x_api_key)
+        if not (key and _verify_lb_api_key(key)):
+            if password is None:
+                raise HTTPException(status_code=503, detail={"error": {
+                    "code": "panel_password_not_configured",
+                    "message": (f"{PANEL_PASSWORD_ENV} is not set, or is shorter than "
+                                f"{PANEL_PASSWORD_MIN_LENGTH} characters. Supply a valid "
+                                "API key instead.")}})
+            raise HTTPException(status_code=400, detail={"error": {
+                "code": "password_required",
+                "message": "Provide a 'password' string, or a valid API key."}})
+
+    # 重新登录替换旧会话，而不是越堆越多。单用户面板不需要并发会话。
+    if _panel_session_expiry(request) is not None:
+        stale = request.cookies.get(PANEL_SESSION_COOKIE) or ""
+        _PANEL_SESSIONS.pop(hashlib.sha256(stale.encode()).hexdigest(), None)
+    token = _panel_session_create()
+    response = JSONResponse({
+        "authenticated": True,
+        "expires_in": PANEL_SESSION_TTL_SECONDS,
+        "note": "The session is in the cookie; nothing is returned for scripts to store.",
+    })
+    response.set_cookie(PANEL_SESSION_COOKIE, token,
+                        max_age=PANEL_SESSION_TTL_SECONDS, **_panel_cookie_kwargs(request))
+    return response
+
+
+@app.delete("/admin/session")
+async def admin_session_logout(request: Request):
+    """登出：服务端失效 token，并清掉浏览器里的那一份。
+
+    没有会话时也返回 200 —— 这是幂等的「确保已登出」，不是「删除一条记录」。
+    """
+    token = request.cookies.get(PANEL_SESSION_COOKIE)
+    if token:
+        _PANEL_SESSIONS.pop(hashlib.sha256(token.encode()).hexdigest(), None)
+    response = JSONResponse({"authenticated": False})
+    kwargs = _panel_cookie_kwargs(request)
+    # 只删服务端条目会让浏览器继续发一个已经没用的 cookie。
+    response.delete_cookie(PANEL_SESSION_COOKIE, path=kwargs["path"],
+                           samesite=kwargs["samesite"], secure=kwargs["secure"],
+                           httponly=kwargs["httponly"])
+    return response
+
+
 def _policy_status_view() -> dict:
     if key_policy_store is None:
         return {"state": "disabled", "backend": "none", "tenants": 0,
@@ -9599,7 +9827,7 @@ async def admin_api_keys(request: Request, x_api_key: Optional[str] = Header(Non
     露出 8/10 个字符等于交出大半个秘密。请求数与最后使用时间是**进程内**
     计数，Pod 重启归零，不代表密钥未被使用。
     """
-    _require_admin_key(request, x_api_key)
+    _require_admin_access(request, x_api_key)
     keys = []
     for key, tenant in sorted(API_KEY_TO_TENANT.items(), key=lambda item: item[1]):
         usage = TENANT_USAGE.get(tenant) or {}
@@ -9631,7 +9859,7 @@ async def admin_set_tenant_providers(tenant: str, request: Request,
 
     allowlist 只做减法 —— 它不能让某 provider 服务它本来不支持的模型。
     """
-    _require_admin_key(request, x_api_key)
+    _require_admin_access(request, x_api_key)
     if key_policy_store is None:
         raise HTTPException(status_code=503, detail={"error": {
             "code": "policy_store_unavailable",
@@ -9668,7 +9896,7 @@ async def admin_reset_tenant_providers(tenant: str, request: Request,
 
     已经没有限制时也返回 200：这是幂等的重置，不是「删除一条记录」。
     """
-    _require_admin_key(request, x_api_key)
+    _require_admin_access(request, x_api_key)
     if key_policy_store is None:
         raise HTTPException(status_code=503, detail={"error": {
             "code": "policy_store_unavailable",
@@ -9697,7 +9925,7 @@ async def admin_api_keys_reload(request: Request, x_api_key: Optional[str] = Hea
     解析或校验失败时保留原有注册，绝不留下空 map。`${ENV}` 形式的值取自
     进程环境，文件更新不会改变它们，仍需滚动重启。
     """
-    _require_admin_key(request, x_api_key)
+    _require_admin_access(request, x_api_key)
     config_path = os.getenv("CONFIG_PATH", "config.yaml")
     try:
         raw = Path(config_path).read_text()

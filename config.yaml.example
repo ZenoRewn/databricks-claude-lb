@@ -24,6 +24,12 @@ load_balancer:
 # 不会退化为存明文。录入后需一次滚动重启才生效 —— 端点在启动时统一构建。
 # 详见 docs/CONFIGURATION.md 的「录入上游凭据」。
 
+# Dashboard「密钥与渠道」页的解锁密码取自环境变量 LB_DASHBOARD_PASSWORD
+# （≥12 字符，同样留在 Secret 里）。它换到一个 HttpOnly 会话 cookie，所以页面脚本
+# 不持有任何凭据。未配置或过短时面板登录整体不可用（回落到用 LB API Key 解锁），
+# 绝不退化为无密码放行。故意不进 LB_SETTINGS —— /config/effective 会把整个 settings
+# 返回给任何持有效 key 的调用方。详见 docs/CONFIGURATION.md 的「解锁契约」。
+
 auth:
   api_key: your-api-key-here      # 客户端认证密钥，Claude Code 需要使用此密钥
   # 多租户密钥（与上面的单 api_key 可共存）。租户名用作 metrics label、
