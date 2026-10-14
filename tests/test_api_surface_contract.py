@@ -33,6 +33,10 @@ KEY = "test-key-api-surface"
 IGNORED_PREFIXES = ("/openapi", "/docs", "/redoc")
 
 REQUIRED, OPEN, OPTIONAL = "需要", "不需要", "可选"
+# 第四种模式：凭据不是 API key 而是面板密码。单独一列值而不是塞进「需要」，
+# 因为「需要」在这张表里的既有含义是「需要一个有效的 LB API Key」—— 把密码端点
+# 混进去，做安全复核的人就会以为轮换 API key 能收回这条入口。
+PASSWORD = "密码"
 
 
 def _norm(path: str) -> str:
@@ -52,7 +56,7 @@ def _documented():
         paths = re.findall(r'`([^`]+)`', m.group(1))
         method = m.group(2)
         need = m.group(3).replace("*", "").strip()
-        if need not in (REQUIRED, OPEN, OPTIONAL):
+        if need not in (REQUIRED, OPEN, OPTIONAL, PASSWORD):
             continue
         for p in paths:
             table[(_norm(p), method)] = need
@@ -134,6 +138,14 @@ class AuthBehaviourMatchesTheTableTests(unittest.TestCase):
                 elif need == OPEN:
                     self.assertNotEqual(wrong.status_code, 401,
                                         "标了「不需要」却拒绝了请求")
+                elif need == PASSWORD:
+                    # 这一列的意思是「凭据不是 API key」。两头都要核：错 key 不该
+                    # 触发 401（否则它其实也吃 key），而没有正确密码绝不能成功
+                    # （否则这条入口形同虚设）。
+                    self.assertNotEqual(wrong.status_code, 401,
+                                        "标了「密码」却因 API key 错误而 401")
+                    self.assertGreaterEqual(wrong.status_code, 400,
+                                            "标了「密码」却在没有密码时放行")
                 else:  # 可选
                     self.assertEqual(wrong.status_code, 401,
                                      "「可选」的语义是：带了 key 就必须有效")

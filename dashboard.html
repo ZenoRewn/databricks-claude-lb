@@ -183,8 +183,9 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
         <details class="maintenance-panel"><summary>数据维护</summary><p>清理保留天数之前的持久化用量。删除后无法通过 Dashboard 撤销；请先确认备份。API Key 只用于本次清理请求，不保存在浏览器中。</p><form class="cleanup-form" id="cleanupForm"><label class="field" for="cleanDays">保留最近天数<input id="cleanDays" type="number" value="30" min="1" max="3650" required></label><label class="field field-key" for="managementKey">LB API Key<input id="managementKey" type="password" autocomplete="off" maxlength="4096" placeholder="仅用于这一次操作" required></label><button class="btn btn-danger" id="cleanupButton" type="submit">清理历史数据</button></form><div class="feedback" id="cleanupStatus" role="status"></div></details>
       </section>
       <section class="tab-panel" id="tab-keys" role="tabpanel" aria-labelledby="nav-keys">
-        <div class="history-toolbar"><label class="field field-key" for="keysAdminKey">LB API Key<input id="keysAdminKey" type="password" autocomplete="off" maxlength="4096" placeholder="解锁这一页的运维操作" required></label><button class="btn btn-primary" id="unlockPanels" type="button">解锁</button><button class="btn" id="lockPanels" type="button">锁定</button></div>
-        <p class="scope-note">解锁会一次读出下面四块，之后的每次保存都复用同一把 key，<strong>不必反复输入</strong>。代价要说清楚：这把 key 在解锁期间<strong>留在本页内存里</strong>（最多闲置 10 分钟，之后自动锁定），这与早先「只用于当次请求」不同。它仍然<strong>不写入 localStorage / sessionStorage / cookie，不进 URL</strong>，刷新页面即失效，也可随时点「锁定」立即清除 —— 锁定会同时清空已读出的身份信息。离开座位前请锁定。</p>
+        <div class="history-toolbar" id="panelUnlockBar"><label class="field field-key" for="panelPassword">面板密码<input id="panelPassword" type="password" autocomplete="current-password" maxlength="1024" placeholder="解锁这一页的运维操作"></label><label class="field field-key" for="keysAdminKey">LB API Key<input id="keysAdminKey" type="password" autocomplete="off" maxlength="4096" placeholder="未配置面板密码时的回落方式"></label><button class="btn btn-primary" id="unlockPanels" type="button">解锁</button><button class="btn" id="lockPanels" type="button">锁定</button></div>
+        <p class="feedback" id="panelSessionBar" role="status" hidden></p>
+        <p class="scope-note">解锁会一次读出下面四块，之后每次保存自动复用同一个会话，<strong>不必反复输入</strong>。会话以 <strong>HttpOnly cookie</strong> 承载 —— 浏览器带着它，<strong>页面脚本本身不持有任何凭据</strong>，所以 XSS 也没有可偷的东西；刷新页面后 30 分钟内仍是已解锁状态，闲置超时或点「锁定」即失效（锁定会同时清空已读出的身份信息）。密码来自 <code>LB_DASHBOARD_PASSWORD</code>，未配置或短于 12 位时面板登录整体不可用，<strong>不会退化为无密码放行</strong>，此时用上面的 LB API Key 回落。连续 5 次失败按来源指数退避，退避期内正确密码也会被拒。<strong>这一页在入口层已由 OAuth 保护，但 <code>/admin/*</code> 没有</strong>，所以凭据仍然必要。离开座位前请锁定。</p>
         <p class="feedback" id="keysStatus" role="status" hidden></p>
         <div id="keysPolicyState"></div>
         <h3>客户端密钥与渠道</h3>
@@ -828,31 +829,30 @@ async function cleanupHistory() {
 }
 
 // ---------- API keys & provider allow-lists ----------
-// Unlike cleanupHistory, this panel keeps the key for the duration of the
-// session rather than for one request. The reason is plain: it has four
-// sections and every write needs the key, so a one-request contract meant
-// retyping it for each save. The key lives in this closure variable only —
-// never localStorage, sessionStorage, a cookie, or a URL — and is dropped on
-// page reload, on an explicit lock, or after ADMIN_KEY_TTL_MS of idleness.
+// This panel holds **no credential at all**. Unlocking exchanges a panel
+// password (or, where none is configured, an LB API Key) for an HttpOnly
+// session cookie; after that the browser carries the session and these scripts
+// have nothing worth stealing — an XSS here cannot lift a key out of a closure
+// variable, because there is no longer one to lift.
+//
+// The session is server-side and process-local: a 30-minute sliding window,
+// invalidated by the lock button, gone after a restart. A page reload keeps it,
+// which is the point — reloading used to mean retyping.
 let keysInFlight = false;
 let keyProviders = [];
 let keyProviderLabels = {};
-let adminKey = null;
-let adminKeyAt = 0;
 let routingAccounts = [];
-const ADMIN_KEY_TTL_MS = 10 * 60 * 1000;
+// Session facts only, never a credential. `expiresAt` is a local estimate used
+// for the countdown; the server stays the authority on validity.
+let panelSession = {authenticated: false, expiresAt: 0, passwordConfigured: false};
 
-// Indirection so the idle timeout is testable without a fake global Date,
-// which the rendering code also uses for timestamps.
-function panelClock() { return Date.now(); }
-
-// Every container that holds identity material read under the key. Locking has
-// to clear these too: a masked key, a fingerprint and an account name are the
-// very things the key authorised us to see.
 // Server codes that mean "this deployment never set that up", as opposed to
 // "it is set up and currently failing". Both arrive as 503.
 const NOT_CONFIGURED_CODES = new Set(['credential_store_unavailable', 'policy_store_unavailable']);
 
+// Every container that holds identity material read under the session. Locking
+// has to clear these too: a masked key, a fingerprint and an account name are
+// the very things the session authorised us to see.
 const PANELS = [
   {url: '/admin/api-keys', container: 'keysContent', label: '密钥', render: p => renderKeys(p)},
   {url: '/admin/model-routing', container: 'routingContent', label: '路由规则', render: p => renderRouting(p)},
@@ -860,32 +860,57 @@ const PANELS = [
   {url: '/admin/credentials', container: 'credentialsContent', label: '凭据', render: p => renderCredentials(p)},
 ];
 
-function readAdminKey(status) {
-  const field = document.getElementById('keysAdminKey');
-  const key = field.value.trim();
-  if (!key) { status.dataset.state = 'error'; status.hidden = false; status.textContent = '请输入 API Key。'; field.focus?.(); }
-  return key;
+function renderSessionBar() {
+  const bar = document.getElementById('panelSessionBar');
+  const unlockBar = document.getElementById('panelUnlockBar');
+  if (panelSession.authenticated) {
+    const left = Math.max(0, Math.round((panelSession.expiresAt - Date.now()) / 60000));
+    bar.hidden = false;
+    bar.dataset.state = 'success';
+    bar.textContent = '已解锁 · 约 ' + left + ' 分钟后因闲置失效（任何操作都会续期）· 可随时点「锁定」';
+    unlockBar.hidden = true;
+  } else {
+    bar.hidden = true;
+    unlockBar.hidden = false;
+    // Offer only the field that can actually work on this deployment.
+    const pw = document.getElementById('panelPassword');
+    const key = document.getElementById('keysAdminKey');
+    if (pw.parentElement) pw.parentElement.hidden = !panelSession.passwordConfigured;
+    if (key.parentElement) key.parentElement.hidden = panelSession.passwordConfigured;
+  }
 }
 
-// The key for a write issued after unlocking. Activity renews the idle window;
-// an expired key is dropped rather than sent, so a stale page cannot keep
-// authorising operations.
-function panelKey(status) {
-  if (adminKey && panelClock() - adminKeyAt <= ADMIN_KEY_TTL_MS) {
-    adminKeyAt = panelClock();
-    return adminKey;
+// Session state is read from the server, not guessed. This is the panel's first
+// request, which is why GET /admin/session takes no credential: requiring one
+// to ask "must I log in?" would be circular.
+async function refreshPanelSession() {
+  try {
+    const body = await fetchJSON('/admin/session');
+    panelSession = {
+      authenticated: !!body.authenticated,
+      expiresAt: Date.now() + (body.expires_in || 0) * 1000,
+      passwordConfigured: !!body.password_configured,
+    };
+  } catch (error) {
+    panelSession = {authenticated: false, expiresAt: 0, passwordConfigured: false};
   }
-  if (adminKey) lockPanels('闲置超过 10 分钟，已自动锁定。请重新解锁。');
-  else {
-    status.hidden = false; status.dataset.state = 'error';
-    status.textContent = '请先输入 API Key 并点「解锁」。';
-  }
-  return null;
+  renderSessionBar();
+  return panelSession.authenticated;
 }
 
-function lockPanels(message) {
-  adminKey = null;
-  adminKeyAt = 0;
+// Guard for a write. There is no credential to hand back — a truthy result only
+// means "the browser should still have a live session cookie".
+function panelReady(status) {
+  if (panelSession.authenticated && panelSession.expiresAt > Date.now()) return true;
+  status.hidden = false;
+  status.dataset.state = 'error';
+  status.textContent = panelSession.authenticated ? '会话可能已过期，请重新解锁。' : '请先解锁本页。';
+  // Re-read rather than assume: the server decides, and it may still be valid.
+  refreshPanelSession();
+  return false;
+}
+
+function clearPanelContents() {
   routingAccounts = [];
   for (const panel of PANELS) {
     document.getElementById(panel.container).innerHTML = '<div class="info-box">已锁定。</div>';
@@ -893,70 +918,99 @@ function lockPanels(message) {
   document.getElementById('keysPolicyState').innerHTML = '';
   document.getElementById('ruleAccounts').innerHTML = '';
   document.getElementById('ruleModel').innerHTML = '';
+}
+
+async function lockPanels(message) {
   const status = document.getElementById('keysStatus');
+  clearPanelContents();
+  panelSession = {...panelSession, authenticated: false, expiresAt: 0};
+  try {
+    // Server-side invalidation is the part that matters: clearing only the
+    // browser copy would leave a usable session behind.
+    await fetchJSON('/admin/session', {method: 'DELETE'});
+  } catch (error) { /* locked locally either way */ }
+  await refreshPanelSession();
   status.hidden = false;
   status.dataset.state = message ? 'warn' : 'success';
-  status.textContent = message || '已锁定，密钥已从页面内存清除。';
+  status.textContent = message || '已锁定，会话已在服务端失效。';
+}
+
+async function loadAllPanels(status) {
+  const results = await Promise.allSettled(PANELS.map(panel => fetchJSON(panel.url)));
+  const failed = [];
+  results.forEach((result, index) => {
+    const panel = PANELS[index];
+    if (result.status === 'fulfilled') { panel.render(result.value); return; }
+    const error = result.reason || {};
+    // "Not configured" is a fact about this deployment, not a failure. A
+    // missing channel answers 404; a storage layer that was never set up
+    // answers 503 with a code, which is the only thing separating it from a
+    // storage layer that is actually broken.
+    const absent = error.status === 404 || NOT_CONFIGURED_CODES.has(error.code);
+    if (!absent) failed.push(panel.label);
+    document.getElementById(panel.container).innerHTML =
+      '<div class="info-box" data-state="' + (absent ? 'ok' : 'warn') + '">'
+      + escapeHtml(absent ? '该渠道未配置。' : '暂时无法读取：' + (error.message || '未知错误'))
+      + '</div>';
+  });
+  if (status) {
+    status.hidden = false;
+    status.dataset.state = failed.length ? 'warn' : 'success';
+    status.textContent = failed.length
+      ? '已解锁；' + failed.join('、') + ' 读取失败，其余各块可用。'
+      : '已解锁。闲置 30 分钟自动失效，也可随时点「锁定」。';
+  }
+  return failed;
 }
 
 async function unlockPanels() {
   if (keysInFlight) return;
   const status = document.getElementById('keysStatus');
-  const field = document.getElementById('keysAdminKey');
-  const key = readAdminKey(status);
-  if (!key) return;
+  const pwField = document.getElementById('panelPassword');
+  const keyField = document.getElementById('keysAdminKey');
+  const password = pwField.value;
+  const key = keyField.value.trim();
+  if (!password && !key) {
+    status.hidden = false; status.dataset.state = 'error';
+    status.textContent = panelSession.passwordConfigured
+      ? '请输入面板密码。' : '未配置面板密码，请输入 LB API Key。';
+    (panelSession.passwordConfigured ? pwField : keyField).focus?.();
+    return;
+  }
   keysInFlight = true;
-  // Unlocking starts over, so any previously held key is dropped first. Keeping
-  // it on a failed attempt would leave the page saying "invalid" while still
-  // authorising writes with the old one — and that old one may be exactly what
-  // the operator is here to replace.
-  adminKey = null;
-  adminKeyAt = 0;
   status.hidden = false; status.dataset.state = 'pending'; status.textContent = '正在解锁…';
   try {
-    const results = await Promise.allSettled(
-      PANELS.map(panel => fetchJSON(panel.url, {headers: {'x-api-key': key}})));
-    // A key that every section rejects is simply wrong; keeping it would make
-    // each later write fail the same way with no explanation.
-    if (results.every(r => r.status === 'rejected' && r.reason && r.reason.status === 401)) {
-      lockPanels('API Key 无效，已保持锁定。');
-      return;
-    }
-    adminKey = key;
-    adminKeyAt = panelClock();
-    const failed = [];
-    results.forEach((result, index) => {
-      const panel = PANELS[index];
-      if (result.status === 'fulfilled') { panel.render(result.value); return; }
-      const error = result.reason || {};
-      // "Not configured" is a fact about this deployment, not a failure. A
-      // missing channel answers 404; a storage layer that was never set up
-      // answers 503 with a code, which is the only thing separating it from
-      // a storage layer that is actually broken.
-      const absent = error.status === 404 || NOT_CONFIGURED_CODES.has(error.code);
-      if (!absent) failed.push(panel.label);
-      document.getElementById(panel.container).innerHTML =
-        '<div class="info-box" data-state="' + (absent ? 'ok' : 'warn') + '">'
-        + escapeHtml(absent ? '该渠道未配置。' : '暂时无法读取：' + (error.message || '未知错误'))
-        + '</div>';
+    // The credential travels in this one request and nothing retains it; what
+    // comes back is a cookie the browser owns and scripts cannot read.
+    await fetchJSON('/admin/session', {
+      method: 'POST',
+      headers: Object.assign({'content-type': 'application/json'},
+                             password ? {} : {'x-api-key': key}),
+      body: JSON.stringify(password ? {password} : {}),
     });
-    status.dataset.state = failed.length ? 'warn' : 'success';
-    status.textContent = failed.length
-      ? '已解锁；' + failed.join('、') + ' 读取失败，其余各块可用。'
-      : '已解锁。闲置 10 分钟自动锁定，也可随时点「锁定」。';
+    await refreshPanelSession();
+    await loadAllPanels(status);
   } catch (error) {
     status.dataset.state = 'error';
-    status.textContent = '未能解锁：' + error.message;
-  } finally { field.value = ''; keysInFlight = false; }
+    status.textContent = error.status === 401 ? (password ? '密码不正确。' : 'API Key 无效。')
+      : error.status === 429 ? '尝试过于频繁，已临时锁定，请稍后再试。'
+      : error.status === 503 ? '未配置面板密码，请改用 LB API Key 解锁。'
+      : error.status === 400 ? '请输入面板密码，或一个有效的 LB API Key。'
+      : '未能解锁：' + error.message;
+    await refreshPanelSession();
+  } finally {
+    // Neither field keeps its value past this one request.
+    pwField.value = ''; keyField.value = ''; keysInFlight = false;
+  }
 }
 
 // Re-read one section after a write succeeds, so nobody has to press a button
 // to see the result of their own change.
 async function reloadPanel(url) {
   const panel = PANELS.find(item => item.url === url);
-  if (!panel || !adminKey) return;
+  if (!panel || !panelSession.authenticated) return;
   try {
-    panel.render(await fetchJSON(panel.url, {headers: {'x-api-key': adminKey}}));
+    panel.render(await fetchJSON(panel.url));
   } catch (error) {
     document.getElementById(panel.container).innerHTML =
       '<div class="info-box" data-state="warn">写入已生效，但重新读取失败：'
@@ -1034,14 +1088,13 @@ async function saveTenantProviders(tenant) {
     status.textContent = '至少要允许一个渠道，否则该租户将无法发起任何请求。要取消限制请点「重置」。';
     return;
   }
-  const key = panelKey(status);
-  if (!key) return;
+  if (!panelReady(status)) return;
   if (!confirm('将限制租户 ' + tenant + ' 只能使用：' + providers.join('、') + '。立即生效。确认继续？')) return;
   keysInFlight = true;
   status.hidden = false; status.dataset.state = 'pending'; status.textContent = '正在保存渠道限制…';
   try {
     const result = await fetchJSON('/admin/api-keys/' + encodeURIComponent(tenant) + '/providers',
-      {method: 'PUT', headers: {'x-api-key': key, 'content-type': 'application/json'},
+      {method: 'PUT', headers: {'content-type': 'application/json'},
        body: JSON.stringify({providers})});
     status.dataset.state = 'success';
     status.textContent = '租户 ' + tenant + ' 现在允许：' + (result.providers || []).join('、') + '。';
@@ -1056,14 +1109,13 @@ async function saveTenantProviders(tenant) {
 async function resetTenantProviders(tenant) {
   if (keysInFlight) return;
   const status = document.getElementById('keysStatus');
-  const key = panelKey(status);
-  if (!key) return;
+  if (!panelReady(status)) return;
   if (!confirm('清除租户 ' + tenant + ' 的渠道限制，回到配置基线（config 里声明的全部渠道）。立即生效。确认继续？')) return;
   keysInFlight = true;
   status.hidden = false; status.dataset.state = 'pending'; status.textContent = '正在重置渠道限制…';
   try {
     const result = await fetchJSON('/admin/api-keys/' + encodeURIComponent(tenant) + '/providers',
-      {method: 'DELETE', headers: {'x-api-key': key}});
+      {method: 'DELETE'});
     status.dataset.state = 'success';
     status.textContent = '租户 ' + tenant + ' 已回到配置基线：' + (result.providers || []).join('、') + '。';
     renderPolicyState(result.policy);
@@ -1078,18 +1130,17 @@ async function resetTenantProviders(tenant) {
 async function reloadKeysFromSource() {
   if (keysInFlight) return;
   const status = document.getElementById('keysStatus');
-  const key = panelKey(status);
-  if (!key) return;
+  if (!panelReady(status)) return;
   if (!confirm('将从配置源重读客户端密钥。请先在源头（K8s Secret / env / 文件）完成轮换 —— 网关不会生成密钥。重读后旧密钥可能立即失效，包括你正在用来解锁本页的这一把。确认继续？')) return;
   keysInFlight = true;
   status.hidden = false; status.dataset.state = 'pending'; status.textContent = '正在从源重读…';
   try {
-    const result = await fetchJSON('/admin/api-keys/reload', {method: 'POST', headers: {'x-api-key': key}});
+    const result = await fetchJSON('/admin/api-keys/reload', {method: 'POST'});
     let text = '已重读 ' + result.keys + ' 个密钥，租户：' + (result.tenants || []).join('、') + '。';
     if (result.env_interpolated) text += ' 注意：有 ${ENV} 形式的值取自进程环境，文件更新不改变它们，仍需滚动重启。';
     // The key held in memory may well have just been rotated out, so the honest
     // move is to lock rather than keep using something that may no longer work.
-    lockPanels(text + ' 已自动锁定 —— 这把 key 可能已随轮换失效，请用新 key 重新解锁。');
+    await lockPanels(text + ' 已自动锁定 —— 这次轮换可能作废了会话背后的那把 key，请重新解锁。');
   } catch (error) {
     status.dataset.state = 'error';
     status.textContent = error.status === 401 ? 'API Key 无效。'
@@ -1168,8 +1219,7 @@ async function saveAccount(account) {
     status.textContent = '该账户尚无已发现能力，启用会让它成为所有模型的候选。请先点「刷新能力」。';
     return;
   }
-  const key = panelKey(status);
-  if (!key) return;
+  if (!panelReady(status)) return;
   const body = {enabled};
   if (boxes.length) body.allowed_models = chosen.length === boxes.length ? null : chosen;
   if (!confirm('账户 ' + account + '：' + (enabled ? '启用' : '停用')
@@ -1179,7 +1229,7 @@ async function saveAccount(account) {
   status.hidden = false; status.dataset.state = 'pending'; status.textContent = '正在保存账户策略…';
   try {
     const result = await fetchJSON('/admin/copilot/accounts/' + encodeURIComponent(account),
-      {method: 'PUT', headers: {'x-api-key': key, 'content-type': 'application/json'},
+      {method: 'PUT', headers: {'content-type': 'application/json'},
        body: JSON.stringify(body)});
     status.dataset.state = 'success';
     const a = result.account || {};
@@ -1199,14 +1249,13 @@ async function saveAccount(account) {
 async function discoverAccount(account) {
   if (keysInFlight) return;
   const status = document.getElementById('keysStatus');
-  const key = panelKey(status);
-  if (!key) return;
+  if (!panelReady(status)) return;
   keysInFlight = true;
   status.hidden = false; status.dataset.state = 'pending';
   status.textContent = '正在向上游发现 ' + account + ' 的模型能力…';
   try {
     const result = await fetchJSON('/admin/copilot/accounts/' + encodeURIComponent(account) + '/discover',
-      {method: 'POST', headers: {'x-api-key': key}});
+      {method: 'POST'});
     status.dataset.state = 'success';
     status.textContent = account + ' 发现 ' + result.discovered + ' 个模型（时点快照，非能力认证）。';
     renderPolicyState(result.policy);
@@ -1280,8 +1329,7 @@ async function saveRule() {
   const provider = (document.getElementById('ruleProvider').value || '').trim();
   const accounts = Array.from(document.querySelectorAll('#ruleAccounts [data-rule-account]'))
     .filter(box => box.checked).map(box => box.dataset.ruleAccount);
-  const key = panelKey(status);
-  if (!key) return;
+  if (!panelReady(status)) return;
   // Always send the account segment: an empty array is how "no limit" is
   // expressed, so omitting it would make unchecking everything a no-op.
   const body = {copilot_accounts: accounts};
@@ -1300,7 +1348,7 @@ async function saveRule() {
   status.dataset.state = 'pending'; status.textContent = '正在保存规则…';
   try {
     const result = await fetchJSON('/admin/model-routing/' + encodeURIComponent(model),
-      {method: 'PUT', headers: {'x-api-key': key, 'content-type': 'application/json'},
+      {method: 'PUT', headers: {'content-type': 'application/json'},
        body: JSON.stringify(body)});
     const effective = result.effective_copilot_accounts || [];
     let text = model + ' 生效顺序：' + (result.effective_openai_order || []).join(' → ')
@@ -1329,15 +1377,14 @@ async function saveRule() {
 async function clearRouting(model) {
   if (keysInFlight) return;
   const status = document.getElementById('keysStatus');
-  const key = panelKey(status);
-  if (!key) return;
+  if (!panelReady(status)) return;
   if (!confirm('清除 ' + model + ' 的整条规则：provider 回到默认顺序，GHCP 账户回到不限定。'
       + (/claude/i.test(model) ? '该模型将重新被 OpenAI 风格入口拒绝。' : '') + ' 确认继续？')) return;
   keysInFlight = true;
   status.hidden = false; status.dataset.state = 'pending'; status.textContent = '正在清除规则…';
   try {
     const result = await fetchJSON('/admin/model-routing/' + encodeURIComponent(model),
-      {method: 'DELETE', headers: {'x-api-key': key}});
+      {method: 'DELETE'});
     status.dataset.state = 'success';
     status.textContent = model + ' 已回到默认顺序：' + (result.effective_openai_order || []).join(' → ')
       + '，账户不限定。';
@@ -1406,8 +1453,7 @@ async function submitCredential() {
   if (provider !== 'copilot' && !apiBase) {
     status.dataset.state = 'error'; status.textContent = 'ADB 与 Foundry 需要填 api_base。'; return;
   }
-  const key = panelKey(status);
-  if (!key) { secretField.value = ''; return; }
+  if (!panelReady(status)) { secretField.value = ''; return; }
   if (!confirm('录入 ' + provider + ' / ' + account + '。凭据会先向上游校验，通过后封装入库；生效需一次滚动重启。确认继续？')) {
     secretField.value = ''; return;
   }
@@ -1418,7 +1464,7 @@ async function submitCredential() {
   status.dataset.state = 'pending'; status.textContent = '正在向上游校验…';
   try {
     await fetchJSON('/admin/credentials/' + encodeURIComponent(provider) + '/' + encodeURIComponent(account),
-      {method: 'PUT', headers: {'x-api-key': key, 'content-type': 'application/json'},
+      {method: 'PUT', headers: {'content-type': 'application/json'},
        body: JSON.stringify({secret, meta})});
     status.dataset.state = 'success';
     status.textContent = '已录入 ' + provider + '/' + account + '，校验通过。生效需一次滚动重启。';
@@ -1439,8 +1485,7 @@ async function submitCredential() {
 async function credentialAction(id, action) {
   if (keysInFlight) return;
   const status = document.getElementById('keysStatus');
-  const key = panelKey(status);
-  if (!key) return;
+  if (!panelReady(status)) return;
   const [provider, account] = id.split('/');
   if (action === 'delete' && !confirm('删除 ' + id + ' 的凭据。已生效的端点要到下次重启才消失。确认继续？')) return;
   keysInFlight = true;
@@ -1449,8 +1494,7 @@ async function credentialAction(id, action) {
   const path = '/admin/credentials/' + encodeURIComponent(provider) + '/' + encodeURIComponent(account)
     + (action === 'validate' ? '/validate' : '');
   try {
-    const result = await fetchJSON(path, {method: action === 'delete' ? 'DELETE' : 'POST',
-                                          headers: {'x-api-key': key}});
+    const result = await fetchJSON(path, {method: action === 'delete' ? 'DELETE' : 'POST'});
     status.dataset.state = 'success';
     status.textContent = action === 'delete'
       ? (id + ' 已删除，端点到下次重启才消失。')
@@ -1466,13 +1510,14 @@ async function startDeviceFlow() {
   if (keysInFlight) return;
   const status = document.getElementById('deviceStatus');
   status.dataset.state = 'error'; status.hidden = false;
-  const key = panelKey(document.getElementById('keysStatus'));
-  if (!key) { status.textContent = '请先解锁本页。'; return; }
+  if (!panelReady(document.getElementById('keysStatus'))) {
+    status.textContent = '请先解锁本页。'; return;
+  }
   keysInFlight = true;
   status.dataset.state = 'pending'; status.textContent = '正在向 GitHub 申请验证码…';
   try {
     const result = await fetchJSON('/admin/credentials/copilot/device/start',
-      {method: 'POST', headers: {'x-api-key': key}});
+      {method: 'POST'});
     deviceHandle = result.handle;
     status.dataset.state = 'success';
     status.textContent = '请在浏览器打开 ' + result.verification_uri + ' 并输入验证码 '
@@ -1490,13 +1535,14 @@ async function pollDeviceFlow() {
   status.hidden = false;
   if (!deviceHandle) { status.dataset.state = 'error'; status.textContent = '请先开始 device flow。'; return; }
   if (!account) { status.dataset.state = 'error'; status.textContent = '请填写要存成的 GHCP 账户名。'; return; }
-  const key = panelKey(document.getElementById('keysStatus'));
-  if (!key) { status.textContent = '请先解锁本页。'; return; }
+  if (!panelReady(document.getElementById('keysStatus'))) {
+    status.textContent = '请先解锁本页。'; return;
+  }
   keysInFlight = true;
   status.dataset.state = 'pending'; status.textContent = '正在检查授权状态…';
   try {
     const result = await fetchJSON('/admin/credentials/copilot/device/poll',
-      {method: 'POST', headers: {'x-api-key': key, 'content-type': 'application/json'},
+      {method: 'POST', headers: {'content-type': 'application/json'},
        body: JSON.stringify({handle: deviceHandle, account})});
     if (result.pending) {
       status.dataset.state = 'pending';
@@ -1819,10 +1865,23 @@ document.getElementById('saveRule').addEventListener('click', saveRule);
 document.getElementById('credentialForm').addEventListener('submit', event => { event.preventDefault(); submitCredential(); });
 document.getElementById('deviceStart').addEventListener('click', startDeviceFlow);
 document.getElementById('devicePoll').addEventListener('click', pollDeviceFlow);
+document.getElementById('panelPassword').addEventListener('keydown', event => {
+  if (event.key === 'Enter') { event.preventDefault(); unlockPanels(); }
+});
+document.getElementById('keysAdminKey').addEventListener('keydown', event => {
+  if (event.key === 'Enter') { event.preventDefault(); unlockPanels(); }
+});
 document.addEventListener('visibilitychange', () => { if (!document.hidden && !refreshPaused) refresh(true); });
 refresh();
 setInterval(refresh, REFRESH_MS);
 setInterval(updateRefreshState, 1000);
+// A live session survives a page reload, so restore it without asking. This is
+// the whole point of moving off the API Key: reloading used to mean retyping.
+refreshPanelSession().then(authenticated => {
+  if (authenticated) loadAllPanels(document.getElementById('keysStatus'));
+});
+// Keep the countdown honest without polling the server for it.
+setInterval(() => { if (panelSession.authenticated) renderSessionBar(); }, 30000);
 </script>
 </body>
 </html>

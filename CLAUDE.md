@@ -19,7 +19,7 @@ Author: Zeno Ren
 - MySQL 账本幂等防止已持久批次重复累计；尚未 flush 的内存事件仍可能丢失，不能承诺零 RPO。JSON 后端只支持单写者。
 - Dashboard 的未知费用保持未知，部分计价保留已知小计。Copilot 实时估算采用 [GHCP 价格口径](docs/COPILOT_PRICING.md)，历史参考价不能混称实际渠道账单。
 - Dashboard 保持独立 HTML 资产，不引入前端框架构建依赖。UI 与发布文件清单一起核验；运行版本来自构建元数据，不从当前 Git 分支或硬编码推断。
-- **「密钥与渠道」页的 LB API Key 在解锁期间驻留页面内存**，这是对早先「只用于当次请求」的有意变更：该页有四块、每次写入都要 key，单次请求契约意味着每保存一次就重输一遍。边界没有放宽：**不写入 localStorage / sessionStorage / cookie，不进 URL**，刷新即失效，可手动锁定，闲置 10 分钟自动锁定，锁定会清空已读出的身份信息（掩码、指纹、账户名本身就是 key 授权才能看到的东西）。一次解锁尝试先丢弃旧 key，失败后页面处于锁定态而不是「提示无效却仍能写」。换来的是这一页可用，代价是 10 分钟内离开且未锁定等于把这些运维端点交给能碰这台机器的人。**上游凭据（`credSecret`）不在此列，它保持单次请求后立即清除** —— 驻留那把是便利，这把是秘密。
+- **「密钥与渠道」页的页面脚本不持有任何凭据。** 解锁是把面板密码（`LB_DASHBOARD_PASSWORD`）或一个有效 API Key 换成 **HttpOnly 会话 cookie**，此后由浏览器携带，脚本读不到也就偷不走 —— 这比早先把 key 放在闭包变量里更强，不是只为省事。会话是服务端进程内的 30 分钟滑动窗口，重启全失效，锁定时**服务端一并失效**（只清浏览器那份会留下一个仍可用的会话）。刷新页面保留会话，这正是目的：过去刷新就等于重输。两条入口都换成同一种会话，所以「脚本不持凭据」在回落到 API Key 时同样成立。未配密码或密码短于 12 字符时面板登录整体不可用，**绝不退化为无密码放行** —— `/admin/*` 由没有 OAuth 的那个 ingress 提供，对公网可达。密码按来源指数退避（5 次后 30s 起翻倍、有上限），退避期内**正确密码也拒**且不区分原因，否则它就成了一个旁路的密码预言机；退避只计密码路径，让它挡住高熵的 API Key 等于把猜测攻击变成自伤。**上游凭据（`credSecret`）仍是单次请求后立即清除** —— 会话是便利，那个是秘密。
 
 ## 验证入口
 
@@ -53,6 +53,9 @@ Copilot 的 opaque-state 拒绝是请求级问题，不应污染账户熔断；�
 | `/metrics` | GET | 不需要 | Prometheus 文本格式 metrics（K8s / Azure Monitor 抓取） |
 | `/admin/copilot/reload` | POST | 需要 | 运维端点：从源重读所有 Copilot endpoint 的 long-lived token + 强制刷新 session（K8s Secret rotation 后立刻生效） |
 | `/admin/copilot/reset-pool` | POST | 需要 | 运维端点：重建共享 httpx.AsyncClient，逐出所有 keepalive/半开连接 |
+| `/admin/session` | GET | **不需要** | 面板会话状态：`authenticated` / `expires_in` / `password_configured` / `auth_methods`。**故意不鉴权** —— 这是 Dashboard 加载后的第一个请求，用来回答「要不要登录、怎么登录」，要求凭据才能问这个问题是循环的。只回布尔与秒数，不回显密码或 token |
+| `/admin/session` | POST | **密码** | 第四种鉴权模式：凭据是 `LB_DASHBOARD_PASSWORD` 而**不是** API key，所以带错 key 不会 401，而没有正确密码绝不放行。成功则下发 HttpOnly 会话 cookie（`SameSite=Strict`、`Path=/admin`、30 分钟滑动窗口，`Secure` 仅 https）。未配密码或密码短于 12 字符时 503；连续失败 5 次后按 IP 指数退避，退避期内**正确密码也拒**且不区分原因（否则它就成了一个旁路的密码预言机）。响应体不含 token |
+| `/admin/session` | DELETE | 不需要 | 登出。标「不需要」是准确的：它只清调用方自己的 cookie 与对应的服务端条目，无凭据时是 no-op 并返回 200（幂等的「确保已登出」），既不泄露信息也不影响他人会话 |
 | `/admin/model-capabilities` | GET | 需要 | 渠道/模型/API 能力目录、来源与有效期；未验证或过期能力不自动变成硬限额 |
 | `/admin/credentials` | GET | 需要 | 已录入上游凭据的**身份**与校验结果；不返回明文也不返回密文，并标明哪些尚未生效 |
 | `/admin/credentials/{provider}/{account}` | PUT | 需要 | 录入凭据：**先向上游校验，通过才封装入库**。与配置同名的 account 返回 409，不允许静默遮蔽；未配 `LB_CREDENTIAL_KEY` 时 503 |
