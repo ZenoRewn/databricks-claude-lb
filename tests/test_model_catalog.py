@@ -205,9 +205,21 @@ class CatalogAssemblyTests(unittest.TestCase):
 
 
 class _Endpoint:
-    def __init__(self, models=None, deployments=None):
+    """Minimal stand-in for a configured endpoint.
+
+    `supports()` is part of the contract the catalogue relies on, not an extra:
+    the catalogue routes every candidate decision through it so that account
+    enablement and the per-model account selection cannot be bypassed. A stub
+    without it would let the catalogue regress to asking one layer directly.
+    """
+
+    def __init__(self, models=None, deployments=None, name='stub'):
         self.models = models or []
         self.deployments = deployments or []
+        self.name = name
+
+    def supports(self, model, api_type=None):
+        return not self.models or model in self.models
 
 
 class _Proxy:

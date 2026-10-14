@@ -32,7 +32,7 @@ from usage_store import (IO_TIMEOUT as USAGE_IO_TIMEOUT_SECONDS,
 from gateway_lifecycle import sync_drain, DRAIN_MARKER_FILE
 from key_policy import (ALL_PROVIDERS, PROVIDER_IDS, PROVIDER_LABELS, KeyPolicyStore,
                         fingerprint as key_fingerprint, mask as key_mask,
-                        normalise_providers)
+                        normalise_accounts, normalise_providers, ordered_providers)
 from provider_credentials import (CredentialKeyError, CredentialStore, DeviceFlowExpired,
                                   DeviceFlowRegistry)
 from response_semantics import assess_json, reported_usage, failure_reason, enrich_error, decode_json_response, invalid_stream_type, is_html as is_html_content_type
@@ -2283,6 +2283,25 @@ def _copilot_account_allows(name: str, model: str) -> bool:
     return store.account_allows(name, model)
 
 
+def _copilot_model_allows_account(model: str, name: str) -> bool:
+    """运行时 per-model 账户选择：这个模型被限定到哪几个账户，只做减法。
+
+    与 `_copilot_account_allows` 是同一件事的两个方向 —— 那个回答「这个账户允许
+    哪些模型」，这个回答「这个模型用哪些账户」，两者取交集。从模型侧表达一次
+    意图不该要求去改每个账户的 allowlist（那会连带动到别的模型）。
+
+    筛的是**同一 provider 内的哪个账户**，不是哪个 provider，所以 provider 级的
+    Copilot 优先 → Azure fallback 不受影响。选到的账户都服务不了该模型时，
+    Copilot 候选集为空，请求按既有逻辑落到 Azure —— 与那些账户全部熔断同效。
+
+    存储未配置或从未加载成功时一律放行，即回落配置基线（不限定）。
+    """
+    store = key_policy_store
+    if store is None:
+        return True
+    return store.model_allows_account(model, name)
+
+
 def _copilot_account_enabled(endpoint) -> bool:
     """账户是否在服务中：配置是基线，运维的显式决定接管之后的状态。
 
@@ -2328,6 +2347,7 @@ class CopilotEndpoint:
         # 的唯一收口（含会话亲和用的「配置态合格集合」）。漏掉亲和那一处会让
         # 已禁用账户仍参与哈希，再回落时把所有会话重新洗牌。
         return (_copilot_account_enabled(self)
+                and _copilot_model_allows_account(model, self.name)
                 and _copilot_account_allows(self.name, model)
                 and (not self.models or model in self.models)
                 and (api_type is None or api_type in self.api_types))
@@ -7659,7 +7679,7 @@ def _collect_model_catalog(azure=None, copilot=None, databricks=None) -> dict:
                     catalog.setdefault(str(model), ())
 
     if copilot:
-        has_wildcard = False
+        wildcards = []
         for ep in getattr(getattr(copilot, "load_balancer", None), "endpoints", []):
             name = getattr(ep, "name", "")
             policy = _copilot_account_policy(name)
@@ -7671,12 +7691,20 @@ def _collect_model_catalog(azure=None, copilot=None, databricks=None) -> dict:
                 # 从未发现过才回落静态表。
                 models = list(policy["capability"])
                 if not models:
-                    has_wildcard = True
+                    wildcards.append(ep)
+                    continue
             for model in models:
-                if _copilot_account_allows(name, model):
+                # 过 supports() 而不是只问 allowed_models —— 它是所有候选判断的
+                # 唯一收口，per-model 的账户限定也在里面。少问一层会让目录宣传
+                # 一个路由时根本没有候选账户的模型。
+                if ep.supports(model):
                     catalog.setdefault(model, ())
-        if has_wildcard:
-            catalog.update(OPENAI_COMPAT_DEFAULT_MODELS)
+        # 通配且从未发现过 capability：它实际能服务什么无从枚举，拿静态核验表
+        # 当上限，但仍逐个过 supports()，否则账户限定在目录里会失效。
+        for ep in wildcards:
+            for model, entry_points in OPENAI_COMPAT_DEFAULT_MODELS.items():
+                if ep.supports(model):
+                    catalog[model] = entry_points
 
     if databricks:
         catalog.update(DATABRICKS_CLAUDE_MODELS)
@@ -9257,30 +9285,83 @@ async def admin_device_poll(request: Request, x_api_key: Optional[str] = Header(
             "activation": "next rolling restart"}
 
 
+def _copilot_endpoints() -> list:
+    """已配置的 Copilot 端点；未配置渠道时为空。
+
+    用 getattr 逐层取，与 `_collect_model_catalog` 同一写法 —— 这些运维视图在
+    渠道未配置或只装了一半时也必须能返回，不能靠属性存在来假设。
+    """
+    return list(getattr(getattr(copilot_proxy, "load_balancer", None), "endpoints", []) or [])
+
+
+def _model_routing_view(model: str) -> dict:
+    """一条规则的三段：模型 → provider 顺序 → GHCP 账户。"""
+    store = key_policy_store
+    endpoints = _copilot_endpoints()
+    # 直接问 `supports()` 而不是复述它的条件：启用态、per-model 账户选择、
+    # allowed_models、capability 与 config 的 models 列表全在那一个收口里，
+    # 在这里再写一遍必然漂移。不传 api_type —— 要答的是「这条规则有没有把
+    # 候选清空」，而不是某一个入口的候选集。
+    effective = [ep.name for ep in endpoints if ep.supports(model)]
+    return {
+        "model": model,
+        "providers": list(store.model_preference(model)) if store is not None else [],
+        "effective_openai_order": list(_openai_provider_order(model)),
+        "copilot_accounts": list(store.model_accounts(model)) if store is not None else [],
+        # 客户端算不出这个：要同时拿到 capability、allowed_models 和启用态。
+        "effective_copilot_accounts": effective,
+        # 有端点却一个都不合格 = 这条规则把 GHCP 候选清空了。不是错误（provider
+        # fallback 仍在），但运维必须被告知，否则会以为流量已经指到 GHCP。
+        # 压根没配 Copilot 不算 —— 那不是规则造成的。
+        "copilot_candidates_empty": bool(endpoints) and not effective,
+        "opens_claude_on_openai_entry_points": ("claude" in model.lower()
+                                                and _model_pinned_to_openai_style_provider(model)),
+    }
+
+
 @app.get("/admin/model-routing")
 async def admin_model_routing(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
-    """运维端点：per-model 的 provider 优先序。"""
+    """运维端点：per-model 的 provider 优先序与 GHCP 账户选择。
+
+    同时返回两个下拉的数据源，让这一个端点自足 —— Dashboard 把三段呈现为一行，
+    分三次请求去凑选项会让「有哪些模型可选」和「规则里写了什么」不同步。
+    """
     _require_admin_key(request, x_api_key)
     store = key_policy_store
     preferences = store.model_preferences_snapshot() if store is not None else {}
+    selections = store.model_accounts_snapshot() if store is not None else {}
+    accounts = [{"account": ep.name, "enabled": _copilot_account_enabled(ep)}
+                for ep in _copilot_endpoints()]
     return {
-        "preferences": [{"model": model, "providers": list(order),
-                         "effective_openai_order": list(_openai_provider_order(model))}
-                        for model, order in sorted(preferences.items())],
+        # 两个维度各自都能单独成规则，所以列表是它们的并集。
+        "preferences": [_model_routing_view(model)
+                        for model in sorted(set(preferences) | set(selections))],
         "providers": list(PROVIDER_IDS),
         "provider_labels": dict(PROVIDER_LABELS),
         "default_openai_order": list(OPENAI_STYLE_PROVIDERS),
+        # 下拉数据源。known_models 是运维核验过的时点目录，不是供应商能力认证。
+        "known_models": _collect_openai_model_ids(),
+        "copilot_accounts_available": accounts,
         "policy": _policy_status_view(),
         "note": ("A preference reorders providers, it does not remove any, so fallback is kept. "
                  "'databricks' in a preference only opens claude-* on the OpenAI-style entry "
-                 "points; /v1/messages stays Databricks-only."),
+                 "points; /v1/messages stays Databricks-only. copilot_accounts subtracts "
+                 "accounts within the Copilot provider and does not affect provider fallback; "
+                 "an empty selection means «not limited»."),
     }
 
 
 @app.put("/admin/model-routing/{model}")
 async def admin_set_model_routing(model: str, request: Request,
                                   x_api_key: Optional[str] = Header(None, alias="x-api-key")):
-    """运维端点：设置某模型的 provider 优先序（顺序即偏好，不去重不重排）。"""
+    """运维端点：设置某模型的 provider 优先序与 GHCP 账户选择。
+
+    两段都是可选的：省略 `providers` 只改账户，省略 `copilot_accounts` 不动账户。
+    `copilot_accounts: []` / `null` 是**显式清除**，回到「不限定」的基线。
+
+    两段都在任何写入**之前**校验完 —— 第三个字段打错一个字母却让 provider 那半边
+    已经生效，是最难排查的一种半应用。
+    """
     _require_admin_key(request, x_api_key)
     if key_policy_store is None:
         raise HTTPException(status_code=503, detail={"error": {
@@ -9290,26 +9371,51 @@ async def admin_set_model_routing(model: str, request: Request,
         payload = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail={"error": {"message": "Body must be JSON"}})
+    payload = payload or {}
+    has_providers = "providers" in payload
+    has_accounts = "copilot_accounts" in payload
+    if not has_providers and not has_accounts:
+        raise HTTPException(status_code=400, detail={"error": {
+            "message": "Provide 'providers' and/or 'copilot_accounts'"}})
+    selection = ()
     try:
-        order = await key_policy_store.set_model_preference(model, (payload or {}).get("providers"))
+        if has_providers:
+            ordered_providers(payload.get("providers"))
+        if has_accounts:
+            selection = normalise_accounts(payload.get("copilot_accounts"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"error": {
+            "code": "invalid_model_routing", "message": str(e)}})
+    if has_accounts and selection:
+        configured = {ep.name for ep in _copilot_endpoints()}
+        unknown = sorted(set(selection) - configured)
+        if unknown:
+            # 名字写错就静默生效 = 把该模型的 GHCP 候选清空，而 UI 上看着像配好了。
+            raise HTTPException(status_code=400, detail={"error": {
+                "code": "unknown_copilot_account",
+                "message": (f"Not configured Copilot endpoints: {', '.join(unknown)}. "
+                            "GET /admin/copilot/accounts lists the available names.")}})
+    try:
+        if has_providers:
+            await key_policy_store.set_model_preference(model, payload.get("providers"))
+        if has_accounts:
+            await key_policy_store.set_model_accounts(model, payload.get("copilot_accounts"))
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"error": {
             "code": "invalid_model_routing", "message": str(e)}})
     except Exception as e:
         raise HTTPException(status_code=503, detail={"error": {
             "code": "policy_write_failed", "message": f"{type(e).__name__}"}})
-    return {"model": model, "providers": list(order),
-            "effective_openai_order": list(_openai_provider_order(model)),
-            # 只有本来会被拒的 claude-* 才算「被这条偏好放行」。
-            "opens_claude_on_openai_entry_points": ("claude" in model.lower()
-                                                    and _model_pinned_to_openai_style_provider(model)),
-            "policy": _policy_status_view()}
+    return {**_model_routing_view(model), "policy": _policy_status_view()}
 
 
 @app.delete("/admin/model-routing/{model}")
 async def admin_clear_model_routing(model: str, request: Request,
                                     x_api_key: Optional[str] = Header(None, alias="x-api-key")):
-    """运维端点：清除偏好，回到默认顺序（claude-* 也随之重新被拒）。"""
+    """运维端点：清除整条规则，回到默认顺序与不限定账户（claude-* 随之重新被拒）。
+
+    两个维度一起清：UI 上这是一行，「清除」只清一半会留下看不见的账户限定。
+    """
     _require_admin_key(request, x_api_key)
     if key_policy_store is None:
         raise HTTPException(status_code=503, detail={"error": {
@@ -9317,12 +9423,11 @@ async def admin_clear_model_routing(model: str, request: Request,
             "message": "Model routing storage is not configured."}})
     try:
         await key_policy_store.clear_model_preference(model)
+        await key_policy_store.clear_model_accounts(model)
     except Exception as e:
         raise HTTPException(status_code=503, detail={"error": {
             "code": "policy_write_failed", "message": f"{type(e).__name__}"}})
-    return {"model": model, "providers": [],
-            "effective_openai_order": list(_openai_provider_order(model)),
-            "policy": _policy_status_view()}
+    return {**_model_routing_view(model), "policy": _policy_status_view()}
 
 
 async def _discover_copilot_capability(endpoint: "CopilotEndpoint") -> list:
@@ -9550,6 +9655,35 @@ async def admin_set_tenant_providers(tenant: str, request: Request,
         raise HTTPException(status_code=503, detail={"error": {
             "code": "policy_write_failed", "message": f"{type(e).__name__}"}})
     return {"tenant": tenant, "providers": list(stored), "policy": _policy_status_view()}
+
+
+@app.delete("/admin/api-keys/{tenant}/providers")
+async def admin_reset_tenant_providers(tenant: str, request: Request,
+                                       x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：清除该租户的渠道限制，回到配置基线。
+
+    PUT 要求至少一个 provider（允许空集等于把租户锁在门外），所以设过限制之后
+    一直没有回到「不限制」的路径。这就是那个反向操作：它落在与降级规则同一个
+    位置 —— config 声明了哪些 provider，就回到那些。
+
+    已经没有限制时也返回 200：这是幂等的重置，不是「删除一条记录」。
+    """
+    _require_admin_key(request, x_api_key)
+    if key_policy_store is None:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "policy_store_unavailable",
+            "message": "Provider policy storage is not configured."}})
+    if tenant not in set(API_KEY_TO_TENANT.values()):
+        raise HTTPException(status_code=404, detail={"error": {
+            "message": f"Tenant '{tenant}' has no registered API key"}})
+    try:
+        await key_policy_store.clear_providers(tenant)
+    except Exception as e:
+        # 与 PUT 对称：写失败时执行中的限制保持不变，不假装已经重置。
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "policy_write_failed", "message": f"{type(e).__name__}"}})
+    return {"tenant": tenant, "providers": sorted(_allowed_providers(tenant)),
+            "restricted": False, "policy": _policy_status_view()}
 
 
 @app.post("/admin/api-keys/reload")

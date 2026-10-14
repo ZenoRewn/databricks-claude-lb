@@ -249,13 +249,79 @@ class MessagesEnforcementTests(unittest.TestCase):
         self.assertEqual(r.json()['detail']['error']['code'], 'provider_not_allowed')
 
 
+class TenantProviderResetTests(unittest.TestCase):
+    """Setting an allow-list had no inverse from the Dashboard.
+
+    `clear_providers` existed in the store from the start but was never exposed,
+    so a tenant restricted by mistake stayed restricted until someone edited the
+    database. Reset returns that tenant to the config baseline — every provider
+    config declares — which is the same place the degradation rule lands on.
+    """
+
+    KEY = 'lb-provider-reset-key-01234'
+
+    def setUp(self):
+        from starlette.testclient import TestClient
+
+        class _Stub:
+            api_key = TenantProviderResetTests.KEY
+
+            def verify_api_key(self, key):
+                return bool(key) and key == self.api_key
+
+        self.store = key_policy.KeyPolicyStore(None)
+        asyncio.run(self.store.start())
+        main.API_KEY_TO_TENANT.clear()
+        main.API_KEY_TO_TENANT[self.KEY] = 'tenant-a'
+        self.addCleanup(main.API_KEY_TO_TENANT.clear)
+        for attr, value in (('proxy', _Stub()), ('copilot_proxy', _Stub()),
+                            ('key_policy_store', self.store)):
+            p = patch.object(main, attr, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.client = TestClient(main.app, raise_server_exceptions=False)
+        self.H = {'x-api-key': self.KEY}
+
+    def _restrict(self):
+        asyncio.run(self.store.set_providers('tenant-a', ['copilot']))
+
+    def test_reset_returns_the_tenant_to_the_config_baseline(self):
+        self._restrict()
+        self.assertTrue(self.store.restricted('tenant-a'))
+        r = self.client.delete('/admin/api-keys/tenant-a/providers', headers=self.H)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(sorted(r.json()['providers']), sorted(key_policy.ALL_PROVIDERS))
+        self.assertFalse(self.store.restricted('tenant-a'))
+
+    def test_resetting_an_already_unrestricted_tenant_is_not_an_error(self):
+        r = self.client.delete('/admin/api-keys/tenant-a/providers', headers=self.H)
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(self.store.restricted('tenant-a'))
+
+    def test_an_unknown_tenant_is_404_like_the_put(self):
+        r = self.client.delete('/admin/api-keys/nobody/providers', headers=self.H)
+        self.assertEqual(r.status_code, 404)
+
+    def test_it_requires_a_valid_key(self):
+        self.assertEqual(self.client.delete('/admin/api-keys/tenant-a/providers').status_code, 401)
+
+    def test_a_write_failure_keeps_the_restriction_and_says_so(self):
+        self._restrict()
+        with patch.object(self.store, '_backend_delete', side_effect=OSError('db down')):
+            r = self.client.delete('/admin/api-keys/tenant-a/providers', headers=self.H)
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.json()['detail']['error']['code'], 'policy_write_failed')
+        self.assertTrue(self.store.restricted('tenant-a'),
+                        'a failed reset must not pretend the tenant is unrestricted')
+
+
 class DegradationFallsBackToTheConfigBaselineTests(unittest.IsolatedAsyncioTestCase):
     """One rule, every layer: an unavailable overlay yields the config baseline.
 
-    Three of these baselines happen to be permissive, which is why the rule has
+    Four of these baselines happen to be permissive, which is why the rule has
     been mistaken for "fail-open" before. It is not: GHCP account enablement has
     a baseline that can be restrictive, and the same rule then keeps the account
-    out of service. Asserting all four together is what stops the next reader
+    out of service. Asserting all five together is what stops the next reader
     from treating one of them as an exception.
     """
 
@@ -266,6 +332,7 @@ class DegradationFallsBackToTheConfigBaselineTests(unittest.IsolatedAsyncioTestC
         await self.store.set_model_preference('gpt-4o', ['azure_openai'])
         await self.store.set_account_capability('acct', ('gpt-4o',))
         await self.store.set_account('acct', allowed_models=['gpt-4o'])
+        await self.store.set_model_accounts('gpt-4o', ['acct'])
         patcher = patch.object(main, 'key_policy_store', self.store)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -279,10 +346,17 @@ class DegradationFallsBackToTheConfigBaselineTests(unittest.IsolatedAsyncioTestC
         self.assertEqual(self.store.allowed('tenant-a'), frozenset({'copilot'}))
         self.assertEqual(self.store.model_preference('gpt-4o'), ('azure_openai',))
         self.assertFalse(self.store.account_allows('acct', 'kimi-k3'))
+        self.assertFalse(self.store.model_allows_account('gpt-4o', 'other'))
 
     async def test_provider_allowlist_falls_back_to_every_configured_provider(self):
         self._unavailable()
         self.assertEqual(self.store.allowed('tenant-a'), key_policy.ALL_PROVIDERS)
+
+    async def test_model_account_selection_falls_back_to_every_account(self):
+        self._unavailable()
+        self.assertEqual(self.store.model_accounts('gpt-4o'), ())
+        self.assertTrue(self.store.model_allows_account('gpt-4o', 'other'),
+                        'a per-model account limit must not outlive its store')
 
     async def test_model_preference_falls_back_to_the_default_order(self):
         self._unavailable()
