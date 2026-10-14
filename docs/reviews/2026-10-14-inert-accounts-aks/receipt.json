@@ -1,0 +1,121 @@
+{
+  "author": "Zeno Ren",
+  "release_id": "lb-20261014-inert-49c142b-r2",
+  "release_result": "succeeded",
+  "attempts": 2,
+  "source_revision": "49c142b0c88ba559d9c54ccd756d3da2365c9588",
+  "pull_requests": [34],
+  "unreleased_merges_included": [28, 30, 31, 32, 33, 34],
+  "previous_image": "sha256:e6b00f998d6547154953c645a048f3c565c6ac271bad098bc9c3fd90bdfc6293",
+  "previous_source_revision": "c3187243ebbfbab956c83d0b2ec721c905267fd5",
+  "target_image": "sha256:af65d4ba7de241f5d5adbe3ae5eb52474f9fc83e7ae64e8ef0ffbb94dac55faa",
+  "source_manifest_sha256": "d00f7b1510e6878ef3497a7cec74120e62af0c60e587daf96adbefd9bbb39697",
+  "plan_sha256": "a2988cedfadc5abd8743e3b4e5c00a9f15ca4fb37e465a1831c831e162f67d7d",
+  "first_attempt": {
+    "release_id": "lb-20261014-inert-49c142b",
+    "release_result": "rolled_back",
+    "failed_action": "preflight",
+    "failure_api_status": 403,
+    "failure_error_type": "ApiException",
+    "plan_sha256": "db6a3cf912880aede7bbbb2f90a64e14c825e0d908e43a8fa8b25d6d7ae61d9b",
+    "elapsed_seconds": 4.603,
+    "cleanup_errors": ["ApiException"],
+    "cause": "operator_prerequisite_omission_not_application_defect",
+    "cause_detail": "Role lb-release-controller-target granted get on secrets with resourceNames limited to claude-lb-copilot-auth. The pod template gained a second secret reference (claude-lb-credential-key) during pre-release preparation, so preflight's _verify_references could not read it.",
+    "production_changed": false,
+    "production_untouched_evidence": {
+      "image_unchanged": true,
+      "deployment_generation_unchanged": 115,
+      "pod_restarts": 0,
+      "pod_not_replaced": true,
+      "service_selectors_clean": true,
+      "leftover_probe_pods": 0
+    }
+  },
+  "remediation": {
+    "object": "Role/lb-release-controller-target in zeno-apps",
+    "change": "added claude-lb-credential-key to the existing secrets rule resourceNames",
+    "method": "kubectl apply of the object rebuilt from its own last-applied-configuration, so the apply-managed state stays consistent",
+    "server_side_diff_lines_added": 1,
+    "scope_verified": {
+      "get_named_credential_key": "yes",
+      "get_named_copilot_auth": "yes",
+      "get_secrets_unnamed": "no",
+      "get_unrelated_secret_name": "no"
+    },
+    "reads_value": false,
+    "reads_digest_only": "_verify_references compares digest({data,binaryData,type,immutable}) against the plan snapshot; no secret value is persisted"
+  },
+  "maintenance_started_at": 1791959568.461,
+  "maintenance_finished_at": 1791959618.084,
+  "maintenance_seconds": 49.623,
+  "maintenance_window_local": "2026-10-14 14:32:48.461-14:33:38.084 (UTC+8)",
+  "actions_verified": [
+    "preflight", "gate", "pause", "writer_termination", "stop_old",
+    "start_new", "verify_backend", "restore_routes", "verify_business", "cleanup"
+  ],
+  "cleanup_errors": [],
+  "business_probes": [
+    {"api": "messages", "model": "databricks-claude-opus-5", "stream": false, "completed": true, "marker_found": true},
+    {"api": "responses", "model": "gpt-5.4", "stream": true, "completed": true, "marker_found": true},
+    {"api": "chat", "model": "gpt-5.6-luna", "stream": true, "completed": true, "marker_found": true}
+  ],
+  "probe_model_choice": "databricks-claude-opus-5 rather than opus-5-5, which is intermittently capacity-limited upstream and caused the 2026-10-10 rollback when used as a mandatory gate",
+  "persistence_verified": true,
+  "usage_events_recorded": 3,
+  "post_release_state": {
+    "version_endpoint": "49c142b",
+    "source_verification": "matched",
+    "pod_restarts": 0,
+    "health_accepting": 200,
+    "lb_usage_pending_events": 0,
+    "lb_usage_backend_ready": 1,
+    "service_selectors_clean": true,
+    "credential_store": {"backend": "mysql", "state": "loaded", "key": "present", "records": 0},
+    "provider_policy": {"backend": "mysql", "state": "loaded", "tenants": 0, "accounts": 0, "model_preferences": 0}
+  },
+  "independent_business_sample": [
+    {"model": "databricks-claude-opus-5-5", "http": 200, "upstream_model": "claude-opus-5-5", "stop_reason": "end_turn"},
+    {"model": "databricks-claude-sonnet-5-5", "http": 200, "upstream_model": "claude-sonnet-5-5", "stop_reason": "end_turn"}
+  ],
+  "configmap_change": {
+    "object": "ConfigMap/claude-lb-config key config.yaml in zeno-apps",
+    "applied_after_release": true,
+    "reason": "the previously running image c318724 does not parse `enabled`, so applying before the release would have made the four accounts live wildcards in any window where the old pod restarted",
+    "endpoints_before": 1,
+    "endpoints_after": 5,
+    "appended": [
+      {"name": "zenoren-icloud", "enabled": false, "token_in_config": false},
+      {"name": "zenoren-msft", "enabled": false, "token_in_config": false},
+      {"name": "zenoren-outlook", "enabled": false, "token_in_config": false},
+      {"name": "zenoren-qq", "enabled": false, "token_in_config": false}
+    ],
+    "existing_entry_unchanged": true,
+    "validated_before_apply": "merged YAML parsed and compared field by field; existing endpoints byte-identical, other config sections identical, no token material added",
+    "takes_effect": "next rolling restart; the running pod still holds 1 Copilot endpoint because config is read at startup only"
+  },
+  "routing_behaviour_changed": false,
+  "build": {
+    "platform": "linux/amd64",
+    "dependency_stage": "dependencies-offline",
+    "source_tree_dirty": false,
+    "out_of_tree": false,
+    "source_attested_in_image": true,
+    "runtime_files": 23,
+    "controller_app_files": 21,
+    "new_dependencies": [
+      {"name": "cryptography", "version": "50.0.1", "sha256": "ff838d62ec1bfce4f9ba7fa16f4a7b554cd8d0c299e6be37502161a660c84eef"},
+      {"name": "cffi", "version": "2.1.1", "sha256": "c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf"},
+      {"name": "pycparser", "version": "3.0", "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992"}
+    ],
+    "dependency_verification": "each wheel's local sha256 compared against the value published by the PyPI JSON API, because the wheelhouse is populated through a corporate proxy index rather than the PyPI file CDN"
+  },
+  "schema_tables_created_on_first_use": ["provider_credential", "copilot_account_policy", "model_provider_preference", "api_key_policy"],
+  "no_migration_required": "copilot_account_policy had never existed in production (key_policy.py is absent from c318724), so widening its enabled column to NULL-able is a first creation rather than a migration",
+  "outstanding": [
+    "The four Copilot accounts appear in the Dashboard only after the next rolling restart; they are inert and nothing depends on them.",
+    "Enabling each one requires discover -> select models -> enable, then one further restart before it serves traffic.",
+    "Azure Foundry credentials still return 401 on every path and have served zero requests. The v1 GA switch in PR #33 does not address that; the credentials themselves need replacing.",
+    "Per-key model->provider preference, per-key Copilot account selection, and freezing the routing decision per request are not implemented."
+  ]
+}
