@@ -1,0 +1,132 @@
+{
+  "author": "Zeno Ren",
+  "release_id": "lb-20261014-routing-rules-7229327",
+  "release_result": "succeeded",
+  "attempts": 1,
+  "source_revision": "7229327412e0442d2f5f1daff9bccea9144f05a4",
+  "pull_requests": [36],
+  "previous_image": "sha256:af65d4ba7de241f5d5adbe3ae5eb52474f9fc83e7ae64e8ef0ffbb94dac55faa",
+  "previous_source_revision": "49c142b0c88ba559d9c54ccd756d3da2365c9588",
+  "target_image": "sha256:f7555171c86b34d2c9aa9fcee4419e3f9da0822a4704ece53ef463222b82313c",
+  "source_manifest_sha256": "e70f0c4c1d219f2a77bdb01a41b07e5124c50d02fe0aa79d00169de756486e6f",
+  "plan_sha256": "43619118900e43a0475d8f434fd543a08772f42886b8e1eeb9f4d380cda9322c",
+  "snapshot_sha256": "85bc4a2820a31b120ca338a08a15d7edb6b81354209595df00585168021d972d",
+  "maintenance_started_at": 1791967283.0809193,
+  "maintenance_finished_at": 1791967356.0213614,
+  "maintenance_seconds": 72.94,
+  "maintenance_window_local": "2026-10-14 16:41:23.080-16:42:36.021 (UTC+8)",
+  "deployment_generation_before": 119,
+  "actions_verified": [
+    "preflight", "gate", "pause", "writer_termination", "stop_old",
+    "start_new", "verify_backend", "restore_routes", "verify_business", "cleanup"
+  ],
+  "cleanup_errors": [],
+  "server_dry_run_verified": true,
+  "writer_termination_exit_code": 143,
+  "writer_termination_note": "143 = SIGTERM; the preStop hook drained before the writer stopped",
+  "business_probes": [
+    {"api": "messages", "model": "databricks-claude-opus-5", "stream": false, "completed": true, "marker_found": true},
+    {"api": "responses", "model": "gpt-5.4", "stream": true, "completed": true, "marker_found": true},
+    {"api": "chat", "model": "gpt-5.6-luna", "stream": true, "completed": true, "marker_found": true}
+  ],
+  "probe_model_choice": "databricks-claude-opus-5 rather than opus-5-5, which is intermittently capacity-limited upstream and caused the 2026-10-10 rollback when used as a mandatory gate",
+  "persistence_verified": true,
+  "usage_events_recorded": 3,
+  "post_release_state": {
+    "version_endpoint": "7229327",
+    "source_verification": "matched",
+    "pod": "claude-lb-74dd94f7b5-6rqgp",
+    "pod_restarts": 0,
+    "health_accepting": 200,
+    "service_selectors_clean": true,
+    "copilot_endpoints_loaded": 5,
+    "databricks_endpoints_loaded": 9,
+    "azure_endpoints_loaded": 4,
+    "provider_policy": {"backend": "mysql", "state": "loaded", "tenants": 0,
+                        "model_preferences": 0, "model_accounts": 0, "accounts": 0},
+    "credential_store": {"backend": "mysql", "state": "loaded", "key": "present", "records": 0},
+    "models_endpoint_count": 30
+  },
+  "independent_business_sample": [
+    {"model": "databricks-claude-opus-5-5", "http": 200, "upstream_model": "claude-opus-5-5", "stop_reason": "end_turn"},
+    {"model": "databricks-claude-sonnet-5-5", "http": 200, "upstream_model": "claude-sonnet-5-5", "stop_reason": "end_turn"}
+  ],
+  "independent_sample_method": "issued from inside the pod against the public URL, so the client key never left the cluster",
+  "new_admin_surface_verified_live": {
+    "endpoint": "GET /admin/model-routing",
+    "http": 200,
+    "known_models": 30,
+    "copilot_accounts_available": [
+      {"account": "ZenoRewn", "enabled": true},
+      {"account": "zenoren-icloud", "enabled": false},
+      {"account": "zenoren-msft", "enabled": false},
+      {"account": "zenoren-outlook", "enabled": false},
+      {"account": "zenoren-qq", "enabled": false}
+    ],
+    "existing_rules": 0
+  },
+  "schema": {
+    "table_created_on_first_use": "model_copilot_account",
+    "no_migration_required": "a new table rather than a column on model_provider_preference, which already existed in production; widening that one would have been a real ALTER",
+    "verified_shape": {
+      "model": ["varchar", "NO", 190],
+      "accounts": ["text", "NO", 65535],
+      "updated_at": ["timestamp", "NO", null]
+    },
+    "verified_unique_index": {"PRIMARY": ["model"]},
+    "rows": 0,
+    "existing_tables_unchanged": ["api_key_policy", "copilot_account_policy",
+                                  "model_provider_preference", "provider_credential"]
+  },
+  "build": {
+    "platform": "linux/amd64",
+    "dependency_stage": "dependencies-offline",
+    "source_tree_dirty": false,
+    "out_of_tree": false,
+    "source_attested_in_image": true,
+    "runtime_files": 23,
+    "new_dependencies": [],
+    "controller_image_rebuilt": false,
+    "controller_rebuild_not_needed": "operations/ and the APP_FILES set are unchanged in this release"
+  },
+  "preflight_prerequisites_rechecked": {
+    "template_gained_configmap_or_secret_references": false,
+    "controller_role_covers_every_template_reference": true,
+    "configmaps_resource_names": ["claude-lb-config"],
+    "secrets_resource_names": ["claude-lb-copilot-auth", "claude-lb-credential-key"],
+    "why": "the 2026-10-14 first-attempt 403 was a template reference missing from the Role; this release adds no reference, and the Role was re-verified before planning"
+  },
+  "configmap_change": null,
+  "configmap_change_note": "none in this release, so the release-first/apply-after ordering question did not arise",
+  "carried_over_from_the_previous_release": {
+    "item": "the four Copilot accounts added to the ConfigMap on 2026-10-14 were waiting for a rolling restart to become visible",
+    "resolved_by_this_release": true,
+    "evidence": "5 Copilot endpoints loaded; the four report [INERT (enabled: false in config)] and appear in /admin/copilot/accounts with enabled=false",
+    "still_required_to_serve_traffic": "discover -> select models -> enable, then one further restart"
+  },
+  "routing_behaviour_changed": false,
+  "routing_behaviour_note": "no rule is configured (model_accounts=0, model_preferences=0), so every model keeps the default order and all enabled accounts",
+  "contract_change": {
+    "what": "the Dashboard keys panel holds the LB API Key in page memory while unlocked, rather than for a single request",
+    "why": "the panel has four sections and every write needs the key, so the one-request contract meant retyping it per save",
+    "unchanged_boundaries": ["no localStorage", "no sessionStorage", "no cookie", "not in any URL",
+                             "dropped on page reload", "explicit lock", "10-minute idle auto-lock",
+                             "locking clears the rendered identity material"],
+    "upstream_credential_field_excluded": "credSecret keeps the one-request contract; holding the LB key is a convenience, that one is a secret"
+  },
+  "defects_found_while_verifying_and_fixed_in_this_release": [
+    "/v1/models asked account_allows directly instead of going through CopilotEndpoint.supports(), so the catalogue advertised a model whose only selected accounts cannot serve it. Found end-to-end, not by unit tests; both the capability path and the wildcard fallback now have regressions.",
+    "A failed unlock kept the previously held key, so the panel reported an invalid key while still authorising writes with the key the operator came to replace.",
+    "'Not configured' and 'storage is down' are both HTTP 503, so every deployment without credential storage saw a warning on each unlock. fetchJSON now carries the server error code."
+  ],
+  "operator_errors_this_run": [
+    "polled `status --directory` for three minutes; the subcommand takes --release-id, so those polls were argument errors rather than status reads. The in-cluster state machine was unaffected.",
+    "guessed CredentialStore's constructor and MySQL env var names in the image self-check; corrected against the source before relying on either."
+  ],
+  "outstanding": [
+    "Freezing the routing decision at request admission is still not implemented. Within one request `select_endpoint(pinned=…)` holds the account and session affinity holds it across requests, but 'policy changed mid-request' is still covered by pinned rather than structurally. The per-model account layer adds one more mutable dimension, bounded by one retry landing elsewhere.",
+    "Azure Foundry credentials still return 401 on every path and have served zero requests. The credentials themselves need replacing; POST /admin/credentials/azure_openai/{account}/validate can confirm once they are.",
+    "The four Copilot accounts are loaded and visible but inert. Enabling each needs discover -> select models -> enable, then one further restart.",
+    "Copilot price refresh logged a ValueError and retained the previous prices. Pre-existing fail-safe behaviour, not introduced here, and not investigated in this release."
+  ]
+}

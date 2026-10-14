@@ -6,6 +6,7 @@ Author: Zeno Ren
 
 | 日期 | 范围 | 入口 |
 |---|---|---|
+| 2026-10-14 | 路由规则三段式（模型 → Provider → GHCP 账户）与面板解锁 AKS 发布；密钥驻留契约变更，三处缺陷在验证中发现并修复 | [部署回执](2026-10-14-routing-rules-aks/REPORT.md) |
 | 2026-10-14 | 账户先落地后启用、凭据录入与 Foundry v1 AKS 发布；首轮因控制器缺一个 Secret 读权限而在 preflight 中止 | [部署回执](2026-10-14-inert-accounts-aks/REPORT.md) |
 | 2026-10-10 | Claude 5.5 模型解析修复 AKS 发布；首轮因探针选用容量受限模型而回滚 | [部署回执](2026-10-10-model-resolution-aks/REPORT.md) |
 | 2026-10-10 | 协议保证落地与重放白名单首次扩展 AKS 发布 | [部署回执](2026-10-10-replay-aks/REPORT.md) |
