@@ -82,6 +82,12 @@ async def check_schema(storage):
             schema['account_columns']={row[0]:list(row[1:]) for row in await cur.fetchall()}
             await cur.execute("SELECT COLUMN_NAME,DATA_TYPE,IS_NULLABLE,CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='model_provider_preference'")
             schema['routing_columns']={row[0]:list(row[1:]) for row in await cur.fetchall()}
+            await cur.execute("SELECT COLUMN_NAME,DATA_TYPE,IS_NULLABLE,CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='model_copilot_account'")
+            schema['model_account_columns']={row[0]:list(row[1:]) for row in await cur.fetchall()}
+            await cur.execute("SELECT INDEX_NAME,COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='model_copilot_account' AND NON_UNIQUE=0 ORDER BY INDEX_NAME,SEQ_IN_INDEX")
+            model_account_indexes={}
+            for index,column in await cur.fetchall():model_account_indexes.setdefault(index,[]).append(column)
+            schema['model_account_unique_indexes']=model_account_indexes
             await cur.execute("SELECT COLUMN_NAME,DATA_TYPE,IS_NULLABLE,CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='provider_credential'")
             schema['credential_columns']={row[0]:list(row[1:]) for row in await cur.fetchall()}
             await cur.execute("SELECT INDEX_NAME,COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='provider_credential' AND NON_UNIQUE=0 ORDER BY INDEX_NAME,SEQ_IN_INDEX")
@@ -129,6 +135,15 @@ def validate_schema(schema):
         expected={'model':['varchar','NO',190],'providers':['varchar','NO',255],
                   'updated_at':['timestamp','NO',None]}
         if schema['routing_columns']!=expected:raise ValueError('routing_schema_columns_mismatch')
+    # Its own table rather than a column above, because model_provider_preference
+    # already exists in production. A lost primary key here would let two rows
+    # claim the same model and make the account limit depend on row order.
+    if schema.get('model_account_columns'):
+        expected={'model':['varchar','NO',190],'accounts':['text','NO',65535],
+                  'updated_at':['timestamp','NO',None]}
+        if schema['model_account_columns']!=expected:raise ValueError('model_account_schema_columns_mismatch')
+        if schema.get('model_account_unique_indexes')!={'PRIMARY':['model']}:
+            raise ValueError('model_account_schema_unique_keys_mismatch')
     # Credential rows hold sealed upstream secrets; a silently widened column or a
     # lost primary key would change which record a request resolves to.
     if schema.get('credential_columns'):

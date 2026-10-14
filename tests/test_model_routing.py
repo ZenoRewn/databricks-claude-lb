@@ -1,4 +1,4 @@
-"""Per-model provider preference, with fallback retained. Author: Zeno Ren.
+"""Per-model routing: model → provider → GHCP account. Author: Zeno Ren.
 
 A preference reorders the providers that can serve a model; it does not remove
 any. The default order stays Copilot → Azure, and providers the operator did
@@ -7,6 +7,22 @@ effective candidates are:
 
     (providers that can serve the model) ∩ (providers the key allows),
     ordered by preference, then by the default order
+
+A third segment names *which GHCP accounts* serve one model. The account-side
+policy already in place is the reverse mapping — `allowed_models` answers "which
+models may this account serve" — and the two are intersected, so either one
+alone is enough to remove a candidate. Expressing the intent from the model side
+matters because the reverse route would require editing every account's
+allow-list to say one thing about one model, dragging other models along with it.
+
+That segment subtracts, which the per-model *provider* preference deliberately
+does not. It is not a contradiction: it subtracts accounts *within* a provider,
+so the provider-level Copilot → Azure fallback is untouched. Selecting accounts
+that cannot serve the model empties the Copilot candidate set and the request
+falls back, exactly as it would if those accounts were circuit-broken.
+
+Empty selection means "not limited", never "no account may serve this" — the
+latter has no way back through the UI and would silently remove a model.
 
 Opening `claude-*` on the OpenAI-style entry points is opt-in per model: the
 gateway still rejects them unless an explicit preference maps that model to a
@@ -78,6 +94,271 @@ class PreferenceValidationTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(OSError):
                 await self.store.set_model_preference('gpt-5.4', ['azure_openai'])
         self.assertEqual(self.store.model_preference('gpt-5.4'), ('copilot',))
+
+
+class ModelAccountSelectionTests(unittest.IsolatedAsyncioTestCase):
+    """The third segment: which GHCP accounts serve one model.
+
+    Unlike the provider preference, **order carries no meaning here** — which of
+    the selected accounts a request lands on is decided by session affinity, not
+    by how the operator sorted them. So this one canonicalises to a sorted set
+    while the preference keeps the operator's order.
+    """
+
+    async def asyncSetUp(self):
+        self.store = key_policy.KeyPolicyStore(None)
+        await self.store.start()
+
+    async def test_unset_model_is_not_limited_to_any_account(self):
+        self.assertEqual(self.store.model_accounts('gpt-4o'), ())
+        self.assertTrue(self.store.model_allows_account('gpt-4o', 'anything'))
+
+    async def test_a_selection_subtracts_every_account_outside_it(self):
+        await self.store.set_model_accounts('gpt-4o', ['acct-b', 'acct-a'])
+        self.assertTrue(self.store.model_allows_account('gpt-4o', 'acct-a'))
+        self.assertFalse(self.store.model_allows_account('gpt-4o', 'acct-c'))
+
+    async def test_order_is_canonicalised_because_affinity_picks_not_the_operator(self):
+        await self.store.set_model_accounts('gpt-4o', ['acct-b', 'acct-a', 'acct-b'])
+        self.assertEqual(self.store.model_accounts('gpt-4o'), ('acct-a', 'acct-b'))
+
+    async def test_the_selection_is_scoped_to_one_model(self):
+        await self.store.set_model_accounts('gpt-4o', ['acct-a'])
+        self.assertTrue(self.store.model_allows_account('kimi-k3', 'acct-c'))
+
+    async def test_an_empty_selection_clears_rather_than_excluding_everything(self):
+        # Clearing every checkbox means "no longer limited", not "no account may
+        # serve this model". The latter would remove the model from GHCP with no
+        # way to express the undo, so it must not be reachable by accident.
+        await self.store.set_model_accounts('gpt-4o', ['acct-a'])
+        for empty in ([], None):
+            with self.subTest(empty=empty):
+                await self.store.set_model_accounts('gpt-4o', empty)
+                self.assertEqual(self.store.model_accounts('gpt-4o'), ())
+                self.assertTrue(self.store.model_allows_account('gpt-4o', 'acct-c'))
+                await self.store.set_model_accounts('gpt-4o', ['acct-a'])
+
+    async def test_clearing_removes_the_selection(self):
+        await self.store.set_model_accounts('gpt-4o', ['acct-a'])
+        await self.store.clear_model_accounts('gpt-4o')
+        self.assertEqual(self.store.model_accounts('gpt-4o'), ())
+
+    async def test_a_bare_string_or_non_string_entries_are_rejected(self):
+        # A bare string would silently become a per-character selection.
+        for value in ('acct-a', 42, ['acct-a', 7], ['']):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    await self.store.set_model_accounts('gpt-4o', value)
+
+    async def test_an_empty_model_name_is_rejected(self):
+        for model in ('', '   ', None):
+            with self.subTest(model=model):
+                with self.assertRaises(ValueError):
+                    await self.store.set_model_accounts(model, ['acct-a'])
+
+    async def test_an_unavailable_store_falls_back_to_the_baseline(self):
+        await self.store.set_model_accounts('gpt-4o', ['acct-a'])
+        self.store._state = 'unavailable'
+        self.assertEqual(self.store.model_accounts('gpt-4o'), ())
+        self.assertTrue(self.store.model_allows_account('gpt-4o', 'acct-c'))
+
+    async def test_status_counts_this_layer_too(self):
+        await self.store.set_model_accounts('gpt-4o', ['acct-a'])
+        self.assertEqual(self.store.status()['model_accounts'], 1)
+
+    async def test_write_failure_leaves_the_enforced_selection_unchanged(self):
+        await self.store.set_model_accounts('gpt-4o', ['acct-a'])
+        with patch.object(self.store, '_backend_write_model_accounts',
+                          side_effect=OSError('db down')):
+            with self.assertRaises(OSError):
+                await self.store.set_model_accounts('gpt-4o', ['acct-b'])
+        self.assertEqual(self.store.model_accounts('gpt-4o'), ('acct-a',))
+
+    async def test_never_loaded_store_reports_no_selection(self):
+        store = key_policy.KeyPolicyStore({'type': 'mysql'})
+        with patch.object(store, '_backend_load', side_effect=OSError('db down')):
+            await store.start()
+        self.assertEqual(store.model_accounts('gpt-4o'), ())
+
+    async def test_the_json_backend_round_trips(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            store = key_policy.KeyPolicyStore({'type': 'json', 'path': tmp})
+            await store.start()
+            await store.set_model_accounts('gpt-4o', ['acct-b', 'acct-a'])
+            reopened = key_policy.KeyPolicyStore({'type': 'json', 'path': tmp})
+            await reopened.start()
+            self.assertEqual(reopened.model_accounts('gpt-4o'), ('acct-a', 'acct-b'))
+            await reopened.clear_model_accounts('gpt-4o')
+            again = key_policy.KeyPolicyStore({'type': 'json', 'path': tmp})
+            await again.start()
+            self.assertEqual(again.model_accounts('gpt-4o'), ())
+
+
+class AccountSelectionSubtractsCandidatesTests(unittest.IsolatedAsyncioTestCase):
+    """Enforcement has to sit in `supports()` — the single choke point for every
+    candidate decision, including the configured-eligible set session affinity
+    hashes over. Filtering at the call sites instead would miss affinity."""
+
+    async def asyncSetUp(self):
+        self.store = key_policy.KeyPolicyStore(None)
+        await self.store.start()
+        for name in ('acct-a', 'acct-b'):
+            await self.store.set_account_capability(name, ('gpt-4o', 'kimi-k3'))
+        p = patch.object(main, 'key_policy_store', self.store)
+        p.start()
+        self.addCleanup(p.stop)
+        self.a = main.CopilotEndpoint(name='acct-a', github_token='synthetic')
+        self.b = main.CopilotEndpoint(name='acct-b', github_token='synthetic')
+
+    def _proxy(self, *endpoints):
+        proxy = main.CopilotProxy.__new__(main.CopilotProxy)
+        proxy.load_balancer = main.LoadBalancer(list(endpoints))
+        proxy.session_affinity_events = {}
+        return proxy
+
+    async def test_an_account_outside_the_selection_stops_supporting_that_model(self):
+        await self.store.set_model_accounts('gpt-4o', ['acct-a'])
+        self.assertTrue(self.a.supports('gpt-4o', 'responses'))
+        self.assertFalse(self.b.supports('gpt-4o', 'responses'))
+
+    async def test_other_models_on_the_excluded_account_are_untouched(self):
+        await self.store.set_model_accounts('gpt-4o', ['acct-a'])
+        self.assertTrue(self.b.supports('kimi-k3', 'responses'),
+                        'the selection is per model, not a blanket account disable')
+
+    async def test_the_proxy_level_helpers_follow_automatically(self):
+        proxy = self._proxy(self.b)
+        await self.store.set_model_accounts('gpt-4o', ['acct-a'])
+        self.assertFalse(proxy.supports_model('gpt-4o', 'responses'))
+        self.assertFalse(proxy.can_handle('gpt-4o', 'responses'))
+        self.assertTrue(proxy.supports_model('kimi-k3', 'responses'))
+
+    async def test_both_account_layers_subtract(self):
+        # allowed_models removes a model from an account; model_accounts removes
+        # an account from a model. Either alone drops the candidate.
+        await self.store.set_account('acct-a', allowed_models=['kimi-k3'])
+        await self.store.set_model_accounts('gpt-4o', ['acct-a'])
+        self.assertFalse(self.a.supports('gpt-4o', 'responses'))
+
+    async def test_selecting_accounts_without_the_capability_empties_the_set(self):
+        # Not an error: the Copilot candidate set goes empty and the
+        # provider-level fallback carries the request, same as a circuit open.
+        await self.store.set_account_capability('acct-c', ('gpt-5.4',))
+        c = main.CopilotEndpoint(name='acct-c', github_token='synthetic')
+        await self.store.set_model_accounts('gpt-4o', ['acct-c'])
+        for ep in (self.a, self.b, c):
+            with self.subTest(account=ep.name):
+                self.assertFalse(ep.supports('gpt-4o', 'responses'))
+        self.assertFalse(self._proxy(self.a, self.b, c).supports_model('gpt-4o', 'responses'))
+
+    async def test_a_disabled_account_stays_disabled_even_if_selected(self):
+        # Selecting an account is not a way to enable it; enablement is its own
+        # layer and this one only ever subtracts.
+        await self.store.set_account('acct-a', enabled=False)
+        await self.store.set_model_accounts('gpt-4o', ['acct-a'])
+        self.assertFalse(self.a.supports('gpt-4o', 'responses'))
+
+    async def test_no_store_means_no_limit(self):
+        with patch.object(main, 'key_policy_store', None):
+            self.assertTrue(self.a.supports('gpt-4o', 'responses'))
+            self.assertTrue(self.b.supports('gpt-4o', 'responses'))
+
+    async def test_the_model_catalogue_follows_the_selection(self):
+        # Caught end-to-end, not by the assertions above: the catalogue asked
+        # `account_allows` directly instead of going through supports(), so
+        # /v1/models kept advertising a model whose only selected accounts
+        # cannot serve it. A client would pick it and get a routing failure.
+        await self.store.set_account_capability('acct-c', ('gpt-5.4',))
+        c = main.CopilotEndpoint(name='acct-c', github_token='synthetic')
+        proxy = self._proxy(self.a, self.b, c)
+        with patch.object(main, 'copilot_proxy', proxy):
+            self.assertIn('gpt-5.4', main._collect_openai_model_ids(azure=None, databricks=None))
+            await self.store.set_model_accounts('gpt-5.4', ['acct-a'])
+            catalogue = main._collect_openai_model_ids(azure=None, databricks=None)
+            self.assertNotIn('gpt-5.4', catalogue,
+                             'acct-a has no gpt-5.4 capability, so nothing can serve it')
+            self.assertIn('gpt-4o', catalogue, 'unrelated models stay in the catalogue')
+
+    async def test_a_wildcard_endpoint_also_honours_the_selection(self):
+        # A wildcard account (no configured models, no capability yet) falls back
+        # to the static verified table. That fallback used to bypass the account
+        # selection wholesale, which is the same defect one layer up.
+        wild = main.CopilotEndpoint(name='acct-wild', github_token='synthetic')
+        proxy = self._proxy(wild)
+        with patch.object(main, 'copilot_proxy', proxy):
+            self.assertIn('gpt-5.4', main._collect_openai_model_ids(azure=None, databricks=None))
+            await self.store.set_model_accounts('gpt-5.4', ['acct-a'])
+            self.assertNotIn('gpt-5.4', main._collect_openai_model_ids(azure=None, databricks=None),
+                             'the wildcard account is not selected for this model')
+            self.assertIn('gpt-5.5', main._collect_openai_model_ids(azure=None, databricks=None),
+                          'models with no selection still come from the wildcard')
+
+
+class SessionAffinitySurvivesTheSelectionTests(unittest.IsolatedAsyncioTestCase):
+    """Affinity hashes over the configured-eligible set. This layer makes that
+    set smaller; it must not make it unstable."""
+
+    ACCOUNTS = ('acct-a', 'acct-b', 'acct-c', 'acct-d')
+
+    async def asyncSetUp(self):
+        self.store = key_policy.KeyPolicyStore(None)
+        await self.store.start()
+        for name in self.ACCOUNTS:
+            await self.store.set_account_capability(name, ('gpt-4o',))
+        p = patch.object(main, 'key_policy_store', self.store)
+        p.start()
+        self.addCleanup(p.stop)
+        self.endpoints = [main.CopilotEndpoint(name=n, github_token='synthetic')
+                          for n in self.ACCOUNTS]
+        self.proxy = main.CopilotProxy.__new__(main.CopilotProxy)
+        self.proxy.load_balancer = main.LoadBalancer(self.endpoints)
+        self.proxy.session_affinity_events = {}
+
+    def _pick(self, session_key):
+        return self.proxy._select_endpoint('gpt-4o', 'responses', session_key=session_key)
+
+    def _map(self, n=24):
+        return {f'sess-{i}': self._pick(f'sess-{i}').name for i in range(n)}
+
+    async def test_the_same_session_lands_on_the_same_account_every_time(self):
+        first = self._pick('sess-1')
+        for _ in range(10):
+            self.assertIs(self._pick('sess-1'), first)
+
+    async def test_the_selection_narrows_the_set_without_destabilising_it(self):
+        await self.store.set_model_accounts('gpt-4o', ['acct-a', 'acct-b'])
+        placement = self._map()
+        self.assertTrue(set(placement.values()) <= {'acct-a', 'acct-b'},
+                        'an unselected account must never be chosen')
+        self.assertEqual(placement, self._map(), 'placement must be reproducible')
+
+    async def test_narrowing_to_one_account_routes_every_session_there(self):
+        await self.store.set_model_accounts('gpt-4o', ['acct-c'])
+        self.assertEqual(set(self._map().values()), {'acct-c'})
+
+    async def test_a_circuit_opening_does_not_reshuffle_the_other_sessions(self):
+        # The hash is taken over the eligible set, not the available pool, so a
+        # single account going down must not move sessions that were not on it.
+        await self.store.set_model_accounts('gpt-4o', ['acct-a', 'acct-b', 'acct-c'])
+        before = self._map()
+        with patch.object(self.proxy.load_balancer, 'is_available',
+                          lambda ep, **kw: ep.name != 'acct-c'):
+            after = self._map()
+        moved = {s for s, name in before.items() if after[s] != name}
+        self.assertTrue(all(before[s] == 'acct-c' for s in moved),
+                        'only the sessions pinned to the downed account may move')
+        self.assertNotIn('acct-c', set(after.values()))
+
+    async def test_changing_the_selection_only_moves_the_affected_sessions(self):
+        # Dropping one account from a three-account selection reshuffles, because
+        # the modulus changes — that is inherent to the existing hash and is why
+        # the selection is an operator decision rather than something automatic.
+        # What must hold is that no session lands outside the new selection.
+        await self.store.set_model_accounts('gpt-4o', ['acct-a', 'acct-b', 'acct-c'])
+        self._map()
+        await self.store.set_model_accounts('gpt-4o', ['acct-a', 'acct-b'])
+        self.assertTrue(set(self._map().values()) <= {'acct-a', 'acct-b'})
 
 
 class ProviderOrderTests(unittest.TestCase):
@@ -340,6 +621,144 @@ class RoutingAdminEndpointTests(unittest.TestCase):
                                 json={'providers': ['azure_openai']})
         self.assertEqual(r.status_code, 503)
         self.assertEqual(self.store.model_preference('gpt-5.4'), ('copilot',))
+
+
+class RoutingRuleAdminTests(unittest.TestCase):
+    """One rule, one call: model → provider → accounts.
+
+    The Dashboard presents these three as a single row, so the endpoint has to
+    accept them together. The account names are validated against the configured
+    endpoints *before* anything is written, otherwise a typo in the third field
+    would leave the provider half of the rule applied.
+    """
+
+    KEY = 'lb-routing-rule-key-0123456'
+
+    def setUp(self):
+        from starlette.testclient import TestClient
+
+        class _Stub:
+            api_key = RoutingRuleAdminTests.KEY
+
+            def verify_api_key(self, key):
+                return bool(key) and key == self.api_key
+
+        self.store = _store()
+        asyncio.run(self.store.set_account_capability('acct-a', ('gpt-4o', 'kimi-k3')))
+        asyncio.run(self.store.set_account_capability('acct-b', ('gpt-4o',)))
+        self.endpoints = [main.CopilotEndpoint(name='acct-a', github_token='synthetic'),
+                          main.CopilotEndpoint(name='acct-b', github_token='synthetic')]
+        copilot = main.CopilotProxy.__new__(main.CopilotProxy)
+        copilot.load_balancer = main.LoadBalancer(self.endpoints)
+        copilot.verify_api_key = _Stub().verify_api_key
+        main.API_KEY_TO_TENANT.clear()
+        main.API_KEY_TO_TENANT[self.KEY] = 'default'
+        self.addCleanup(main.API_KEY_TO_TENANT.clear)
+        for attr, value in (('proxy', _Stub()), ('copilot_proxy', copilot),
+                            ('key_policy_store', self.store)):
+            p = patch.object(main, attr, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.client = TestClient(main.app, raise_server_exceptions=False)
+        self.H = {'x-api-key': self.KEY}
+
+    def test_a_rule_writes_both_dimensions_in_one_call(self):
+        r = self.client.put('/admin/model-routing/gpt-4o', headers=self.H,
+                            json={'providers': ['copilot'], 'copilot_accounts': ['acct-a']})
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body['providers'], ['copilot'])
+        self.assertEqual(body['copilot_accounts'], ['acct-a'])
+        self.assertEqual(self.store.model_accounts('gpt-4o'), ('acct-a',))
+
+    def test_an_unknown_account_is_refused_without_half_applying_the_rule(self):
+        r = self.client.put('/admin/model-routing/gpt-4o', headers=self.H,
+                            json={'providers': ['copilot'], 'copilot_accounts': ['acct-typo']})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()['detail']['error']['code'], 'unknown_copilot_account')
+        self.assertEqual(self.store.model_accounts('gpt-4o'), ())
+        self.assertEqual(self.store.model_preference('gpt-4o'), (),
+                         'validation must precede every write')
+
+    def test_omitting_the_key_leaves_the_account_selection_alone(self):
+        self.client.put('/admin/model-routing/gpt-4o', headers=self.H,
+                        json={'providers': ['copilot'], 'copilot_accounts': ['acct-a']})
+        r = self.client.put('/admin/model-routing/gpt-4o', headers=self.H,
+                            json={'providers': ['azure_openai']})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()['copilot_accounts'], ['acct-a'])
+        self.assertEqual(self.store.model_accounts('gpt-4o'), ('acct-a',))
+
+    def test_an_explicit_empty_selection_clears_it(self):
+        self.client.put('/admin/model-routing/gpt-4o', headers=self.H,
+                        json={'providers': ['copilot'], 'copilot_accounts': ['acct-a']})
+        for empty in ([], None):
+            with self.subTest(empty=empty):
+                r = self.client.put('/admin/model-routing/gpt-4o', headers=self.H,
+                                    json={'providers': ['copilot'], 'copilot_accounts': empty})
+                self.assertEqual(r.status_code, 200)
+                self.assertEqual(r.json()['copilot_accounts'], [])
+                self.assertEqual(self.store.model_accounts('gpt-4o'), ())
+
+    def test_accounts_alone_without_providers_is_accepted(self):
+        # Limiting accounts without reordering providers is a legitimate rule.
+        r = self.client.put('/admin/model-routing/gpt-4o', headers=self.H,
+                            json={'copilot_accounts': ['acct-a']})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.store.model_accounts('gpt-4o'), ('acct-a',))
+        self.assertEqual(self.store.model_preference('gpt-4o'), ())
+
+    def test_a_body_with_neither_field_is_rejected(self):
+        r = self.client.put('/admin/model-routing/gpt-4o', headers=self.H, json={})
+        self.assertEqual(r.status_code, 400)
+
+    def test_delete_clears_both_dimensions(self):
+        self.client.put('/admin/model-routing/gpt-4o', headers=self.H,
+                        json={'providers': ['azure_openai'], 'copilot_accounts': ['acct-a']})
+        r = self.client.delete('/admin/model-routing/gpt-4o', headers=self.H)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()['copilot_accounts'], [])
+        self.assertEqual(self.store.model_accounts('gpt-4o'), ())
+        self.assertEqual(self.store.model_preference('gpt-4o'), ())
+
+    def test_the_listing_carries_the_dropdown_sources(self):
+        body = self.client.get('/admin/model-routing', headers=self.H).json()
+        self.assertIn('gpt-4o', body['known_models'])
+        self.assertEqual([a['account'] for a in body['copilot_accounts_available']],
+                         ['acct-a', 'acct-b'])
+        self.assertTrue(all('enabled' in a for a in body['copilot_accounts_available']))
+
+    def test_effective_candidates_are_computed_server_side(self):
+        # The client cannot work this out: it needs capability, allowed_models
+        # and the enablement state all at once.
+        self.client.put('/admin/model-routing/kimi-k3', headers=self.H,
+                        json={'copilot_accounts': ['acct-a', 'acct-b']})
+        entry = next(p for p in self.client.get('/admin/model-routing', headers=self.H)
+                     .json()['preferences'] if p['model'] == 'kimi-k3')
+        self.assertEqual(entry['copilot_accounts'], ['acct-a', 'acct-b'])
+        self.assertEqual(entry['effective_copilot_accounts'], ['acct-a'],
+                         'acct-b has no kimi-k3 capability, so it is not a candidate')
+
+    def test_an_empty_effective_set_is_surfaced_rather_than_hidden(self):
+        r = self.client.put('/admin/model-routing/gpt-5.4', headers=self.H,
+                            json={'copilot_accounts': ['acct-a']})
+        self.assertEqual(r.json()['effective_copilot_accounts'], [])
+        self.assertTrue(r.json()['copilot_candidates_empty'],
+                        'the operator has to be told this model now has no GHCP candidate')
+
+    def test_write_failure_reports_503_and_keeps_the_selection(self):
+        self.client.put('/admin/model-routing/gpt-4o', headers=self.H,
+                        json={'copilot_accounts': ['acct-a']})
+        with patch.object(self.store, '_backend_write_model_accounts',
+                          side_effect=OSError('db down')):
+            r = self.client.put('/admin/model-routing/gpt-4o', headers=self.H,
+                                json={'copilot_accounts': ['acct-b']})
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(self.store.model_accounts('gpt-4o'), ('acct-a',))
+
+    def test_the_selection_requires_a_valid_key(self):
+        self.assertEqual(self.client.put('/admin/model-routing/gpt-4o',
+                                         json={'copilot_accounts': ['acct-a']}).status_code, 401)
 
 
 if __name__ == '__main__':

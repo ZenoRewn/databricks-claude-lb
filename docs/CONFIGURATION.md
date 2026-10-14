@@ -14,7 +14,7 @@ Author: Zeno Ren
 
 ### 策略降级：配置是基线，存储是 overlay
 
-运行时策略（按密钥限渠道、模型→provider 优先序、GHCP 账户启用与勾选）全部存在用量存储里，而它们**都是叠在配置之上的 overlay**。只有一条降级规则：
+运行时策略（按密钥限渠道、模型→provider 优先序、模型→GHCP 账户、GHCP 账户启用与勾选）全部存在用量存储里，而它们**都是叠在配置之上的 overlay**。只有一条降级规则：
 
 > **overlay 缺失或未加载时，回落到配置基线。**
 
@@ -22,20 +22,41 @@ Author: Zeno Ren
 |---|---|---|
 | 按密钥限渠道 | 允许全部渠道 | config 里配置了哪些 provider |
 | 模型 → provider 优先序 | 默认顺序 | Copilot 优先 → Azure fallback |
+| 模型 → GHCP 账户 | 本层不限定账户 | 全部启用账户 |
 | GHCP `allowed_models` | 本层不施加约束 | 端点的 `models` 列表 |
 | GHCP 账户启用态 | 保持 inert 或启用 | 端点的 `enabled` 声明 |
 
-前三行看起来像 "fail-open"，那只是因为它们的基线恰好宽松。规则本身是**回落基线**而非**放行** —— 最后一行的基线可以是 `enabled: false`，于是同一条规则给出的是「保持不投入服务」。把它读成例外会得出错误结论。
+前四行看起来像 "fail-open"，那只是因为它们的基线恰好宽松。规则本身是**回落基线**而非**放行** —— 最后一行的基线可以是 `enabled: false`，于是同一条规则给出的是「保持不投入服务」。把它读成例外会得出错误结论。
 
 理由是限制层不应把数据库故障放大成网关整体不可用，但同样不该把故障变成一次意料之外的扩权。两种状态都显式暴露：从未成功加载为 `unavailable`，加载过但刷新失败为 `stale`（继续执行最后一次成功读取的策略），在 `/stats` 与 Dashboard 可见，不静默。
 
-跨层的回归断言在 `tests/test_key_policy.py::DegradationFallsBackToTheConfigBaselineTests` —— 四层放在一个类里断言，任何一层改成真正的 fail-open 都会红。
+跨层的回归断言在 `tests/test_key_policy.py::DegradationFallsBackToTheConfigBaselineTests` —— 五层放在一个类里断言，任何一层改成真正的 fail-open 都会红。
+
+<a id="dashboard-unlock-contract"></a>
+
+### Dashboard「密钥与渠道」页的解锁契约
+
+这一页的四块（客户端密钥、路由规则、GHCP 账户、上游凭据）都要 LB API Key。输一次 key 点**解锁**会并发读出四块，之后每次保存复用同一把 key；某一块失败不影响其余三块，未配置的渠道显示为「该渠道未配置」而不是报错。
+
+**这把 key 在解锁期间驻留页面内存**，是对早先「只用于当次请求」的有意变更 —— 旧契约下改一个勾选要重输一遍 key，一页四块就是四遍。边界没有放宽：
+
+- 不写入 `localStorage` / `sessionStorage` / cookie，不进 URL（`tests/test_dashboard_ui.cjs` 对该面板代码段有静态断言）
+- 刷新页面即失效；**锁定**按钮立即清除；闲置 10 分钟自动锁定（操作会续期）
+- 锁定同时清空已读出的内容 —— 掩码、指纹、账户名本身就是这把 key 授权才能看到的
+- 一次解锁尝试先丢弃旧 key；失败后页面处于锁定态，不会出现「提示无效却仍能写」
+- 从源重读客户端密钥后自动锁定：那次轮换可能正好作废了手里这把
+
+代价说清楚：10 分钟内离开座位且未锁定，等于把这些运维端点交给能碰这台机器的人。
+
+**上游凭据不在此列。** `credSecret` 保持提交后立即清除的单次请求契约 —— 驻留 LB key 是便利，上游凭据是秘密。
 
 ### 按密钥限制后端渠道
 
 渠道 id 为 `databricks`(ADB) / `copilot`(GHCP) / `azure_openai`(Foundry)，与用量记录里的 `provider` 取值一致。设置入口是 Dashboard「密钥与渠道」页或 `PUT /admin/api-keys/{tenant}/providers`，存在用量存储中，立即生效并跨重启保留。**未设置的租户默认允许全部渠道**，所以既有密钥行为不变。
 
 allowlist **只做减法**：它从候选里移除渠道，不新增候选、不改「Copilot 优先 → Azure fallback」的既有顺序，也不能让某渠道服务它本来不支持的模型。策略拒绝返回 403 `provider_not_allowed`，与「无可用端点」的 404 区分，便于分清是策略还是容量。
+
+设置接口**不接受空集**（允许空集等于把该租户锁在门外，且无从与手误区分），所以回到「不限制」要用 `DELETE /admin/api-keys/{tenant}/providers`（Dashboard 该行的「重置」按钮）—— 它把该租户清回配置基线，幂等，已无限制时也返回 200。
 
 存储层保存的是**租户名与渠道 id**，不含任何密钥材料。
 
@@ -107,17 +128,37 @@ Claude 模型使用 `/v1/messages`。在 OpenAI 风格入口传入 Claude 模型
 
 device flow 的 `device_code` 只存在进程内并带 TTL，不落库、不进日志、不出现在响应里；`authorization_pending` 是正常中间态而非错误。发布预检会校验 `provider_credential` 的列与主键，表不存在时放行。
 
-### 模型 → Provider 优先序
+### 路由规则：模型 → Provider → GHCP 账户
 
-`PUT /admin/model-routing/{model}` 给单个模型设置 provider 顺序（Dashboard「密钥与渠道」页也可操作）。**顺序即偏好**，不去重也不重排，重复项会被拒。
+`PUT /admin/model-routing/{model}` 设置单个模型的规则（Dashboard「密钥与渠道」页是三段式的下拉表单）。两段都可选：省略 `providers` 只改账户，省略 `copilot_accounts` 不动账户。**没有规则的模型维持原本行为。**
 
-**偏好只重排，不筛除。** 列出的 provider 提到前面，未列出的按默认顺序（`copilot` → `azure_openai`）接在后面，所以 fallback 能力完整保留。筛除是 per-key allowlist 的职责；两者叠加后的候选是：
+两段都在**任何写入之前**校验完。第三段打错一个账户名却让 provider 那半边已经生效，是最难排查的一种半应用。
+
+#### 第一段：provider 优先序
+
+**顺序即偏好**，不去重也不重排，重复项会被拒。
+
+**偏好只重排，不筛除。** 列出的 provider 提到前面，未列出的按默认顺序（`copilot` → `azure_openai`）接在后面，所以 fallback 能力完整保留。provider 维度的筛除是 per-key allowlist 的职责；两者叠加后的候选是：
 
 ```
 (能服务该模型的 provider) ∩ (该 key 允许的 provider)，先按偏好排序，再按默认顺序
 ```
 
-偏好里的 `databricks` 不参与 OpenAI 风格入口的顺序 —— 它服务 `/v1/messages`。
+偏好里的 `databricks` 不参与 OpenAI 风格入口的顺序 —— 它服务 `/v1/messages`。Dashboard 的下拉因此只给 GHCP 与 Foundry 两项：列 ADB 会给出一个什么都不做的选项。
+
+#### 第二段：限定 GHCP 账户
+
+`copilot_accounts` 把该模型限定到指定的 GHCP 账户，**空列表或 `null` = 不限定**（这是基线，也是撤销限定的唯一表达方式）。账户名必须是已配置的 Copilot 端点，否则 400 `unknown_copilot_account` —— 写错的名字静默生效就等于把该模型的 GHCP 候选清空，而界面上看着像配好了。
+
+这一段**是筛除**，但筛的是**同一渠道内的哪个账户**，不是哪个 provider，所以上面那条「只重排不筛除」不受影响，provider 级 fallback 完整保留。
+
+它与按账户的 `allowed_models` 是**交集**：前者把账户从模型上摘掉，后者把模型从账户上摘掉，任一侧成立即移出候选。排查某账户为何不接某模型时两处都要看 —— Dashboard 的「生效候选」列就是为此存在，它由服务端按 `CopilotEndpoint.supports()` 算出（客户端算不出来，需要同时拿到 capability、`allowed_models` 和启用态）。
+
+选中的账户恰好都服务不了该模型时，GHCP 候选为空，请求落到 Foundry —— 与那些账户全部熔断同效，不是错误。响应的 `copilot_candidates_empty` 会标明这一点，Dashboard 保存后给出警告但**不阻止**：那是运维的决定。
+
+**会话亲和不受影响。** 筛选加在 `CopilotEndpoint.supports()`，那是所有候选判断的唯一收口，含亲和用的「配置态合格集合」。限定让这个集合变小但仍然稳定（它只随策略变，不随熔断变），所以同一会话在同一策略下仍落同一账户。注意换一组限定会改变集合大小，亲和哈希因此重新分布 —— 这是既有哈希的固有性质，也是为什么它是运维的显式决定而非自动行为。
+
+存储用独立的 `model_copilot_account` 表而不是给 `model_provider_preference` 加列：后者在生产已经存在，加列是真迁移；新表由首次使用惰性创建，零迁移。发布预检校验它的列与主键（主键丢了会让两行声明同一个模型，限定变成取决于行序），表不存在时放行。
 
 ### `claude-*` 走 GHCP：逐模型 opt-in
 

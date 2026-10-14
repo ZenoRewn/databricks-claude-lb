@@ -7,17 +7,19 @@ Author: Zeno Ren
 ## 不变量
 
 - 推理 POST 的执行状态不明、已输出内容或可能产生工具副作用时，不自动重放；不能通过重新推理补账。见 [可靠性契约](docs/RESILIENCE.md)。
-- 保留 provider/model 兼容性、账户 pinning 和会话亲和。默认 Copilot 优先；仅明确未准入或不支持模型等既有分支允许 Azure fallback，不能泛化成任意 503 后重试。per-model 优先序可以**重排**这两个 provider（`/admin/model-routing`），但只重排不筛除，fallback 必须保留；筛除是 per-key allowlist 的职责。
+- 保留 provider/model 兼容性、账户 pinning 和会话亲和。默认 Copilot 优先；仅明确未准入或不支持模型等既有分支允许 Azure fallback，不能泛化成任意 503 后重试。per-model 优先序可以**重排**这两个 provider（`/admin/model-routing`），但只重排不筛除，fallback 必须保留；provider 维度的筛除是 per-key allowlist 的职责。
+- per-model 的 **GHCP 账户选择**（`/admin/model-routing/{model}` 的 `copilot_accounts`）筛的是**同一 provider 内的哪个账户**，不是哪个 provider —— 所以它是筛除，却不与上一条冲突，provider 级 fallback 完全不受影响。它与 per-account 的 `allowed_models` 是**交集**：前者把账户从模型上摘掉，后者把模型从账户上摘掉，任一侧成立即移出候选。排查某账户为何不接流量时两处都要看。选中的账户恰好都服务不了该模型时 Copilot 候选为空，请求落到 Azure —— 与那些账户全部熔断同效，不是错误。筛选只能加在 `CopilotEndpoint.supports()`：那是所有候选判断的唯一收口，含会话亲和用的「配置态合格集合」，漏掉亲和那一处会在回落时把所有会话重新洗牌。
 - `claude-*` 默认只走 Databricks 的 `/v1/messages`。**例外是逐模型 opt-in**：给某个 claude 模型显式配置指向 Copilot/Azure 的优先序后，该模型在 OpenAI 风格入口放行（Copilot 原生服务其 Responses/Chat 形状）。没配就保持 400，既有行为不变。`/v1/messages` 仍然只走 Databricks —— 从 Copilot 提供 Anthropic Messages 协议需要双向适配器，本仓库只有解析没有合成。
 - **上游凭据可以由运维录入并持久化，但只以封装形式存储。** 这是对早先「网关从不存储凭据」的有意变更：AKS 上 Secret 挂载与 config 都是只读，应用 SA 无 secret 写权限，用量库是唯一可写的持久存储。AES-256-GCM，密钥取自 `LB_CREDENTIAL_KEY`（留在 Secret、不入库），每条独立 nonce，`provider|account` 作为 AAD 绑定行身份。**未配密钥时录入功能整体不可用（503），绝不退化为存明文。** 任何端点都不返回明文或密文。加密没有消除风险：运行进程内存里有明文，密钥丢失则凭据不可恢复。
 - 凭据**录入时即向上游校验**，不通过不入库；端点仍在**启动时**统一构建（配置 + 已存凭据两个来源），所以新录入需一次滚动重启才生效。不做运行时增删端点 —— 那会重洗会话亲和哈希并打乱账户 pinning。
-- 所有策略层共用一条降级规则：**配置是基线，策略存储是 overlay；overlay 缺失或未加载时回落配置基线。** provider allowlist 回落到「config 配了哪些 provider」、模型偏好回落到默认顺序、`allowed_models` 回落到 config 的 `models`。这些看着像 fail-open 只是因为那些基线恰好宽松 —— 规则本身是「回落基线」，不是「放行」。
+- 所有策略层共用一条降级规则：**配置是基线，策略存储是 overlay；overlay 缺失或未加载时回落配置基线。** provider allowlist 回落到「config 配了哪些 provider」、模型偏好回落到默认顺序、`allowed_models` 回落到 config 的 `models`、per-model 账户选择回落到「不限定」。这些看着像 fail-open 只是因为那些基线恰好宽松 —— 规则本身是「回落基线」，不是「放行」。
 - Copilot 账户启用态是该规则下的三态：`enabled: false` 声明「部署但不投入服务」，端点照常构建、在 Dashboard 可操作，但在被**显式启用**前不进任何候选集；基线是限制性的，所以同一条规则给出「保持 inert」。一次显式写入后由存储接管，启用与停用两个方向都归它裁决。判据是「运维决定过」而不是「有记录」：`discover` 是对上游的只读查询，它建记录但**不写** `enabled`（该列可空，`NULL` = 尚无决定），否则一次刷新能力就会把 inert 账户推上线。这沿用既有的「capability 是上游事实且只读，allowed_models 是运维意图」分离。
 - 计价按**记录的模型名**区分渠道：`databricks-claude-*`（及裸 `opus-/sonnet-/haiku-/fable-` 旧别名）按 Anthropic 公开 API 价与「input 不含 cache」口径；裸 `claude-*` 来自 Copilot，按 copilot_pricing 分档价与 inclusive-input 口径。两者不可混用。
 - HTTP 200 或首个 SSE chunk 不代表生成完成。保留成功终态、失败、incomplete、refusal 和工具语义，见 [流协议](docs/STREAM_PROTOCOL.md)。
 - MySQL 账本幂等防止已持久批次重复累计；尚未 flush 的内存事件仍可能丢失，不能承诺零 RPO。JSON 后端只支持单写者。
 - Dashboard 的未知费用保持未知，部分计价保留已知小计。Copilot 实时估算采用 [GHCP 价格口径](docs/COPILOT_PRICING.md)，历史参考价不能混称实际渠道账单。
 - Dashboard 保持独立 HTML 资产，不引入前端框架构建依赖。UI 与发布文件清单一起核验；运行版本来自构建元数据，不从当前 Git 分支或硬编码推断。
+- **「密钥与渠道」页的 LB API Key 在解锁期间驻留页面内存**，这是对早先「只用于当次请求」的有意变更：该页有四块、每次写入都要 key，单次请求契约意味着每保存一次就重输一遍。边界没有放宽：**不写入 localStorage / sessionStorage / cookie，不进 URL**，刷新即失效，可手动锁定，闲置 10 分钟自动锁定，锁定会清空已读出的身份信息（掩码、指纹、账户名本身就是 key 授权才能看到的东西）。一次解锁尝试先丢弃旧 key，失败后页面处于锁定态而不是「提示无效却仍能写」。换来的是这一页可用，代价是 10 分钟内离开且未锁定等于把这些运维端点交给能碰这台机器的人。**上游凭据（`credSecret`）不在此列，它保持单次请求后立即清除** —— 驻留那把是便利，这把是秘密。
 
 ## 验证入口
 
@@ -58,14 +60,15 @@ Copilot 的 opaque-state 拒绝是请求级问题，不应污染账户熔断；�
 | `/admin/credentials/{provider}/{account}/validate` | POST | 需要 | 对已存凭据重新校验，会调一次上游 |
 | `/admin/credentials/copilot/device/start` | POST | 需要 | 启动 GitHub device flow，返回验证码与授权链接；`device_code` 只留进程内，不落库不进日志不进响应 |
 | `/admin/credentials/copilot/device/poll` | POST | 需要 | 轮询一次；`authorization_pending` 是正常中间态，拿到 token 后先校验再入库 |
-| `/admin/model-routing` | GET | 需要 | per-model 的 provider 优先序与生效顺序 |
-| `/admin/model-routing/{model}` | PUT | 需要 | 设置优先序（**顺序即偏好**，不去重不重排）。偏好只重排不筛除，fallback 保留；给 `claude-*` 配指向 Copilot/Azure 的偏好会在 OpenAI 风格入口放行该模型 |
-| `/admin/model-routing/{model}` | DELETE | 需要 | 清除偏好回到默认顺序；`claude-*` 随之重新被 OpenAI 风格入口拒绝 |
+| `/admin/model-routing` | GET | 需要 | per-model 规则的三段（provider 优先序、生效顺序、GHCP 账户选择），外加两个下拉的数据源（`known_models`、`copilot_accounts_available`） |
+| `/admin/model-routing/{model}` | PUT | 需要 | 设置规则。`providers`（**顺序即偏好**，不去重不重排）只重排不筛除，fallback 保留；给 `claude-*` 配指向 Copilot/Azure 的偏好会在 OpenAI 风格入口放行该模型。`copilot_accounts` 把该模型限定到指定 GHCP 账户（空/`null` = 不限定），名字不是已配置端点返回 400 `unknown_copilot_account`。**两段都在任何写入之前校验**，不会半应用；响应带 `effective_copilot_accounts` 与 `copilot_candidates_empty` |
+| `/admin/model-routing/{model}` | DELETE | 需要 | 清除整条规则（两段一起），回到默认顺序与不限定账户；`claude-*` 随之重新被 OpenAI 风格入口拒绝 |
 | `/admin/copilot/accounts` | GET | 需要 | Copilot 账户的启用态、已发现能力（capability）与允许模型；只返回账户名与模型名，不返回 token。启用态是**三态**：`enabled` 是生效值，`enabled_in_config` 是配置声明的初始态，`policy_configured` 表明运维是否真的决定过。请求数为进程内累计 |
 | `/admin/copilot/accounts/{account}` | PUT | 需要 | 切换账户启用态与允许模型。**只能在已发现 capability 内勾选**，空列表被拒（停用请用 `enabled: false`）；启用一个配置声明 inert、无 `models`、也从未发现过 capability 的账户返回 400 `capability_unknown`（启用即通配）；写失败时执行中的策略不变 |
 | `/admin/copilot/accounts/{account}/discover` | POST | 需要 | 向上游重新发现该账户的模型能力并存快照。时点发现，不是能力认证；需带 editor 头部，否则 GitHub 返 403 |
 | `/admin/api-keys` | GET | 需要 | 已激活密钥的**身份**与渠道限制：掩码 + sha256 前缀，**绝不返回明文**，短密钥连掩码都不给。请求数与最后使用时间是进程内计数，重启归零 |
 | `/admin/api-keys/{tenant}/providers` | PUT | 需要 | 设置该租户允许的后端 provider（allowlist，只做减法）。写失败时执行中的策略保持不变，不假装成功 |
+| `/admin/api-keys/{tenant}/providers` | DELETE | 需要 | 清除该租户的渠道限制，回到配置基线。PUT 不接受空集（那等于把租户锁在门外），所以这是唯一的反向操作；幂等，已无限制时也返回 200 |
 | `/admin/api-keys/reload` | POST | 需要 | 从 `CONFIG_PATH` 重读客户端密钥（同 `/admin/copilot/reload` 的模型：**源头轮换 + 网关重读**，网关不生成密钥）。校验在替换之前，坏配置不会把调用方锁在门外；`${ENV}` 值仍需滚动重启 |
 | `/config/effective` | GET | 需要 | 返回实际生效设置与构建身份，不用于公开版本展示 |
 | `/version` | GET | 不需要 | 有界公开构建标识：源码提交、GitHub 链接、运行文件匹配状态；无配置/凭据，不宣称 GitHub 最新状态 |

@@ -88,6 +88,30 @@ def ordered_providers(value) -> tuple:
     return tuple(items)
 
 
+def normalise_accounts(value) -> tuple:
+    """Validate a per-model account selection into a sorted set.
+
+    Empty (or None) is **accepted** and means "not limited" — the opposite of
+    `normalise_providers`, where empty would lock a tenant out. Here the empty
+    selection is the baseline, so rejecting it would leave the Dashboard with no
+    way to undo a limit.
+
+    Order is dropped because session affinity, not the operator, picks among the
+    selected accounts. A bare string is still rejected: it would iterate into
+    characters and silently select nothing that exists.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str) or not isinstance(value, (list, tuple, set, frozenset)):
+        raise ValueError('copilot_accounts must be a list of account names')
+    names = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError('copilot_accounts entries must be non-empty strings')
+        names.append(item.strip())
+    return tuple(sorted(set(names)))
+
+
 def fingerprint(key: str) -> str:
     return hashlib.sha256((key or '').encode()).hexdigest()[:12]
 
@@ -114,6 +138,7 @@ class KeyPolicyStore:
         self._policies: dict = {}
         self._accounts: dict = {}
         self._preferences: dict = {}
+        self._model_accounts: dict = {}
         self._state = 'unavailable'
         self._last_loaded_at: Optional[float] = None
         self._last_error_type: Optional[str] = None
@@ -147,6 +172,7 @@ class KeyPolicyStore:
                 loaded = await self._backend_load()
                 accounts = await self._backend_load_accounts()
                 preferences = await self._backend_load_preferences()
+                model_accounts = await self._backend_load_model_accounts()
         except Exception as exc:
             self._last_error_type = type(exc).__name__
             # Never loaded → no restriction; loaded before → keep enforcing it.
@@ -156,6 +182,7 @@ class KeyPolicyStore:
         self._policies = loaded
         self._accounts = accounts
         self._preferences = preferences
+        self._model_accounts = model_accounts
         self._state = 'loaded'
         self._last_loaded_at = time.time()
         self._last_error_type = None
@@ -181,6 +208,7 @@ class KeyPolicyStore:
             'tenants': len(self._policies),
             'accounts': len(self._accounts),
             'model_preferences': len(self._preferences),
+            'model_accounts': len(self._model_accounts),
             'last_loaded_at': self._last_loaded_at,
             'last_error_type': self._last_error_type,
             'unrestricted_when_unavailable': True,
@@ -215,6 +243,65 @@ class KeyPolicyStore:
             async with asyncio.timeout(IO_TIMEOUT):
                 await self._backend_delete_preference(model)
             self._preferences.pop(model, None)
+
+    # -- per-model Copilot account selection -----------------------------
+    #
+    # The reverse of `allowed_models`: that one says which models an account may
+    # serve, this one says which accounts a model may use. Both subtract, and the
+    # effective candidate set is their intersection.
+    #
+    # Order is *not* preserved here, unlike `model_preference`. Which of the
+    # selected accounts a request lands on is session affinity's decision, so an
+    # operator-visible ordering would be a promise this layer cannot keep.
+
+    def model_accounts(self, model: str) -> tuple:
+        """Accounts this model is limited to; empty means «not limited».
+
+        Same degradation rule as every other layer: an unloaded overlay yields
+        the config baseline, which here is "no limit".
+        """
+        if self._state == 'unavailable':
+            return ()
+        return tuple(self._model_accounts.get(model, ()))
+
+    def model_allows_account(self, model: str, account: str) -> bool:
+        chosen = self.model_accounts(model)
+        return not chosen or account in chosen
+
+    def model_accounts_snapshot(self) -> dict:
+        return {model: tuple(accounts) for model, accounts in self._model_accounts.items()}
+
+    async def set_model_accounts(self, model: str, accounts) -> tuple:
+        """Limit one model to a set of accounts; empty/None clears the limit.
+
+        Clearing has to mean "not limited" rather than "no account may serve
+        this": the Dashboard expresses the limit as checkboxes, so unchecking
+        the last one is the natural undo and must not remove the model instead.
+        """
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError('model must be a non-empty string')
+        key = model.strip()
+        selection = normalise_accounts(accounts)
+        async with self._lock:
+            async with asyncio.timeout(IO_TIMEOUT):
+                if selection:
+                    await self._backend_write_model_accounts(key, selection)
+                else:
+                    await self._backend_delete_model_accounts(key)
+            if selection:
+                self._model_accounts[key] = selection
+            else:
+                self._model_accounts.pop(key, None)
+            if self._state == 'unavailable':
+                self._state = 'loaded'
+                self._last_loaded_at = time.time()
+        return selection
+
+    async def clear_model_accounts(self, model: str) -> None:
+        async with self._lock:
+            async with asyncio.timeout(IO_TIMEOUT):
+                await self._backend_delete_model_accounts(model)
+            self._model_accounts.pop(model, None)
 
     # -- Copilot account enablement --------------------------------------
 
@@ -427,6 +514,52 @@ class KeyPolicyStore:
     def _preferences_path(self):
         return self._path.parent / 'model_provider_preference.json'
 
+    async def _backend_load_model_accounts(self) -> dict:
+        if self.backend == 'mysql':
+            await self._ensure_pool()
+            async with self._pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute('SELECT model, accounts FROM model_copilot_account')
+                    rows = await cur.fetchall()
+            return {row[0]: normalise_accounts(json.loads(row[1])) for row in rows}
+        if self.backend == 'json':
+            path = self._model_accounts_path()
+            if not path.exists():
+                return {}
+            raw = json.loads(path.read_text() or '{}')
+            return {model: normalise_accounts(value) for model, value in raw.items()}
+        return dict(self._model_accounts)
+
+    async def _backend_write_model_accounts(self, model: str, accounts: tuple) -> None:
+        if self.backend == 'mysql':
+            await self._ensure_pool()
+            async with self._pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        'INSERT INTO model_copilot_account (model, accounts) VALUES (%s, %s) '
+                        'ON DUPLICATE KEY UPDATE accounts = VALUES(accounts)',
+                        (model, json.dumps(list(accounts))))
+            return
+        if self.backend == 'json':
+            merged = {**self.model_accounts_snapshot(), model: accounts}
+            self._atomic_write_json(self._model_accounts_path(),
+                                    {m: list(a) for m, a in merged.items()})
+
+    async def _backend_delete_model_accounts(self, model: str) -> None:
+        if self.backend == 'mysql':
+            await self._ensure_pool()
+            async with self._pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute('DELETE FROM model_copilot_account WHERE model = %s', (model,))
+            return
+        if self.backend == 'json':
+            merged = {m: a for m, a in self.model_accounts_snapshot().items() if m != model}
+            self._atomic_write_json(self._model_accounts_path(),
+                                    {m: list(a) for m, a in merged.items()})
+
+    def _model_accounts_path(self):
+        return self._path.parent / 'model_copilot_account.json'
+
     async def _backend_load_accounts(self) -> dict:
         if self.backend == 'mysql':
             await self._ensure_pool()
@@ -586,6 +719,19 @@ class KeyPolicyStore:
                     CREATE TABLE IF NOT EXISTS model_provider_preference (
                         model VARCHAR(190) NOT NULL,
                         providers VARCHAR(255) NOT NULL,
+                        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        PRIMARY KEY (model)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                # Its own table rather than a column on model_provider_preference:
+                # that table already exists in production, so widening it would be
+                # a real ALTER. A new table is created lazily like every other one
+                # here, so this ships with no migration.
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS model_copilot_account (
+                        model VARCHAR(190) NOT NULL,
+                        -- 只存「限定到哪些账户」。空选择不落行 —— 删行就是回到基线。
+                        accounts TEXT NOT NULL,
                         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                         PRIMARY KEY (model)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
