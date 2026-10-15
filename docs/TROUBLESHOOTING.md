@@ -1012,3 +1012,93 @@ curl -s $LB/metrics | grep copilot_session_affinity_total
 
 亲和依赖客户端提供稳定会话键。若你的客户端不发 `prompt_cache_key`（`absent` 一直涨），它就拿不到
 亲和保护，只能靠恢复阶梯。这种情况下要么让客户端带上该字段，要么**保持单账户**。
+
+---
+
+## 19. Dashboard「密钥与渠道」页解锁不了
+
+### 症状
+
+页面显示「未配置面板密码，请改用 LB API Key 解锁」，或输了密码报「密码不正确」，
+或反复提示「尝试过于频繁」。
+
+### 真因与解决
+
+先问一下状态，这个端点**不需要凭据**，所以它永远答得上来：
+
+```bash
+curl -s https://lb.zeno.ink/admin/session | python3 -m json.tool
+```
+
+| `password_configured` | 含义 | 解决 |
+|---|---|---|
+| `false` | `LB_DASHBOARD_PASSWORD` 没配，**或配了但短于 12 个字符** | 见下方「长度陷阱」；也可直接用 LB API Key 解锁，那条回落路径一直可用 |
+| `true` 但密码被拒 | 密码确实不对，或首尾带了复制粘贴来的空白 | 用 `kubectl` 读回核对（Secret 的 `data` 只是 base64，不是加密） |
+
+**长度陷阱：`kubectl describe secret` 报的是字节数，而网关判的是字符数。**
+13 字节的纯 ASCII 密码是 13 个字符、合格；而同样 13 字节的中文密码只有 4 个字符，
+会被静默判为「未配置」，面板始终打不开。用网关自己的判据验：
+
+```bash
+kubectl -n zeno-apps get secret claude-lb-credential-key -o json \
+  | python3 -c "
+import base64, json, sys
+pw = base64.b64decode(json.load(sys.stdin)['data']['LB_DASHBOARD_PASSWORD']).decode()
+print('字符数:', len(pw), '(需 >= 12)  首尾空白:', pw != pw.strip())"
+```
+
+**「尝试过于频繁」是退避，不是故障。** 连续 5 次失败后按来源指数退避（30s 起翻倍、
+有上限），**退避期内正确密码也会被拒**且与错误密码返回同一个 code —— 这是有意的，
+否则响应就成了一个旁路的密码预言机。等 `Retry-After` 秒数即可；退避**只计密码路径**，
+所以此时 `x-api-key` 仍然照常可用，脚本不受影响。
+
+**改完密码要重启才生效**：它是启动时读的 env，`kubectl patch` 改 Secret 不会让运行中的
+Pod 看到新值。另外**会话是进程内的**，所以任何重启都会让已解锁的浏览器需要重新解锁，
+多副本之间也不共享（换 Pod 要重新解锁，这不是故障）。
+
+---
+
+## 20. 路由规则配了，但模型没走预期的 provider / 账户
+
+### 症状
+
+给某模型设了「GHCP 优先 + 指定账户」，实际仍落到 Foundry；或者该模型从 `/v1/models`
+里消失了；或者 Dashboard 的「生效候选」列显示**空**。
+
+### 真因
+
+候选是**五层叠加**的结果，不是单层决定的 —— 先读 [策略层总览](CONFIGURATION.md#policy-layers-overview)。
+最常见的三种：
+
+1. **选中的账户服务不了这个模型。** 账户选择只做减法，不会让账户获得它席位没有的
+   模型。选中的账户都不具备该模型时 GHCP 候选为空，请求按既有逻辑落到 Foundry ——
+   **这不是错误**，与那些账户全部熔断同效。Dashboard 保存后会给出警告，
+   响应里也有 `copilot_candidates_empty: true`。
+2. **provider 偏好只排序、不筛除。** 把 GHCP 提到最前不会阻止 Foundry 兜底；要真正
+   禁掉某个 provider，用 per-key 的渠道 allowlist（那一层才做减法）。
+3. **与 `allowed_models` 撞了。** 模型→账户 和 账户→允许模型 是同一件事的两个方向，
+   **取交集**，任一侧把这个组合排除掉就没有候选。两处都要看。
+
+### 排查
+
+一条命令看全五层的生效结果（`effective_copilot_accounts` 由服务端按 `supports()` 算出，
+客户端算不出来）：
+
+```bash
+curl -s https://lb.zeno.ink/admin/model-routing -H "x-api-key: $KEY" \
+  | python3 -c "
+import json, sys
+b = json.load(sys.stdin)
+print('默认顺序:', b['default_openai_order'])
+print('可选账户:', [(a['account'], a['enabled']) for a in b['copilot_accounts_available']])
+for p in b['preferences']:
+    print(f\"  {p['model']:24s} 顺序={p['effective_openai_order']} 限定={p['copilot_accounts'] or '不限定'}\"
+          f\" 生效候选={p['effective_copilot_accounts']}\" + ('  ← 空！' if p['copilot_candidates_empty'] else ''))
+print('策略存储:', {k: b['policy'].get(k) for k in ('state','backend','model_preferences','model_accounts','accounts')})"
+```
+
+`policy.state` 不是 `loaded` 时，**所有层都回落配置基线**（见
+[统一降级规则](CONFIGURATION.md#policy-degradation-config-is-the-baseline)）——
+此时「规则没生效」是预期行为，先修存储。
+
+**没有列出的模型维持原本规则**，这是设计而非遗漏：规则表只列有人显式配过的模型。

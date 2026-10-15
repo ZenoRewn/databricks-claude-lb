@@ -13,9 +13,15 @@ Python 3.11+，推荐 3.12；前端为独立 HTML、CSS 和原生 JavaScript，�
 | 请求与发送观测、安全诊断、阶段时间 | `request_telemetry.py`、`safe_diagnostics.py`、`request_timing.py` |
 | 协议结果、Chat 适配、上游错误体 | `response_semantics.py`、`chat_adapter.py`、`upstream_body.py` |
 | 参数与渠道能力 | `effort_compat.py`、`model_capabilities.py` |
+| 运行时策略存储（渠道 allowlist、模型偏好、模型→账户、账户启用与 allowed_models） | `key_policy.py` |
+| 上游凭据封装、存储与 device flow | `provider_credentials.py` |
+| 面板密码与会话（进程内，不落存储） | `main.py` 的 `PANEL_*` 段 |
 | 用量与 Copilot 估算 | `usage_store.py`、`copilot_pricing.py` |
+| 发布前的存储 schema 门控 | `release_probe.py` |
 | Dashboard 与构建身份 | `dashboard.html`、`build_metadata.py` |
 | 报告、实验、构建与受控发布 | `operations/` |
+
+策略层有五层、互相叠加，改动前先读 [策略层总览](CONFIGURATION.md#policy-layers-overview) —— 那里有「谁做减法、谁只排序、在哪收口」的地图。
 
 ## 回归
 
@@ -25,6 +31,19 @@ python -m pytest tests/ -q --tb=short
 node tests/test_copilot_pricing_ui.cjs
 node tests/test_dashboard_ui.cjs
 ```
+
+改策略或面板时，这几个文件是对应的回归入口：
+
+| 改了什么 | 对应测试 |
+|---|---|
+| 渠道 allowlist、降级规则 | `tests/test_key_policy.py`（`DegradationFallsBackToTheConfigBaselineTests` 横跨五层断言） |
+| provider 偏好、模型→账户、`/v1/models` 目录一致性 | `tests/test_model_routing.py` |
+| 账户启用三态、capability 与 `allowed_models` | `tests/test_copilot_accounts.py` |
+| 面板密码、会话 cookie、退避 | `tests/test_panel_session.py` |
+| 凭据封装、device flow | `tests/test_provider_credentials.py` |
+| 任何新路由或鉴权变更 | `tests/test_api_surface_contract.py`（双向核验 `CLAUDE.md` 的 API 表） |
+| 存储 schema | `tests/test_release_schema.py`（「不存在放行、存在严格匹配」） |
+| Dashboard 行为 | `tests/test_dashboard_ui.cjs`（按 `// ---------- X` 注释切片取 JS，改动要保留这些标记） |
 
 MySQL 的 opt-in 测试必须使用一次性隔离实例，不指向生产。发布工具的 Kind/中断/接管场景有独立环境与证据要求，见 [发布测试说明](../tests/release/README.md)。不为通过 CI 削弱协议、账本或退出码断言。
 
@@ -64,8 +83,43 @@ docker run --rm -p 127.0.0.1:8000:8000 \
 
 `.wheelhouse`、`.release-wheelhouse` 和 `.test-wheelhouse` 是被忽略的离线构建/测试输入。已有构建确实使用过这些目录，不能仅因体积大就当作无用文件删除。普通 Python/pytest 缓存可以再生；私有发布目录包含备份和恢复材料，保持独立、限权且不进入 Git。
 
+## 改动前值得知道的几处收口与约束
+
+都是真实踩过的，不是预防性清单。
+
+**给 Copilot 候选加条件只能改 `CopilotEndpoint.supports()`。** 它是唯一收口，
+`can_handle` / `supports_model` / `/models` 目录 / 会话亲和的「配置态合格集合」全走它。
+绕过去的后果见 [收口说明](CONFIGURATION.md#supports-is-the-choke-point) —— 目录曾因此
+宣传过一个实际没有候选的模型。
+
+**`CopilotEndpoint` 新字段要追加在 dataclass 末尾。** 文件里有一行既有注释写明了这点：
+插在中间会让 `main.CopilotEndpoint('name', '', 1, [], {...})` 这类位置参数构造静默错位，
+测试里就有这种写法。
+
+**新增运行时文件要同步三处并重建发布控制器镜像**：`build_metadata.RUNTIME_FILES`、
+`operations/release/model.APP_FILES`、`Dockerfile` 的 COPY。`model.py` 对 `APP_FILES`
+做**严格集合相等**校验，少一个多一个都会让发布红。只在 `main.py` 里加代码则不涉及这三处 ——
+这也是面板会话逻辑没有拆成独立模块的原因。
+
+**秘密不要进 `LB_SETTINGS`。** `/config/effective` 把整个 settings 字典返回给任何持有效
+key 的调用方。`LB_CREDENTIAL_KEY` 与 `LB_DASHBOARD_PASSWORD` 都是直接 `os.environ.get`，
+各自有测试断言它们不出现在该端点里。
+
+**长度下限判字符数，不是字节数。** 面板密码的 `len(pw) >= 12` 是 Python 字符数，而
+`kubectl describe secret` 报字节数；多字节密码可能看着够长却被判为未配置。
+排查入口见 [排障 19](TROUBLESHOOTING.md)。
+
+**新表用新表，别给既有表加列。** 生产里的策略表是惰性创建的，一旦存在，加列就是真迁移。
+`model_copilot_account` 之所以独立成表而不是挂到 `model_provider_preference` 上，就是
+为了零迁移。`release_probe.py` 对每张表沿用「不存在放行、存在则严格匹配」，加表要同步它。
+
 ## 文档维护
 
 README 只保留入口、快速开始和关键边界；操作细节归到对应指南，阶段证据归到 `docs/reviews/`。新增路由同步 [完整 API 表](../CLAUDE.md#api-端点)，已有测试会核对文档与真实路由及鉴权行为。
+
+API 表的「认证」列目前有**四种**取值，加路由时要选对：`需要`（有效 LB API Key）、
+`不需要`、`可选`（带了就必须有效、不带放行）、`密码`（凭据是面板密码而非 key）。
+`tests/test_api_surface_contract.py` 会对每种做行为核验 —— 把密码端点错标成「需要」，
+会让做安全复核的人以为轮换 API key 就能关掉那扇门。
 
 生产发布是独立验收层。已合并 GitHub、镜像构建通过、Pod Ready 和完整业务发布成功分别记录，参见 [AKS](AKS.md) 与 [发布流程](RELEASE_TOOL.md)。

@@ -87,6 +87,23 @@ class DocumentationLinkTests(unittest.TestCase):
                     missing.append(f'{path} -> {target}')
         self.assertEqual(missing, [], 'these documentation links point at nothing')
 
+    def test_no_explicit_anchor_is_declared_twice(self):
+        """A repeated id is invalid HTML and makes its links land anywhere.
+
+        Caught the hard way: an explicit anchor was added to a section that
+        already had one, and every link test still passed — resolution only
+        checks that the name exists, not that it is unique. So the duplicate
+        would have shipped, and which copy a browser jumps to is undefined.
+        """
+        duplicated = []
+        for path in self.files:
+            seen, repeats = set(), set()
+            for name in EXPLICIT_ANCHOR.findall(self.bodies[path]):
+                (repeats if name in seen else seen).add(name)
+            duplicated += [f'{path} -> #{name}' for name in sorted(repeats)]
+        self.assertEqual(duplicated, [],
+                         'these explicit anchors are declared more than once in one file')
+
     def test_every_same_file_anchor_resolves(self):
         broken = []
         for path in self.files:
