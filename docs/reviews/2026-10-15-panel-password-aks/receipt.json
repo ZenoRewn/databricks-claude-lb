@@ -1,0 +1,113 @@
+{
+  "author": "Zeno Ren",
+  "release_id": "lb-20261014-panel-password-db8845a",
+  "release_result": "succeeded",
+  "attempts": 1,
+  "source_revision": "db8845a1a4ef21feeac0183a666e7ed65b22a050",
+  "pull_requests": [38],
+  "previous_image": "sha256:f7555171c86b34d2c9aa9fcee4419e3f9da0822a4704ece53ef463222b82313c",
+  "previous_source_revision": "7229327412e0442d2f5f1daff9bccea9144f05a4",
+  "target_image": "sha256:c18dceeaec75dea4b04e54118c01f74acae7f46b0dc1859575303711738f961d",
+  "source_manifest_sha256": "66be8096316149e1e7653f33fee35c4e31973f707ce21539b6c7a300f737d9f8",
+  "plan_sha256": "f1b1489895eb4ed251bfe45a196ab0bb0a75e97a5ea522d65581499a09691369",
+  "snapshot_sha256": "9ede72b01caa559941727eebc120132970bdb1b07c1f3ca38dec662b70de3439",
+  "maintenance_started_at": 1792021925.4429967,
+  "maintenance_finished_at": 1792021976.1471994,
+  "maintenance_seconds": 50.704,
+  "maintenance_window_local": "2026-10-15 07:52:05.442-07:52:56.147 (UTC+8)",
+  "actions_verified": [
+    "preflight", "gate", "pause", "writer_termination", "stop_old",
+    "start_new", "verify_backend", "restore_routes", "verify_business", "cleanup"
+  ],
+  "cleanup_errors": [],
+  "server_dry_run_verified": true,
+  "business_probes": [
+    {"api": "messages", "model": "databricks-claude-opus-5", "stream": false, "completed": true, "marker_found": true},
+    {"api": "responses", "model": "gpt-5.4", "stream": true, "completed": true, "marker_found": true},
+    {"api": "chat", "model": "gpt-5.6-luna", "stream": true, "completed": true, "marker_found": true}
+  ],
+  "probe_model_choice": "databricks-claude-opus-5 rather than opus-5-5, which is intermittently capacity-limited upstream and caused the 2026-10-10 rollback when used as a mandatory gate",
+  "persistence_verified": true,
+  "usage_events_recorded": 3,
+  "two_step_release": {
+    "why": "the panel password has to reach the pod as an env var, and the release tool's plan deep-copies the live pod template — so the env must be in place before planning, which is itself a rollout",
+    "step_1": {
+      "action": "added LB_DASHBOARD_PASSWORD (secretKeyRef) to the deployment",
+      "method": "kubectl patch --type=json, after a server-side dry-run diff",
+      "generation_after": 124,
+      "image_unchanged": true,
+      "restart": "rolling, still on 7229327",
+      "verified_in_pod": "env present, 13 characters, LB_CREDENTIAL_KEY intact"
+    },
+    "step_2": {
+      "action": "release tool plan + submit to db8845a",
+      "generation_before": 124,
+      "snapshot_contained_the_new_env": true
+    }
+  },
+  "secret_handling": {
+    "object": "Secret/claude-lb-credential-key in zeno-apps",
+    "change": "added one key, LB_DASHBOARD_PASSWORD, by merge patch",
+    "why_this_secret": "its name is already in the controller Role's secrets.resourceNames, so no RBAC change was needed — the 2026-10-14 preflight 403 was exactly a missing resourceNames entry",
+    "controller_role_changed": false,
+    "controller_role_rechecked": true,
+    "existing_key_preserved": true,
+    "password_set_by": "operator, in their own terminal; the value never passed through the assistant",
+    "password_length_characters": 13,
+    "note": "Kubernetes Secret data is base64, not encryption, so the password is recoverable by anyone with read access to the namespace — the same trust boundary as LB_CREDENTIAL_KEY"
+  },
+  "post_release_state": {
+    "version_endpoint": "db8845a",
+    "source_verification": "matched",
+    "pod": "claude-lb-68f6b9978-695hc",
+    "pod_restarts": 0,
+    "health_accepting": 200,
+    "service_selectors_clean": true,
+    "admin_session_password_configured": true,
+    "admin_session_auth_methods": ["panel_password", "api_key"],
+    "session_ttl_seconds": 1800,
+    "databricks_endpoints_loaded": 9,
+    "azure_endpoints_loaded": 4,
+    "copilot_endpoints_loaded": 5,
+    "provider_policy": {"backend": "mysql", "state": "loaded", "tenants": 0},
+    "credential_store": {"backend": "mysql", "state": "loaded", "key": "present", "records": 0}
+  },
+  "login_verified_live": {
+    "method": "issued from inside the pod against the public URL, so the password never left the cluster",
+    "checks_passed": 21,
+    "cookie_attributes": ["HttpOnly", "SameSite=Strict", "Path=/admin", "Secure"],
+    "secure_present": "yes — the public ingress terminates TLS, so X-Forwarded-Proto is https",
+    "password_absent_from_response_body": true,
+    "token_absent_from_response_body": true,
+    "cookie_alone_authorises_all_four_sections": true,
+    "wrong_password_401_and_sets_no_cookie": true,
+    "logout_closes_admin_again": true,
+    "api_key_fallback_also_mints_a_session": true
+  },
+  "schema_unchanged": "model_copilot_account already existed from the previous release; this batch creates no table and alters no column",
+  "build": {
+    "platform": "linux/amd64",
+    "dependency_stage": "dependencies-offline",
+    "source_tree_dirty": false,
+    "out_of_tree": false,
+    "source_attested_in_image": true,
+    "runtime_files": 23,
+    "new_dependencies": [],
+    "controller_image_rebuilt": false,
+    "controller_rebuild_not_needed": "operations/ and the APP_FILES set are unchanged since 7229327"
+  },
+  "operator_errors_this_run": [
+    "The private release notes said this Deployment is not apply-managed and prescribed a JSON patch. It IS apply-managed. The prescribed command was right but the stated reason was wrong, and acting on the reason would have been worse: its last-applied-configuration is badly stale (image 2f6fa30-full, env []), so the 'rebuild from last-applied and apply' technique used on the Role two days earlier would have rolled the image back to an ancient tag, wiped every env var, and reset the probes. Caught by diffing last-applied against live before touching anything.",
+    "The password-setting command was written with bash's `read -rsp`; this shell is zsh, where -p means 'read from coprocess' and the command fails. Replaced with a stty form verified under both shells.",
+    "The secret-verification command used `-o jsonpath='{range $k,$v := .data}…'`, which this kubectl silently prints as empty for a map — it briefly looked as though the Secret had no keys at all. `kubectl describe secret` is the right tool: it reports byte counts and no values."
+  ],
+  "verification_caveat": "A Secret's byte count is not its character count, and the gateway's minimum is on characters. 13 bytes here happened to be 13 ASCII characters; a multi-byte password of the same byte length could have been under the floor and silently treated as unconfigured. Checked explicitly against the gateway's own _panel_password().",
+  "routing_behaviour_changed": false,
+  "outstanding": [
+    "Freezing the routing decision at request admission is still not implemented.",
+    "Azure Foundry credentials still return 401 on every path; the credentials themselves need replacing. Deferred by the operator.",
+    "The four Copilot accounts remain loaded and inert. Deferred by the operator.",
+    "Panel sessions are process-local, so a restart or a second replica means re-unlocking. Acceptable at one replica; worth revisiting before scaling out.",
+    "Copilot price refresh logged a ValueError and retained the previous prices. Pre-existing fail-safe behaviour, not investigated."
+  ]
+}
