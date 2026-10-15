@@ -13,6 +13,18 @@ Author: Zeno Ren
 | 开发、测试、Dashboard 预览与镜像 | [开发指南](DEVELOPMENT.md) |
 | API 与鉴权完整清单 | [接口表](../CLAUDE.md#api-端点) |
 
+## 运维面（Dashboard「密钥与渠道」页）
+
+| 要做的事 | 文档 |
+|---|---|
+| 解锁这一页（面板密码、会话 cookie、退避与回落） | [解锁契约](CONFIGURATION.md#dashboard-unlock-contract) |
+| 五层策略怎么叠加、谁做减法、在哪收口 | [策略层总览](CONFIGURATION.md#policy-layers-overview) |
+| 配「模型 → Provider → GHCP 账户」规则 | [路由规则](CONFIGURATION.md#routing-rules) |
+| 按密钥限渠道、以及怎么重置回基线 | [渠道限制](CONFIGURATION.md#per-key-provider-allowlist) |
+| GHCP 账户先落地、确认后再启用 | [三态启用](CONFIGURATION.md#ship-inert-then-enable) |
+| 录入上游凭据与 GHCP device flow | [凭据录入](CONFIGURATION.md#entering-upstream-credentials) |
+| 解锁不了 / 规则不生效 | [排障 19 与 20](TROUBLESHOOTING.md) |
+
 ## 当前行为与运行
 
 | 主题 | 文档 |

@@ -10,6 +10,51 @@ Author: Zeno Ren
 
 上游凭据可使用环境变量或已有 Secret 挂载。在现有 AKS 中改凭据来源、挂载路径或 `envFrom` 必须核对现场配置，不能只复制示例的一半。见 [AKS 指南](AKS.md)。
 
+<a id="policy-layers-overview"></a>
+
+### 策略层总览：五层，谁做减法、谁只排序、在哪收口
+
+运行时策略有五层，都存在用量库里、都叠在配置之上。**改任何一层之前先看清这张表**，
+因为「为什么这个模型不走这个账户」几乎总是多层叠加的结果，而不是某一层单独的锅。
+
+| 层 | 粒度 | 作用 | 存储 | 读取函数 |
+|---|---|---|---|---|
+| 渠道 allowlist | per-key（租户） | **减法**：移除 provider 候选 | `api_key_policy` | `allowed(tenant)` |
+| provider 优先序 | per-model | **只排序，不减** | `model_provider_preference` | `model_preference(model)` |
+| GHCP 账户选择 | per-model | **减法**：限定该模型用哪些账户 | `model_copilot_account` | `model_allows_account(model, account)` |
+| `allowed_models` | per-account | **减法**：限定该账户服务哪些模型 | `copilot_account_policy` | `account_allows(account, model)` |
+| 账户启用态 | per-account | **三态开关** | 同上（`enabled` 可空列） | `account_policy(account)` |
+
+两条容易混淆的边界：
+
+- **第 2 层只排序。** 它把列出的 provider 提前、未列出的按默认顺序接在后面，
+  **fallback 永不丢失**。provider 维度的减法只有第 1 层做。
+- **第 3 层是减法，但筛的是「同一 provider 内的哪个账户」**，不是哪个 provider。
+  所以它与上一条不冲突，provider 级 fallback 不受影响。
+
+第 3、4 层是同一件事的两个方向（模型→账户 / 账户→模型），**取交集**：任一侧成立
+即移出候选。排查某账户为何不接某模型时两处都要看 —— Dashboard 路由规则表的
+「生效候选」列就是为此存在，它由服务端算出，客户端算不出来。
+
+<a id="supports-is-the-choke-point"></a>
+
+#### 收口在 `CopilotEndpoint.supports()`
+
+第 3、4、5 层**全部**在 `main.py` 的 `CopilotEndpoint.supports()` 里生效，加上 config
+自己的 `models` 列表与 `api_types`。新增任何 Copilot 候选条件都必须加在那里，
+原因不是整洁而是正确性：
+
+- `supports()` 是所有候选判断的**唯一**入口，包括会话亲和用的「配置态合格集合」
+  （`main.py` 的 `_select_endpoint`）。漏掉亲和那一处，会在某个账户回落时把
+  **所有**会话重新洗牌，而不只是原本落在它上面的那些。
+- `can_handle()` / `supports_model()` / `/models` 目录都走它。**2026-10-14 的一个真实缺陷
+  就出在这里**：`_collect_model_catalog` 当时直接问 `account_allows` 而不是过
+  `supports()`，于是目录继续宣传一个「唯一被选中的账户根本服务不了」的模型 ——
+  客户端选了就路由失败。回归断言在 `tests/test_model_routing.py` 的
+  `test_the_model_catalogue_follows_the_selection` 与 `…_a_wildcard_endpoint_also_honours…`。
+
+所以：**要给候选加条件，改 `supports()`；要读候选，问 `supports()`。** 两边都不要绕。
+
 <a id="policy-degradation-config-is-the-baseline"></a>
 
 ### 策略降级：配置是基线，存储是 overlay
@@ -59,6 +104,8 @@ DELETE /admin/session                         → 服务端失效 + 清浏览器
 这一页在入口层已由 oauth2-proxy 保护（`lb.zeno.ink/stats*`，限定单个 Google 账号），但 `/admin/*` 走的是另一个没有 OAuth 的 ingress —— 所以凭据仍然必要，不能把「页面已登录」当作授权。
 
 **上游凭据不在此列。** `credSecret` 保持提交后立即清除的单次请求契约 —— 会话是便利，上游凭据是秘密。
+
+<a id="per-key-provider-allowlist"></a>
 
 ### 按密钥限制后端渠道
 
@@ -110,6 +157,8 @@ Claude 模型使用 `/v1/messages`。在 OpenAI 风格入口传入 Claude 模型
 
 目录里的模型必须至少能被 `MODEL_PRICING` 或 `copilot_pricing` 之一计价，否则成本会静默漏统计。两张表分工不同：前者是公开 API 价（历史/通用口径），后者是 Copilot 官方分档价并用于实时估算，所以 Copilot 专属模型（如 grok、mai-code）只在后者有价，不应为其臆造公开 API 价。
 
+<a id="entering-upstream-credentials"></a>
+
 ### 录入上游凭据（ADB / Foundry / GHCP）
 
 三个 provider 都可以由运维录入认证信息；GHCP 另外支持由网关驱动 GitHub device flow。入口是 `/admin/credentials/*` 或 Dashboard「密钥与渠道」页。
@@ -137,6 +186,8 @@ Claude 模型使用 `/v1/messages`。在 OpenAI 风格入口传入 Claude 模型
 **生效需一次滚动重启。** 端点仍在启动时统一构建，来源是「配置 + 已存凭据」两处；运行时增删端点会重洗会话亲和哈希并打乱账户 pinning，是有意避开的。Dashboard 会标出哪些凭据尚未生效。与配置中已声明的端点同名会被拒（409），不允许静默遮蔽。
 
 device flow 的 `device_code` 只存在进程内并带 TTL，不落库、不进日志、不出现在响应里；`authorization_pending` 是正常中间态而非错误。发布预检会校验 `provider_credential` 的列与主键，表不存在时放行。
+
+<a id="routing-rules"></a>
 
 ### 路由规则：模型 → Provider → GHCP 账户
 
@@ -190,6 +241,8 @@ device flow 的 `device_code` 只存在进程内并带 TTL，不落库、不进�
 有效可用集 = `capability ∩ allowed_models`。capability 本身就是外层边界：上游说某账户没有该模型时，路由过去没有意义，所以即使没设 allowlist 也不会落过去。从未发现过 capability（空）时不据此限制，避免把「还没发现」当成「什么都没有」。写入时超出 capability 的模型被拒，所以**不可能**把账户配成服务它没有的模型。
 
 停用账户用启用开关，不要靠清空勾选 —— 空列表会被拒，否则两种语义会混淆。
+
+<a id="ship-inert-then-enable"></a>
 
 #### 先落地、确认后再启用
 

@@ -72,6 +72,8 @@ OpenAI 兼容客户端使用 `http://127.0.0.1:8000/v1`，API Key 同样使用�
 
 按渠道查看主要指标、模型分布、端点状态和连接池观测；历史页展示持久化用量。支持深浅主题、暂停/手动刷新、明确的失败提示和需要鉴权确认的数据维护。
 
+「密钥与渠道」页是运维面：客户端密钥身份与渠道限制、**模型 → Provider → GHCP 账户的三段式路由规则**、GHCP 账户的启用与能力勾选、上游凭据录入（含网关驱动的 GitHub device flow）。解锁用一个独立于 API Key 的面板密码（`LB_DASHBOARD_PASSWORD`），换到 HttpOnly 会话 cookie 之后**页面脚本不持有任何凭据**；未配置密码时回落到用 API Key 解锁，但同样换成会话。契约与边界见 [解锁契约](docs/CONFIGURATION.md#dashboard-unlock-contract)，策略叠加关系见 [策略层总览](docs/CONFIGURATION.md#policy-layers-overview)。
+
 ![Dashboard 桌面预览，合成数据](docs/reviews/2026-09-30-chart-usage-review/dashboard-light.jpg)
 
 *图片为本地合成数据预览，不是生产流量或性能证据。*
