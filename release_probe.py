@@ -88,6 +88,12 @@ async def check_schema(storage):
             model_account_indexes={}
             for index,column in await cur.fetchall():model_account_indexes.setdefault(index,[]).append(column)
             schema['model_account_unique_indexes']=model_account_indexes
+            await cur.execute("SELECT COLUMN_NAME,DATA_TYPE,IS_NULLABLE,CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='panel_password'")
+            schema['panel_password_columns']={row[0]:list(row[1:]) for row in await cur.fetchall()}
+            await cur.execute("SELECT INDEX_NAME,COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='panel_password' AND NON_UNIQUE=0 ORDER BY INDEX_NAME,SEQ_IN_INDEX")
+            panel_indexes={}
+            for index,column in await cur.fetchall():panel_indexes.setdefault(index,[]).append(column)
+            schema['panel_password_unique_indexes']=panel_indexes
             await cur.execute("SELECT COLUMN_NAME,DATA_TYPE,IS_NULLABLE,CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='provider_credential'")
             schema['credential_columns']={row[0]:list(row[1:]) for row in await cur.fetchall()}
             await cur.execute("SELECT INDEX_NAME,COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='provider_credential' AND NON_UNIQUE=0 ORDER BY INDEX_NAME,SEQ_IN_INDEX")
@@ -144,6 +150,16 @@ def validate_schema(schema):
         if schema['model_account_columns']!=expected:raise ValueError('model_account_schema_columns_mismatch')
         if schema.get('model_account_unique_indexes')!={'PRIMARY':['model']}:
             raise ValueError('model_account_schema_unique_keys_mismatch')
+    # One row pinned to id 1, holding a one-way verifier (never the password and
+    # never recoverable ciphertext). A lost primary key would let two rows exist
+    # and make which verifier wins depend on row order — i.e. which password
+    # opens the panel.
+    if schema.get('panel_password_columns'):
+        expected={'id':['tinyint','NO',None],'verifier':['varchar','NO',255],
+                  'updated_at':['timestamp','NO',None]}
+        if schema['panel_password_columns']!=expected:raise ValueError('panel_password_schema_columns_mismatch')
+        if schema.get('panel_password_unique_indexes')!={'PRIMARY':['id']}:
+            raise ValueError('panel_password_schema_unique_keys_mismatch')
     # Credential rows hold sealed upstream secrets; a silently widened column or a
     # lost primary key would change which record a request resolves to.
     if schema.get('credential_columns'):

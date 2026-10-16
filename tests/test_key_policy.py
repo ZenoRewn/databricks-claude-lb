@@ -393,5 +393,87 @@ class DegradationFallsBackToTheConfigBaselineTests(unittest.IsolatedAsyncioTestC
         self.assertEqual(self.store.status()['state'], 'unavailable')
 
 
+class ExclusionReasonTests(unittest.IsolatedAsyncioTestCase):
+    """The booleans must be derived from the reasons, not computed beside them.
+
+    The Dashboard has to answer «why is this account not receiving traffic for
+    this model», and the only honest source for that is the same code that
+    decides candidacy. Two implementations would drift, and the one that drifts
+    is the diagnostic — which is worse than having none, because it would be
+    believed. So the reason reader is primary and `account_allows` /
+    `model_allows_account` delegate to it; these tests pin the delegation.
+    """
+
+    async def asyncSetUp(self):
+        self.store = key_policy.KeyPolicyStore(None)
+        await self.store.start()
+
+    async def test_no_record_at_all_excludes_nothing(self):
+        self.assertIsNone(self.store.account_exclusion_reason('ghost', 'gpt-4o'))
+        self.assertIsNone(self.store.model_accounts_exclusion_reason('gpt-4o', 'ghost'))
+
+    async def test_a_disabled_account_names_its_own_layer(self):
+        await self.store.set_account('acct', enabled=False)
+        self.assertEqual(self.store.account_exclusion_reason('acct', 'gpt-4o'),
+                         'account_disabled')
+
+    async def test_a_model_outside_capability_is_not_confused_with_operator_intent(self):
+        # capability is upstream fact; allowed_models is operator intent. Telling
+        # them apart is the whole point — one is fixed by refreshing, the other
+        # by changing a checkbox.
+        await self.store.set_account_capability('acct', ('gpt-4o',))
+        self.assertEqual(self.store.account_exclusion_reason('acct', 'kimi-k3'),
+                         'not_in_capability')
+        await self.store.set_account('acct', allowed_models=['gpt-4o'])
+        self.assertIsNone(self.store.account_exclusion_reason('acct', 'gpt-4o'))
+
+    async def test_allowed_models_reports_the_account_side_intent(self):
+        await self.store.set_account_capability('acct', ('gpt-4o', 'gpt-5'))
+        await self.store.set_account('acct', allowed_models=['gpt-4o'])
+        self.assertEqual(self.store.account_exclusion_reason('acct', 'gpt-5'),
+                         'excluded_by_allowed_models')
+
+    async def test_a_model_limited_to_other_accounts_reports_the_model_side_intent(self):
+        await self.store.set_model_accounts('gpt-4o', ['acct-a'])
+        self.assertEqual(self.store.model_accounts_exclusion_reason('gpt-4o', 'acct-b'),
+                         'not_selected_for_model')
+        self.assertIsNone(self.store.model_accounts_exclusion_reason('gpt-4o', 'acct-a'))
+
+    async def test_an_unloaded_store_reports_no_reason_because_it_enforces_nothing(self):
+        await self.store.set_account('acct', enabled=False)
+        await self.store.set_model_accounts('gpt-4o', ['acct-a'])
+        self.store._state = 'unavailable'
+        self.assertIsNone(self.store.account_exclusion_reason('acct', 'gpt-4o'))
+        self.assertIsNone(self.store.model_accounts_exclusion_reason('gpt-4o', 'acct-b'))
+
+    async def test_the_booleans_agree_with_the_reasons_across_every_combination(self):
+        """The anti-drift guard. If these ever disagree the diagnostic lies."""
+        await self.store.set_account_capability('capped', ('gpt-4o', 'gpt-5'))
+        await self.store.set_account('capped', allowed_models=['gpt-4o'])
+        await self.store.set_account('off', enabled=False)
+        await self.store.set_account_capability('open', ())
+        await self.store.set_model_accounts('gpt-4o', ['capped'])
+        await self.store.set_model_accounts('kimi-k3', ['ghost'])
+        for state in ('loaded', 'stale', 'unavailable'):
+            self.store._state = state
+            for account in ('capped', 'off', 'open', 'never-seen'):
+                for model in ('gpt-4o', 'gpt-5', 'kimi-k3', 'brand-new'):
+                    with self.subTest(state=state, account=account, model=model):
+                        self.assertEqual(
+                            self.store.account_allows(account, model),
+                            self.store.account_exclusion_reason(account, model) is None)
+                        self.assertEqual(
+                            self.store.model_allows_account(model, account),
+                            self.store.model_accounts_exclusion_reason(model, account) is None)
+
+    async def test_every_reason_is_in_the_documented_closed_set(self):
+        # A free-text reason would be unusable in the UI and untestable here.
+        # CLAUDE.md and docs/CONFIGURATION.md publish this set.
+        self.assertEqual(key_policy.EXCLUSION_REASONS, {
+            'account_disabled', 'not_in_capability', 'excluded_by_allowed_models',
+            'not_selected_for_model',
+        })
+
+
 if __name__ == '__main__':
     unittest.main()

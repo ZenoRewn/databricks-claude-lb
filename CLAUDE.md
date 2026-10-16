@@ -8,7 +8,9 @@ Author: Zeno Ren
 
 - 推理 POST 的执行状态不明、已输出内容或可能产生工具副作用时，不自动重放；不能通过重新推理补账。见 [可靠性契约](docs/RESILIENCE.md)。
 - 保留 provider/model 兼容性、账户 pinning 和会话亲和。默认 Copilot 优先；仅明确未准入或不支持模型等既有分支允许 Azure fallback，不能泛化成任意 503 后重试。per-model 优先序可以**重排**这两个 provider（`/admin/model-routing`），但只重排不筛除，fallback 必须保留；provider 维度的筛除是 per-key allowlist 的职责。
-- per-model 的 **GHCP 账户选择**（`/admin/model-routing/{model}` 的 `copilot_accounts`）筛的是**同一 provider 内的哪个账户**，不是哪个 provider —— 所以它是筛除，却不与上一条冲突，provider 级 fallback 完全不受影响。它与 per-account 的 `allowed_models` 是**交集**：前者把账户从模型上摘掉，后者把模型从账户上摘掉，任一侧成立即移出候选。排查某账户为何不接流量时两处都要看。选中的账户恰好都服务不了该模型时 Copilot 候选为空，请求落到 Azure —— 与那些账户全部熔断同效，不是错误。筛选只能加在 `CopilotEndpoint.supports()`：那是所有候选判断的唯一收口，含会话亲和用的「配置态合格集合」，漏掉亲和那一处会在回落时把所有会话重新洗牌。
+- per-model 的 **GHCP 账户选择**（`/admin/model-routing/{model}` 的 `copilot_accounts`）筛的是**同一 provider 内的哪个账户**，不是哪个 provider —— 所以它是筛除，却不与上一条冲突，provider 级 fallback 完全不受影响。它与 per-account 的 `allowed_models` 是**交集**：前者把账户从模型上摘掉，后者把模型从账户上摘掉，任一侧成立即移出候选。排查某账户为何不接流量时两处都要看。选中的账户恰好都服务不了该模型时 Copilot 候选为空，请求落到 Azure —— 与那些账户全部熔断同效，不是错误。筛选只能加在 `CopilotEndpoint.supports()`：那是所有候选判断的唯一收口，含会话亲和用的「配置态合格集合」，漏掉亲和那一处会在回落时把所有会话重新洗牌。条件本体住在 `_copilot_support_reason()` 里，`supports()` 退化成「没有排除原因」—— 收口没变，新条件仍然只能加在那个函数里。
+- **「为什么不接流量」的答案与候选判断是同一份代码。** Dashboard 要说出是哪一层摘掉了某个账户，而那个解释一旦与判断分成两份实现必然漂移，漂移的那份恰好是被人当真的诊断 —— 比没有诊断更糟。所以 reason 是主实现、布尔是派生：`supports()` ≡ `_copilot_support_reason(...) is None`，`key_policy.account_allows` / `model_allows_account` 同样委托给各自的 reason 读者。原因是**闭集**（`main.COPILOT_EXCLUSION_REASONS`），不是自由文本，否则 UI 无从分支、测试无从断言。两处分别必须保留：`not_in_capability` 是上游事实（修法是重新发现），`excluded_by_allowed_models` 是运维意图（修法是改勾选）；`account_disabled`（有人关过）与 `account_never_enabled`（从没开过）同理。**`capability_unknown` 不在这个集合里**：没发现过能力的账户服务所有模型，那是通配警告而不是排除原因，由 `capability_known` 单独表达。reason 与 capability 一样是**时点**判断，不是能力认证。
+- **「已启用」与「实际接流量」是两个状态。** 账户可以开着却一个模型都服务不了 —— 因为另一层（per-model 账户选择）把它从每个已知模型上摘掉了。`/admin/copilot/accounts` 的 `receiving_traffic` / `serves_models` 单独报这件事，计数口径是「时点目录 ∪ 已发现能力」而不是「世上所有模型」。只显示启用开关会让人读成「开着就是在用」。
 - `claude-*` 默认只走 Databricks 的 `/v1/messages`。**例外是逐模型 opt-in**：给某个 claude 模型显式配置指向 Copilot/Azure 的优先序后，该模型在 OpenAI 风格入口放行（Copilot 原生服务其 Responses/Chat 形状）。没配就保持 400，既有行为不变。`/v1/messages` 仍然只走 Databricks —— 从 Copilot 提供 Anthropic Messages 协议需要双向适配器，本仓库只有解析没有合成。
 - **上游凭据可以由运维录入并持久化，但只以封装形式存储。** 这是对早先「网关从不存储凭据」的有意变更：AKS 上 Secret 挂载与 config 都是只读，应用 SA 无 secret 写权限，用量库是唯一可写的持久存储。AES-256-GCM，密钥取自 `LB_CREDENTIAL_KEY`（留在 Secret、不入库），每条独立 nonce，`provider|account` 作为 AAD 绑定行身份。**未配密钥时录入功能整体不可用（503），绝不退化为存明文。** 任何端点都不返回明文或密文。加密没有消除风险：运行进程内存里有明文，密钥丢失则凭据不可恢复。
 - 凭据**录入时即向上游校验**，不通过不入库；端点仍在**启动时**统一构建（配置 + 已存凭据两个来源），所以新录入需一次滚动重启才生效。不做运行时增删端点 —— 那会重洗会话亲和哈希并打乱账户 pinning。
@@ -20,6 +22,8 @@ Author: Zeno Ren
 - Dashboard 的未知费用保持未知，部分计价保留已知小计。Copilot 实时估算采用 [GHCP 价格口径](docs/COPILOT_PRICING.md)，历史参考价不能混称实际渠道账单。
 - Dashboard 保持独立 HTML 资产，不引入前端框架构建依赖。UI 与发布文件清单一起核验；运行版本来自构建元数据，不从当前 Git 分支或硬编码推断。
 - **「密钥与渠道」页的页面脚本不持有任何凭据。** 解锁是把面板密码（`LB_DASHBOARD_PASSWORD`）或一个有效 API Key 换成 **HttpOnly 会话 cookie**，此后由浏览器携带，脚本读不到也就偷不走 —— 这比早先把 key 放在闭包变量里更强，不是只为省事。会话是服务端进程内的 30 分钟滑动窗口，重启全失效，锁定时**服务端一并失效**（只清浏览器那份会留下一个仍可用的会话）。刷新页面保留会话，这正是目的：过去刷新就等于重输。两条入口都换成同一种会话，所以「脚本不持凭据」在回落到 API Key 时同样成立。未配密码或密码短于 12 字符时面板登录整体不可用，**绝不退化为无密码放行** —— `/admin/*` 由没有 OAuth 的那个 ingress 提供，对公网可达。密码按来源指数退避（5 次后 30s 起翻倍、有上限），退避期内**正确密码也拒**且不区分原因，否则它就成了一个旁路的密码预言机；退避只计密码路径，让它挡住高熵的 API Key 等于把猜测攻击变成自伤。**上游凭据（`credSecret`）仍是单次请求后立即清除** —— 会话是便利，那个是秘密。
+- **锁定态是「内容不渲染」，不是「内容模糊」。** 被门禁的那一整块用 `hidden`（`display:none`），因此同时退出 tab 序与无障碍树。纯 CSS 模糊**不是门禁** —— 模糊后的内容仍可 Tab 到、仍被屏幕阅读器完整朗读；而最常见的补救「给外层加 `aria-hidden`」本身是 WCAG 4.1.2 Level A 失败（axe `aria-hidden-focus`，容器含可聚焦控件）。毛玻璃只是解锁卡片自身的观感，不拿它冒充门禁；这一块也不标 `aria-modal`，它是页面区域而不是对话框。
+- **面板密码存的是单向验证器，不是密码。** 上游凭据必须可重放给上游所以用 AES 封装；面板密码只需要**验证**，所以存 PBKDF2-SHA256（算法与迭代数随哈希一起存，调成本不作废旧记录），**即使 `LB_CREDENTIAL_KEY` 泄露也推不出密码**，且这条路径不依赖那把密钥。代价写明：**忘记即不可恢复**，回头路是用一把有效 LB API Key 解锁后重设。优先级沿用那条降级规则：存储是 overlay、`LB_DASHBOARD_PASSWORD` 是基线，overlay 缺失或未加载回落 env，**两者都没有则登录整体不可用而不是放行**。PBKDF2 是同步 CPU 操作，必须 `asyncio.to_thread`，否则阻塞事件循环。**策略存储只在启动时加载**，所以多副本下页内改密码只对当前副本即时生效，其余副本重启前仍认 env 里的旧密码 —— 改完要同步 Secret 再滚动重启。
 
 ## 验证入口
 
@@ -56,6 +60,8 @@ Copilot 的 opaque-state 拒绝是请求级问题，不应污染账户熔断；�
 | `/admin/session` | GET | **不需要** | 面板会话状态：`authenticated` / `expires_in` / `password_configured` / `auth_methods`。**故意不鉴权** —— 这是 Dashboard 加载后的第一个请求，用来回答「要不要登录、怎么登录」，要求凭据才能问这个问题是循环的。只回布尔与秒数，不回显密码或 token |
 | `/admin/session` | POST | **密码** | 第四种鉴权模式：凭据是 `LB_DASHBOARD_PASSWORD` 而**不是** API key，所以带错 key 不会 401，而没有正确密码绝不放行。成功则下发 HttpOnly 会话 cookie（`SameSite=Strict`、`Path=/admin`、30 分钟滑动窗口，`Secure` 仅 https）。未配密码或密码短于 12 字符时 503；连续失败 5 次后按 IP 指数退避，退避期内**正确密码也拒**且不区分原因（否则它就成了一个旁路的密码预言机）。响应体不含 token |
 | `/admin/session` | DELETE | 不需要 | 登出。标「不需要」是准确的：它只清调用方自己的 cookie 与对应的服务端条目，无凭据时是 no-op 并返回 200（幂等的「确保已登出」），既不泄露信息也不影响他人会话 |
+| `/admin/panel-password` | PUT | 需要 | 设置或更改面板密码。存的是 **PBKDF2-SHA256 单向验证器**，不是密码也不是可解开的密文 —— 所以**忘记即不可恢复**（回头路是用一把有效 LB API Key 重设），且不依赖 `LB_CREDENTIAL_KEY`。除会话外还要**出示当前密码**（会话可能是 API Key 换来的，不证明知道密码）或一把有效 key；错误的当前密码走登录那同一套按来源退避，否则这里就是绕过退避的猜测通道。新密码下限 12 个**字符**（非字节）。成功后**失效其他会话**、保留调用方自己的。响应与日志都不回显密码或验证器 |
+| `/admin/panel-password` | DELETE | 需要 | 清除存储的密码，回落 `LB_DASHBOARD_PASSWORD` 基线。与「重置渠道限制」同形：overlay 只能被显式删除。env 也没配时面板登录随之整体不可用 —— 那是正确结果，不是故障 |
 | `/admin/model-capabilities` | GET | 需要 | 渠道/模型/API 能力目录、来源与有效期；未验证或过期能力不自动变成硬限额 |
 | `/admin/credentials` | GET | 需要 | 已录入上游凭据的**身份**与校验结果；不返回明文也不返回密文，并标明哪些尚未生效 |
 | `/admin/credentials/{provider}/{account}` | PUT | 需要 | 录入凭据：**先向上游校验，通过才封装入库**。与配置同名的 account 返回 409，不允许静默遮蔽；未配 `LB_CREDENTIAL_KEY` 时 503 |
@@ -64,6 +70,7 @@ Copilot 的 opaque-state 拒绝是请求级问题，不应污染账户熔断；�
 | `/admin/credentials/copilot/device/start` | POST | 需要 | 启动 GitHub device flow，返回验证码与授权链接；`device_code` 只留进程内，不落库不进日志不进响应 |
 | `/admin/credentials/copilot/device/poll` | POST | 需要 | 轮询一次；`authorization_pending` 是正常中间态，拿到 token 后先校验再入库 |
 | `/admin/model-routing` | GET | 需要 | per-model 规则的三段（provider 优先序、生效顺序、GHCP 账户选择），外加两个下拉的数据源（`known_models`、`copilot_accounts_available`） |
+| `/admin/model-routing/{model}` | GET | 需要 | **候选诊断**：一个模型、每个账户、各自被哪一层摘掉。每行给 `reason`（闭集，`null` = 在候选里）、`selected`、`serves_model`，以及 `serves_model_ignoring_selection`（「若选上它能服务吗」，让 Dashboard 在**保存前**算出生效候选）。列出全部已配置账户而不只是候选 —— 被摘掉的那几行正是要看的。reason 取自 `CopilotEndpoint.supports()` 背后同一个函数，不是另写一份判断；与 capability 一样是**时点**判断，不是能力认证。`capability_known: false` 是通配警告而**不是**排除原因 |
 | `/admin/model-routing/{model}` | PUT | 需要 | 设置规则。`providers`（**顺序即偏好**，不去重不重排）只重排不筛除，fallback 保留；给 `claude-*` 配指向 Copilot/Azure 的偏好会在 OpenAI 风格入口放行该模型。`copilot_accounts` 把该模型限定到指定 GHCP 账户（空/`null` = 不限定），名字不是已配置端点返回 400 `unknown_copilot_account`。**两段都在任何写入之前校验**，不会半应用；响应带 `effective_copilot_accounts` 与 `copilot_candidates_empty` |
 | `/admin/model-routing/{model}` | DELETE | 需要 | 清除整条规则（两段一起），回到默认顺序与不限定账户；`claude-*` 随之重新被 OpenAI 风格入口拒绝 |
 | `/admin/copilot/accounts` | GET | 需要 | Copilot 账户的启用态、已发现能力（capability）与允许模型；只返回账户名与模型名，不返回 token。启用态是**三态**：`enabled` 是生效值，`enabled_in_config` 是配置声明的初始态，`policy_configured` 表明运维是否真的决定过。请求数为进程内累计 |

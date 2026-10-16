@@ -30,7 +30,8 @@ from usage_store import (IO_TIMEOUT as USAGE_IO_TIMEOUT_SECONDS,
                          MAX_BUFFER_EVENTS as USAGE_MAX_BUFFER_EVENTS,
                          FLUSH_BATCH_EVENTS as USAGE_FLUSH_BATCH_EVENTS)
 from gateway_lifecycle import sync_drain, DRAIN_MARKER_FILE
-from key_policy import (ALL_PROVIDERS, PROVIDER_IDS, PROVIDER_LABELS, KeyPolicyStore,
+from key_policy import (ALL_PROVIDERS, EXCLUSION_REASONS, PROVIDER_IDS, PROVIDER_LABELS,
+                        KeyPolicyStore,
                         fingerprint as key_fingerprint, mask as key_mask,
                         normalise_accounts, normalise_providers, ordered_providers)
 from provider_credentials import (CredentialKeyError, CredentialStore, DeviceFlowExpired,
@@ -2273,16 +2274,32 @@ def _copilot_account_policy(name: str) -> dict:
     return store.account_policy(name)
 
 
+def _copilot_account_exclusion_reason(name: str, model: str) -> Optional[str]:
+    """账户侧策略把这个账户从该模型上摘掉的原因，没摘掉则 None。
+
+    策略存储未配置或从未加载成功时一律放行（返回 None），既有配置行为不变。
+    """
+    store = key_policy_store
+    if store is None:
+        return None
+    return store.account_exclusion_reason(name, model)
+
+
 def _copilot_account_allows(name: str, model: str) -> bool:
     """运行时 Copilot 账户策略：禁用或未勾选则移出候选，只做减法。
 
     策略存储未配置或从未加载成功时一律放行，既有配置行为不变。定义在
     CopilotEndpoint 之前，因为 supports() 会调用它。
     """
+    return _copilot_account_exclusion_reason(name, model) is None
+
+
+def _copilot_model_selection_reason(model: str, name: str) -> Optional[str]:
+    """per-model 账户选择把这个账户摘掉的原因，没摘掉则 None。"""
     store = key_policy_store
     if store is None:
-        return True
-    return store.account_allows(name, model)
+        return None
+    return store.model_accounts_exclusion_reason(model, name)
 
 
 def _copilot_model_allows_account(model: str, name: str) -> bool:
@@ -2298,10 +2315,7 @@ def _copilot_model_allows_account(model: str, name: str) -> bool:
 
     存储未配置或从未加载成功时一律放行，即回落配置基线（不限定）。
     """
-    store = key_policy_store
-    if store is None:
-        return True
-    return store.model_allows_account(model, name)
+    return _copilot_model_selection_reason(model, name) is None
 
 
 def _copilot_account_enabled(endpoint) -> bool:
@@ -2322,6 +2336,51 @@ def _copilot_account_enabled(endpoint) -> bool:
     if policy.get("enabled_decided"):
         return policy["enabled"]
     return bool(getattr(endpoint, "enabled_in_config", True))
+
+
+# 「还没发现过能力」不在这个集合里，这是有意的：没有 capability 的账户服务
+# **所有**模型，那是通配而不是排除。它是启用前该看见的警告，由
+# `capability_known` 单独表达 —— 塞进排除原因会让诊断说反话。
+COPILOT_EXCLUSION_REASONS = EXCLUSION_REASONS | {
+    # 配置声明 inert、运维还没决定过。与 account_disabled 分开报：后者是
+    # 有人关过，前者是从没开过，两者指向不同的下一步。
+    'account_never_enabled',
+    # config 的 models 列表。唯一一个要改配置 + 滚动重启才能解决的，
+    # 所以不能混进那些改一下勾选就生效的 overlay 原因里。
+    'not_in_configured_models',
+    'api_type_unsupported',
+}
+
+
+def _copilot_support_reason(endpoint, model, api_type=None, *,
+                           ignore_model_selection: bool = False) -> Optional[str]:
+    """哪一层把这个账户从该模型的候选里摘掉；None = 它在候选里。
+
+    这是候选判断的**唯一实现**，`supports()` 退化成「没有原因」。反过来写
+    （supports 判断、另一个函数解释）会产出两份策略逻辑，而漂移的那份恰好是
+    被人当真的诊断 —— 那比没有诊断更糟。
+
+    `ignore_model_selection=True` 回答的是「若把它选上，它能服务吗」。
+    Dashboard 用它预览**尚未保存**的勾选：服务端给出「能否服务」，客户端只做
+    一次平凡的交集，不必复制任何策略。它只跳过这一层，其余层照常生效。
+
+    分支顺序即诊断优先级，并与下面 `supports()` 原先的 and 链逐项对应。
+    """
+    if not _copilot_account_enabled(endpoint):
+        policy = _copilot_account_policy(getattr(endpoint, "name", ""))
+        return 'account_disabled' if policy.get("enabled_decided") else 'account_never_enabled'
+    if not ignore_model_selection:
+        reason = _copilot_model_selection_reason(model, endpoint.name)
+        if reason:
+            return reason
+    reason = _copilot_account_exclusion_reason(endpoint.name, model)
+    if reason:
+        return reason
+    if endpoint.models and model not in endpoint.models:
+        return 'not_in_configured_models'
+    if api_type is not None and api_type not in endpoint.api_types:
+        return 'api_type_unsupported'
+    return None
 
 
 def _validate_copilot_api_types(value):
@@ -2348,11 +2407,11 @@ class CopilotEndpoint:
         # 运行时账户策略放在这里，而不是逐个调用点 —— supports() 是所有候选判断
         # 的唯一收口（含会话亲和用的「配置态合格集合」）。漏掉亲和那一处会让
         # 已禁用账户仍参与哈希，再回落时把所有会话重新洗牌。
-        return (_copilot_account_enabled(self)
-                and _copilot_model_allows_account(model, self.name)
-                and _copilot_account_allows(self.name, model)
-                and (not self.models or model in self.models)
-                and (api_type is None or api_type in self.api_types))
+        #
+        # 条件本体住在 `_copilot_support_reason` 里：Dashboard 要说出是哪一层
+        # 摘掉了某个账户，而那个解释必须和这里是同一份代码。收口没有变 ——
+        # 新的筛选条件仍然只能加在那个函数里，加别处一样会漏掉亲和。
+        return _copilot_support_reason(self, model, api_type) is None
 
     # long-lived token 来源记录（用于运行时按需重读，支持 K8s Secret rotation）
     # 形如 {"type": "env", "key": "GITHUB_COPILOT_TOKEN_1"}
@@ -9411,6 +9470,62 @@ async def admin_set_model_routing(model: str, request: Request,
     return {**_model_routing_view(model), "policy": _policy_status_view()}
 
 
+@app.get("/admin/model-routing/{model}")
+async def admin_model_routing_candidates(model: str, request: Request,
+                                         x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：**一个模型、每个账户、各自被哪一层摘掉**。
+
+    回答的是「这个账户为什么不接这个模型的流量」。逐层裁决与总裁决一起返回，
+    所以不必靠对照两个页面去推 —— 两个账户维度的层（per-model 的账户选择与
+    per-account 的 allowed_models）是交集，光看一边永远得不出结论。
+
+    列出**全部**已配置账户而不只是候选：被摘掉的那几行正是打开这个视图要看的。
+    reason 取自 `CopilotEndpoint.supports()` 背后那同一个函数，不是另写一份判断。
+
+    `serves_model_ignoring_selection` 回答「若选上它，它能服务吗」，让 Dashboard
+    能在**保存之前**算出生效候选（客户端只做一次交集，不复制策略）。
+
+    注意 reason 和 capability 一样是**时点**判断，不是能力认证。
+    """
+    _require_admin_access(request, x_api_key)
+    if not copilot_proxy:
+        raise HTTPException(status_code=404, detail={"error": {
+            "message": "GitHub Copilot is not configured"}})
+    store = key_policy_store
+    selection = set(store.model_accounts(model)) if store is not None else set()
+    accounts = []
+    for ep in _copilot_endpoints():
+        policy = _copilot_account_policy(ep.name)
+        reason = _copilot_support_reason(ep, model)
+        ignoring = _copilot_support_reason(ep, model, ignore_model_selection=True)
+        accounts.append({
+            "account": ep.name,
+            "enabled": _copilot_account_enabled(ep),
+            "enablement_source": "operator" if policy.get("enabled_decided") else "config",
+            "selected": ep.name in selection,
+            "serves_model": reason is None,
+            "reason": reason,
+            # 「选上它会怎样」与「现在它怎样」分开报：没有前者，勾一个没有该
+            # 模型能力的账户会看起来成功，直到请求失败才暴露。
+            "serves_model_ignoring_selection": ignoring is None,
+            "reason_ignoring_selection": ignoring,
+            # 不是排除原因，是通配警告：没发现过能力的账户服务所有模型。
+            "capability_known": bool(policy["capability"]),
+            "requests": ep.total_requests,
+            "circuit_open": ep.circuit_open,
+        })
+    return {
+        **_model_routing_view(model),
+        "accounts": accounts,
+        "reasons": sorted(COPILOT_EXCLUSION_REASONS),
+        "policy": _policy_status_view(),
+        "counters_are_process_local": True,
+        "note": ("Per-account verdicts for one model, each naming the layer that decided. "
+                 "A null reason means the account is a candidate. reason is point-in-time, "
+                 "like capability, and is not a capability certification."),
+    }
+
+
 @app.delete("/admin/model-routing/{model}")
 async def admin_clear_model_routing(model: str, request: Request,
                                     x_api_key: Optional[str] = Header(None, alias="x-api-key")):
@@ -9465,10 +9580,32 @@ async def _discover_copilot_capability(endpoint: "CopilotEndpoint") -> list:
                    and (item.get("capabilities") or {}).get("type") == "chat"})
 
 
-def _copilot_account_view(endpoint: "CopilotEndpoint") -> dict:
+def _copilot_candidate_universe() -> tuple:
+    """要拿来问「这个账户服务得了几个模型」的模型集合。
+
+    目录 ∪ 各账户已发现的 capability：目录是人工核验过的时点快照，而 capability
+    是上游事实，刚发现、还没进目录的模型照样是真实可服务的。只取目录会把它们
+    算成零，于是一个正常工作的账户看起来像是闲置的。
+    """
+    models = set(_collect_openai_model_ids())
+    for ep in _copilot_endpoints():
+        models |= set(_copilot_account_policy(ep.name)["capability"])
+    return tuple(sorted(models))
+
+
+def _copilot_account_view(endpoint: "CopilotEndpoint", universe=None) -> dict:
     policy = _copilot_account_policy(endpoint.name)
+    # 「已启用」与「真的在接流量」是两个问题。账户可以开着却一个模型都服务不了
+    # —— 因为**另一层**（路由页写的 per-model 账户选择）把它从每个模型上摘掉了。
+    # 只显示开关会让人读成「开着就是在用」。ALB 把这种「已注册但没有规则路由到
+    # 它」单独报成 unused 而不是 unhealthy，正是同一个理由。
+    if universe is None:
+        universe = _copilot_candidate_universe()
+    serves = sum(1 for model in universe if endpoint.supports(model))
     return {
         "account": endpoint.name,
+        "serves_models": serves,
+        "receiving_traffic": serves > 0,
         # 生效态 = 配置基线，被显式写入接管后由写入决定。enablement_source 说明
         # 这个值现在由谁决定 —— 「未启用」与「已停用」都不接流量，但只有后者
         # 是运维的决定，两者混为一谈会让人以为自己关过某个从没开过的账户。
@@ -9496,12 +9633,21 @@ async def admin_copilot_accounts(request: Request, x_api_key: Optional[str] = He
     _require_admin_access(request, x_api_key)
     if not copilot_proxy:
         raise HTTPException(status_code=404, detail={"error": {"message": "GitHub Copilot is not configured"}})
+    # 一次算好，所有账户共用 —— 每行各算一遍会把这个只读视图变成 N× 的工作。
+    universe = _copilot_candidate_universe()
     return {
-        "accounts": [_copilot_account_view(ep) for ep in copilot_proxy.load_balancer.endpoints],
+        "accounts": [_copilot_account_view(ep, universe)
+                     for ep in copilot_proxy.load_balancer.endpoints],
+        # 说清 serves_models 是按什么数出来的：时点目录 ∪ 已发现能力，
+        # 不是「世上所有模型」。
+        "catalogue_models": len(universe),
         "policy": _policy_status_view(),
         "counters_are_process_local": True,
         "note": ("capability is a point-in-time discovery from upstream, not a capability "
-                 "certification. The effective model set is capability ∩ allowed_models."),
+                 "certification. The effective model set is capability ∩ allowed_models. "
+                 "receiving_traffic is 'enabled AND a candidate for at least one known "
+                 "model' — an enabled account can still serve nothing if a per-model "
+                 "account selection excluded it everywhere."),
     }
 
 
@@ -9603,6 +9749,12 @@ PANEL_PASSWORD_MIN_LENGTH = 12
 PANEL_LOCKOUT_THRESHOLD = 5
 PANEL_LOCKOUT_BASE_SECONDS = 30
 PANEL_LOCKOUT_MAX_SECONDS = 3600
+# 存验证器而不是密码。上游凭据必须可重放给上游所以用 AES 封装；面板密码只需要
+# **验证**，所以单向哈希严格更好 —— 即使 LB_CREDENTIAL_KEY 泄露也推不出密码，
+# 而且这条路径压根不依赖那把密钥。
+PANEL_PASSWORD_ALGORITHM = "pbkdf2_sha256"
+PANEL_PASSWORD_ITERATIONS = 600_000
+PANEL_PASSWORD_SALT_BYTES = 16
 
 # token 的 sha256 → 过期时刻。**存摘要不存明文**：真正的 token 只在浏览器 cookie 里，
 # 进程重启后全部会话失效（与「刷新页面即失效」相当，不是故障）。
@@ -9612,8 +9764,11 @@ _PANEL_SESSIONS: Dict[str, float] = {}
 _PANEL_FAILURES: Dict[str, tuple] = {}
 
 
-def _panel_password() -> Optional[str]:
-    """面板密码；未配置或过短时返回 None —— **功能不可用，不是无需密码**。
+def _panel_password_env() -> Optional[str]:
+    """env 里的面板密码（**基线**）；未配置或过短时返回 None。
+
+    返回 None 意味着这条基线不可用，**不是无需密码** —— 调用方必须在两个来源
+    都没有时让登录整体不可用。
 
     故意不进 `LB_SETTINGS`：`/config/effective` 会把整个 settings 字典返回给任何
     持有效 key 的调用方。
@@ -9622,11 +9777,93 @@ def _panel_password() -> Optional[str]:
     if not raw:
         return None
     if len(raw) < PANEL_PASSWORD_MIN_LENGTH:
-        # 只报长度要求，不报配了什么。
+        # 只报长度要求，不报配了什么。长度判的是**字符数**而不是字节数 ——
+        # `kubectl describe secret` 报字节，多字节密码会在那边看着够长。
         logger.error("panel: %s is shorter than %d characters; panel login stays disabled",
                      PANEL_PASSWORD_ENV, PANEL_PASSWORD_MIN_LENGTH)
         return None
     return raw
+
+
+def _panel_password_overlay() -> Optional[str]:
+    """存储里的验证器（**overlay**），没有则 None。
+
+    与其他每一层共用那条降级规则：overlay 缺失或未加载时回落配置基线，这里的
+    基线是 env。注意回落的后果在这一层比别处尖锐 —— 多副本下改过密码的副本用
+    新的，其余副本到重启前仍认 env 里的旧密码。
+    """
+    store = key_policy_store
+    if store is None:
+        return None
+    return store.panel_password_verifier()
+
+
+def _panel_password_source() -> str:
+    """密码此刻由谁提供：`store` / `env` / `none`。只回来源，不回内容。"""
+    if _panel_password_overlay():
+        return "store"
+    return "env" if _panel_password_env() is not None else "none"
+
+
+def _panel_password_configured() -> bool:
+    return _panel_password_source() != "none"
+
+
+def _panel_password_seal(password: str) -> str:
+    """把密码变成 `算法$迭代数$盐$哈希`。同步 CPU 操作，调用方必须丢进线程。"""
+    salt = secrets.token_bytes(PANEL_PASSWORD_SALT_BYTES)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PANEL_PASSWORD_ITERATIONS)
+    return "$".join((PANEL_PASSWORD_ALGORITHM, str(PANEL_PASSWORD_ITERATIONS),
+                     base64.b64encode(salt).decode(), base64.b64encode(digest).decode()))
+
+
+def _panel_password_verify_sealed(password: str, verifier: str) -> bool:
+    """同步校验。迭代数从验证器里读，所以调整成本不会作废既有记录。"""
+    try:
+        algorithm, iterations, salt_b64, digest_b64 = verifier.split("$")
+        if algorithm != PANEL_PASSWORD_ALGORITHM:
+            return False
+        expected = base64.b64decode(digest_b64)
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode(),
+                                     base64.b64decode(salt_b64), int(iterations))
+    except Exception:
+        # 坏掉的验证器不放行 —— 它是 overlay，但「读不懂」不等于「没有」。
+        logger.error("panel: stored password verifier is unreadable; refusing to accept it")
+        return False
+    return hmac.compare_digest(actual, expected)
+
+
+async def _panel_password_matches(supplied: str) -> bool:
+    """overlay 优先，缺失回落 env。两个都没有 → 一律不通过。"""
+    verifier = _panel_password_overlay()
+    if verifier:
+        # PBKDF2 是六十万轮 HMAC，放在事件循环里会把整个进程卡住。
+        return await asyncio.to_thread(_panel_password_verify_sealed, supplied, verifier)
+    baseline = _panel_password_env()
+    if baseline is None:
+        return False
+    return hmac.compare_digest(supplied, baseline)
+
+
+async def _panel_check_password(client: str, supplied: str) -> None:
+    """校验密码并维护退避；不通过就抛，通过则清计数。
+
+    登录与改密码共用这一个 —— 改密码要出示当前密码，如果那条路径不计退避，
+    它就是一个绕过登录退避的猜测通道。
+    """
+    remaining = _panel_lockout_remaining(client)
+    if remaining:
+        # 锁定期内连正确密码也拒 —— 否则退避只是减速带，第六次猜对照样进得去。
+        # 响应也不区分对错，不然它就成了一个旁路的密码预言机。
+        raise HTTPException(status_code=429, headers={"Retry-After": str(remaining)},
+                            detail={"error": {
+                                "code": "too_many_attempts",
+                                "message": "Too many attempts. Try again later."}})
+    if not await _panel_password_matches(supplied):
+        _panel_note_failure(client)
+        raise HTTPException(status_code=401, detail={"error": {
+            "code": "invalid_panel_password", "message": "Incorrect password."}})
+    _PANEL_FAILURES.pop(client, None)
 
 
 def _panel_client_id(request: Request) -> str:
@@ -9713,9 +9950,12 @@ async def admin_session_status(request: Request):
     return {
         "authenticated": expires_at is not None,
         "expires_in": max(0, int(expires_at - time.time())) if expires_at else 0,
-        "password_configured": _panel_password() is not None,
+        "password_configured": _panel_password_configured(),
+        # 来源而非内容。页面要据此说清「改密码会覆盖 env」还是「这是首次设置」，
+        # 否则运维改完会以为 Secret 里那份还在生效。
+        "password_source": _panel_password_source(),
         # 让 UI 知道该显示密码框还是回落到 API Key 框。
-        "auth_methods": (["panel_password", "api_key"] if _panel_password() is not None
+        "auth_methods": (["panel_password", "api_key"] if _panel_password_configured()
                          else ["api_key"]),
         "session_ttl_seconds": PANEL_SESSION_TTL_SECONDS,
         "note": ("The session cookie is HttpOnly, so page scripts never hold a credential. "
@@ -9736,7 +9976,7 @@ async def admin_session_login(request: Request,
     退避只计密码路径：API Key 是高熵的，而且拿面板的失败去锁住运维脚本是另一种
     自伤。
     """
-    password = _panel_password()
+    configured = _panel_password_configured()
     client = _panel_client_id(request)
     try:
         payload = await request.json()
@@ -9746,33 +9986,23 @@ async def admin_session_login(request: Request,
     supplied = (payload or {}).get("password")
 
     if isinstance(supplied, str) and supplied:
-        if password is None:
+        if not configured:
             raise HTTPException(status_code=503, detail={"error": {
                 "code": "panel_password_not_configured",
-                "message": (f"{PANEL_PASSWORD_ENV} is not set, or is shorter than "
-                            f"{PANEL_PASSWORD_MIN_LENGTH} characters. Panel login is "
+                "message": (f"No panel password is set: neither a stored one nor "
+                            f"{PANEL_PASSWORD_ENV} (at least "
+                            f"{PANEL_PASSWORD_MIN_LENGTH} characters). Panel login is "
                             "disabled; use an API key.")}})
-        remaining = _panel_lockout_remaining(client)
-        if remaining:
-            # 锁定期内连正确密码也拒 —— 否则退避只是减速带，第六次猜对照样进得去。
-            # 响应也不区分对错，不然它就成了一个旁路的密码预言机。
-            raise HTTPException(status_code=429, headers={"Retry-After": str(remaining)},
-                                detail={"error": {
-                                    "code": "too_many_attempts",
-                                    "message": "Too many attempts. Try again later."}})
-        if not hmac.compare_digest(supplied, password):
-            _panel_note_failure(client)
-            raise HTTPException(status_code=401, detail={"error": {
-                "code": "invalid_panel_password", "message": "Incorrect password."}})
-        _PANEL_FAILURES.pop(client, None)
+        await _panel_check_password(client, supplied)
     else:
         key = _extract_api_key(request, x_api_key)
         if not (key and _verify_lb_api_key(key)):
-            if password is None:
+            if not configured:
                 raise HTTPException(status_code=503, detail={"error": {
                     "code": "panel_password_not_configured",
-                    "message": (f"{PANEL_PASSWORD_ENV} is not set, or is shorter than "
-                                f"{PANEL_PASSWORD_MIN_LENGTH} characters. Supply a valid "
+                    "message": (f"No panel password is set: neither a stored one nor "
+                                f"{PANEL_PASSWORD_ENV} (at least "
+                                f"{PANEL_PASSWORD_MIN_LENGTH} characters). Supply a valid "
                                 "API key instead.")}})
             raise HTTPException(status_code=400, detail={"error": {
                 "code": "password_required",
@@ -9809,6 +10039,126 @@ async def admin_session_logout(request: Request):
                            samesite=kwargs["samesite"], secure=kwargs["secure"],
                            httponly=kwargs["httponly"])
     return response
+
+
+async def _panel_password_proof(request: Request, x_api_key: Optional[str],
+                                payload: dict) -> str:
+    """证明调用方有权改面板密码。返回用了哪条凭据，便于回执说清。
+
+    会话本身不够：它可能是用 API Key 换来的，那并不证明调用方知道当前密码。
+    所以要么出示当前密码，要么出示一把有效的 API Key —— 后者是 break-glass，
+    它不多给任何权限（持 key 的人本来就能调每个 admin 端点），但它是**存储里的
+    密码被忘记之后唯一的回头路**。
+    """
+    key = _extract_api_key(request, x_api_key)
+    if key and _verify_lb_api_key(key):
+        return "api_key"
+    current = payload.get("current_password")
+    if not (isinstance(current, str) and current):
+        raise HTTPException(status_code=400, detail={"error": {
+            "code": "current_password_required",
+            "message": ("Provide 'current_password', or a valid API key. A session alone "
+                        "does not prove knowledge of the current password.")}})
+    if not _panel_password_configured():
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "panel_password_not_configured",
+            "message": "No panel password is set; supply a valid API key to set the first one."}})
+    await _panel_check_password(_panel_client_id(request), current)
+    return "current_password"
+
+
+def _panel_sessions_except(keep: Optional[str]) -> None:
+    """除调用方自己那一条外，全部失效。
+
+    改过密码还留着旧会话等于改了一半。保留自己那条只是不让人刚改完就被踢出去。
+    """
+    survivor = hashlib.sha256(keep.encode()).hexdigest() if keep else None
+    for digest in [d for d in _PANEL_SESSIONS if d != survivor]:
+        _PANEL_SESSIONS.pop(digest, None)
+
+
+@app.put("/admin/panel-password")
+async def admin_set_panel_password(request: Request,
+                                   x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：设置或更改面板密码（存**单向验证器**，不存密码）。
+
+    写入的是 PBKDF2-SHA256 验证器，所以即使 `LB_CREDENTIAL_KEY` 泄露也推不出
+    密码，而且这条路径不依赖那把密钥。**忘记即不可恢复** —— 回头路是用一把
+    有效的 LB API Key 重新设置。
+
+    存储是 overlay、env 是基线，所以写入成功后这个副本就不再认 env 里那份。
+    **策略存储只在启动时加载**，因此多副本部署里其余副本在重启前仍认旧密码；
+    改完请同步 Secret 再滚动重启。
+    """
+    _require_admin_access(request, x_api_key)
+    if key_policy_store is None:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "policy_store_unavailable",
+            "message": ("Panel password storage is not configured; set "
+                        f"{PANEL_PASSWORD_ENV} instead.")}})
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    payload = payload if isinstance(payload, dict) else {}
+    new = payload.get("new_password")
+    if not isinstance(new, str) or not new:
+        raise HTTPException(status_code=400, detail={"error": {
+            "code": "new_password_required", "message": "Provide a 'new_password' string."}})
+    # 校验顺序：先证明身份，再看新密码是否合格，最后才写。长度判**字符数**。
+    used = await _panel_password_proof(request, x_api_key, payload)
+    if len(new) < PANEL_PASSWORD_MIN_LENGTH:
+        raise HTTPException(status_code=400, detail={"error": {
+            "code": "panel_password_too_short",
+            "message": (f"The panel password must be at least {PANEL_PASSWORD_MIN_LENGTH} "
+                        "characters. Note that is characters, not bytes.")}})
+    try:
+        verifier = await asyncio.to_thread(_panel_password_seal, new)
+        await key_policy_store.set_panel_password_verifier(verifier)
+    except Exception as e:
+        # 写失败则旧密码仍然有效，不假装成功。
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "policy_write_failed", "message": f"{type(e).__name__}"}})
+    logger.info("panel: password verifier updated (proof=%s); other sessions invalidated", used)
+    _panel_sessions_except(request.cookies.get(PANEL_SESSION_COOKIE))
+    return {"configured": True, "password_source": _panel_password_source(),
+            "other_sessions_invalidated": True,
+            "note": ("A verifier was stored; the password itself is not kept and cannot be "
+                     "recovered. The stored password overrides the environment variable on "
+                     "this replica only — the policy store is read at startup, so other "
+                     "replicas keep accepting the environment password until they restart.")}
+
+
+@app.delete("/admin/panel-password")
+async def admin_clear_panel_password(request: Request,
+                                     x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """运维端点：清除存储的密码，回到 env 基线。
+
+    与「重置渠道限制」同一个形状：overlay 只能被显式删除，删掉就回落基线。
+    env 也没配时，这会让面板登录整体不可用 —— 那是正确结果，不是故障。
+    """
+    _require_admin_access(request, x_api_key)
+    if key_policy_store is None:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "policy_store_unavailable",
+            "message": "Panel password storage is not configured."}})
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    await _panel_password_proof(request, x_api_key, payload if isinstance(payload, dict) else {})
+    try:
+        await key_policy_store.clear_panel_password_verifier()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "policy_write_failed", "message": f"{type(e).__name__}"}})
+    logger.info("panel: stored password verifier cleared; falling back to the environment")
+    _panel_sessions_except(request.cookies.get(PANEL_SESSION_COOKIE))
+    source = _panel_password_source()
+    return {"configured": source != "none", "password_source": source,
+            "other_sessions_invalidated": True,
+            "note": ("Back to the environment baseline. If it is unset, panel login is now "
+                     "unavailable — which is the intended outcome, not a failure.")}
 
 
 def _policy_status_view() -> dict:

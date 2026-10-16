@@ -55,6 +55,73 @@ Author: Zeno Ren
 
 所以：**要给候选加条件，改 `supports()`；要读候选，问 `supports()`。** 两边都不要绕。
 
+<a id="exclusion-reasons"></a>
+
+#### 排除原因：与候选判断同一份代码
+
+Dashboard 要回答「这个账户为什么不接这个模型的流量」。这个解释一旦与候选判断分成
+两份实现就必然漂移，而漂移的那一份恰好是**被人当真的诊断** —— 比没有诊断更糟。所以
+反过来写：**reason 是主实现，布尔是派生**。
+
+```python
+# main.py
+def _copilot_support_reason(endpoint, model, api_type=None, *, ignore_model_selection=False)
+class CopilotEndpoint:
+    def supports(self, model, api_type=None):
+        return _copilot_support_reason(self, model, api_type) is None
+```
+
+`key_policy` 两个布尔读者同样委托给各自的 reason 读者（`account_allows` →
+`account_exclusion_reason`，`model_allows_account` → `model_accounts_exclusion_reason`）。
+防漂移的守卫是对**所有 (账户 × 模型 × api_type × 存储状态) 组合**断言两者永不相左，见
+`tests/test_key_policy.py::ExclusionReasonTests` 与 `tests/test_model_routing.py::SupportReasonTests`。
+
+原因是**闭集**（`main.COPILOT_EXCLUSION_REASONS`），不是自由文本 —— 否则 UI 无从分支、
+测试无从断言：
+
+| reason | 含义 | 谁管这一层 |
+|---|---|---|
+| `null` | 在候选里，接流量 | — |
+| `account_disabled` | 运维显式停用过 | GHCP 账户页的启用开关 |
+| `account_never_enabled` | 配置声明 inert，从没有人决定过 | 同上（先刷新能力再启用） |
+| `not_selected_for_model` | 本模型被限定到了别的账户 | 路由规则页的账户选择 |
+| `excluded_by_allowed_models` | 账户侧 `allowed_models` 把该模型摘掉了 | GHCP 账户页的模型勾选 |
+| `not_in_capability` | 上游的时点发现里没有这个模型 | 只读事实，可重新「刷新能力」 |
+| `not_in_configured_models` | config 的 `models` 列表限定 | 改配置 + 滚动重启 |
+| `api_type_unsupported` | 账户的 `api_types` 不含该入口形状 | 改配置 |
+
+两处区分必须保留，因为它们指向**不同的修法**：
+
+- `not_in_capability`（上游事实，重新发现）vs `excluded_by_allowed_models`（运维意图，改勾选）
+- `account_disabled`（有人关过）vs `account_never_enabled`（从没开过）—— 合并会让人去找一个
+  自己从未拨过的开关
+- `not_in_configured_models` 是唯一需要改配置并重启的，不能混进那些改一下勾选就生效的 overlay 原因
+
+**`capability_unknown` 故意不在这个集合里。** 没发现过能力的账户服务**所有**模型，那是通配
+而不是排除；把它当排除原因会让诊断说反话。它由 `capability_known: false` 单独表达，是启用
+前该看见的警告。
+
+`ignore_model_selection=True` 回答的是「若把它选上，它能服务吗」，只跳过账户选择这一层。
+Dashboard 用它在**保存之前**算出生效候选：服务端给「能否服务」，客户端只做一次
+`勾选 ∩ 能服务` 的平凡交集，不复制任何策略逻辑。
+
+reason 与 capability 一样是**时点**判断，不是能力认证。
+
+<a id="enabled-versus-receiving-traffic"></a>
+
+#### 「已启用」与「实际接流量」是两个状态
+
+账户可以开着却一个模型都服务不了 —— 因为**另一层**（per-model 账户选择）把它从每个
+已知模型上摘掉了。只显示启用开关会让人读成「开着就是在用」。
+
+`/admin/copilot/accounts` 因此单独返回 `receiving_traffic` 与 `serves_models`，Dashboard
+把它渲染成独立一列：**已启用但闲置**。计数口径是「时点目录 ∪ 各账户已发现能力」，
+页面上标注了基数 —— 不是「世上所有模型」。
+
+外部先例是 AWS ALB 的 `unused`：已注册但没有任何监听规则路由到它的 target，被报成一个
+与 `unhealthy` **并列**的独立状态，理由正是成因在另一层。反面教材是 LiteLLM 的 Admin UI
+列出已被 router 丢弃的模型行（显示配置态而非生效态），有一例 17 天后才被发现。
+
 <a id="policy-degradation-config-is-the-baseline"></a>
 
 ### 策略降级：配置是基线，存储是 overlay
@@ -81,17 +148,35 @@ Author: Zeno Ren
 
 ### Dashboard「密钥与渠道」页的解锁契约
 
-这一页的四块（客户端密钥、路由规则、GHCP 账户、上游凭据）都需要凭据。点**解锁**一次并发读出四块，之后每次保存自动复用同一个会话；某一块失败不影响其余三块，未配置的渠道显示为「该渠道未配置」而不是报错。
+这一页需要凭据。点**解锁**一次并发读出各块，之后每次保存自动复用同一个会话；某一块失败不影响其余，未配置的渠道显示为「该渠道未配置」而不是报错。
+
+**锁定时只渲染解锁卡片，被门禁的内容整块 `hidden`。** 这不只是版面选择：`hidden` 就是
+`display:none`，于是那一块**同时**退出 tab 序与无障碍树。
+
+> 纯 CSS 模糊 / 毛玻璃**不是门禁**。模糊后的内容仍然可以 Tab 到，屏幕阅读器仍然完整朗读它
+> （W3C/MDN/WHATWG 一致：移出无障碍树的只有 `hidden` 属性、`display:none`、`visibility:hidden`，
+> `filter` 与 `backdrop-filter` 都不在其中）。而最常见的补救 —— 给被模糊的外层加
+> `aria-hidden="true"` —— **本身是 WCAG 4.1.2 Level A 失败**，因为该属性不得用于可聚焦元素
+> 及其任何祖先，而设置面板必然含 input/button（W3C ACT 规则 6cfa84、axe-core
+> `aria-hidden-focus`，impact Serious）。
+
+所以毛玻璃只用在**解锁卡片自身**的观感上，不拿它冒充门禁；这一块也不标 `aria-modal`
+—— 它是页面区域而不是对话框，而 APG 要求只有在「代码真正阻断所有用户与外部内容的交互」
+**且**「视觉上遮蔽外部内容」同时成立时才可声明 modality。
+
+解锁后分**五个子页**（客户端密钥 / 路由规则 / GHCP 账户 / 上游凭据 / 面板密码），每页只做
+一件事，**每页的操作反馈落在自己的区域内** —— 之前四块共用顶部一行提示，在底部操作时
+结果滚到屏幕外，看起来像什么都没发生。
 
 **页面脚本不持有任何凭据。** 解锁是把密码换成一个 **HttpOnly 会话 cookie**，此后由浏览器携带：
 
 ```
 POST /admin/session  {"password": "…"}        → Set-Cookie: lb_panel=…; HttpOnly; SameSite=Strict; Path=/admin
-GET  /admin/session                           → {authenticated, expires_in, password_configured}
+GET  /admin/session                           → {authenticated, expires_in, password_configured, password_source}
 DELETE /admin/session                         → 服务端失效 + 清浏览器那一份
 ```
 
-- 密码来自 `LB_DASHBOARD_PASSWORD`（env，来自 Secret）。**未配置或短于 12 字符 → 面板登录整体不可用**，绝不退化为无密码放行 —— `/admin/*` 由没有 OAuth 的那个 ingress 提供，对公网可达
+- 密码来自**存储的覆盖值**或 `LB_DASHBOARD_PASSWORD`（env，来自 Secret），见下一节。**两者都没有或都短于 12 字符 → 面板登录整体不可用**，绝不退化为无密码放行 —— `/admin/*` 由没有 OAuth 的那个 ingress 提供，对公网可达
 - 会话是服务端进程内的 **30 分钟滑动窗口**（任何操作续期），**重启全部失效**，多副本之间不共享（换 Pod 要重新解锁，不是故障）
 - **刷新页面保留会话** —— 这正是目的：过去刷新就等于重输。页面加载时先问 `GET /admin/session`，已认证就直接恢复四块，全程零交互
 - 锁定会**在服务端一并失效**并清空已读出的内容（掩码、指纹、账户名本身就是会话授权才能看到的）。只清浏览器那一份会留下一个仍可用的会话
@@ -99,11 +184,52 @@ DELETE /admin/session                         → 服务端失效 + 清浏览器
 - `Secure` 只在 https 下设置，否则本地 http 调试根本拿不到 cookie
 - `SameSite=Strict` + `Path=/admin` + 同源 XHR 已覆盖 CSRF，不再加 token
 
-**没配密码时回落到 LB API Key**，而它**也换成同一种会话**而不是留在页面里 —— 否则「脚本不持凭据」只在一半情况下成立。安全上等价：能出示有效 key 的人本来就能直接调用每个 admin 端点。
+**LB API Key 始终可以换会话**，而它**也换成同一种会话**而不是留在页面里 —— 否则「脚本不持凭据」只在一半情况下成立。安全上等价：能出示有效 key 的人本来就能直接调用每个 admin 端点。配了密码时它收在「改用 LB API Key 解锁」折叠项里；没配密码时它是唯一入口，所以默认展开。这条路径也是**存储的密码被忘记之后唯一的回头路**。
 
 这一页在入口层已由 oauth2-proxy 保护（`lb.zeno.ink/stats*`，限定单个 Google 账号），但 `/admin/*` 走的是另一个没有 OAuth 的 ingress —— 所以凭据仍然必要，不能把「页面已登录」当作授权。
 
 **上游凭据不在此列。** `credSecret` 保持提交后立即清除的单次请求契约 —— 会话是便利，上游凭据是秘密。
+
+<a id="changing-the-panel-password"></a>
+
+### 在页面上改面板密码
+
+「面板密码」子页可以设置或更改它。**存的是单向验证器，不是密码。**
+
+```
+PUT    /admin/panel-password  {"current_password": "…", "new_password": "…"}
+DELETE /admin/panel-password  {"current_password": "…"}     → 清除覆盖值，回落 env
+```
+
+存储形态是 `pbkdf2_sha256$<迭代数>$<盐>$<哈希>`，单行表 `panel_password`（`id` 恒为 1，
+惰性创建、无需迁移；`release_probe.py` 对它沿用「不存在放行、存在严格匹配」）。
+
+为什么是哈希而不是像上游凭据那样 AES 封装：上游凭据必须**重放**给上游，所以必须可解开；
+面板密码只需要**验证**。于是哈希严格更好 —— **即使 `LB_CREDENTIAL_KEY` 泄露也推不出密码**，
+而且这条路径压根不依赖那把密钥（没配它也能改密码）。代价要写明：**忘记即不可恢复**，
+回头路是用一把有效 LB API Key 解锁后重设。
+
+授权与边界：
+
+- **会话不够**，还要出示**当前密码** —— 会话可能是用 API Key 换来的，那并不证明调用方
+  知道密码。首次设置（两边都没有密码时）用一把有效 API Key 代替
+- 错误的当前密码走**登录那同一套**按来源退避。否则这个端点就是一条绕过登录退避的
+  猜测通道
+- 新密码下限 12 个**字符**（非字节）。`kubectl describe secret` 报的是字节数，多字节密码
+  会在那边看着够长却被判为不合格
+- 成功后**其他会话立即失效**，调用方自己那条保留（刚改完就被踢出去没有意义）
+- 写失败则旧密码仍然有效，不假装成功
+- 响应体、响应头与日志都不回显密码或验证器；它也不进 `LB_SETTINGS`，所以不会出现在
+  `/config/effective` 里
+
+**优先级沿用那条降级规则**：存储是 overlay，`LB_DASHBOARD_PASSWORD` 是基线。有覆盖值就
+用它；overlay 缺失或未加载回落 env；**两者都没有则登录整体不可用而不是放行**。`GET
+/admin/session` 的 `password_source` 回答「现在用的是哪一份」（`store` / `env` / `none`），
+只回来源不回内容。
+
+> **多副本边界。** 策略存储**只在启动时加载，没有周期刷新**。所以页内改密码只对**当前
+> 副本**即时生效，其余副本在重启前**仍然接受 env 里的旧密码**。这与其他每一层策略同
+> 性质，但密码的后果更尖锐 —— 改完请同步更新 Secret 再滚动重启。当前为单副本部署。
 
 <a id="per-key-provider-allowlist"></a>
 
@@ -191,9 +317,45 @@ device flow 的 `device_code` 只存在进程内并带 TTL，不落库、不进�
 
 ### 路由规则：模型 → Provider → GHCP 账户
 
-`PUT /admin/model-routing/{model}` 设置单个模型的规则（Dashboard「密钥与渠道」页是三段式的下拉表单）。两段都可选：省略 `providers` 只改账户，省略 `copilot_accounts` 不动账户。**没有规则的模型维持原本行为。**
+`PUT /admin/model-routing/{model}` 设置单个模型的规则。两段都可选：省略 `providers` 只改账户，省略 `copilot_accounts` 不动账户。**没有规则的模型维持原本行为。**
 
 两段都在**任何写入之前**校验完。第三段打错一个账户名却让 provider 那半边已经生效，是最难排查的一种半应用。
+
+Dashboard 的编辑器分三步，并支持点已有规则那一行直接载入（改一条规则不必重填整张表单）。
+三步里有两处是刻意做成「结构可见」而不是靠提示文案的：
+
+**第二步把完整的生效顺序画出来**，两个 provider 始终都在，没被提前的那个标着
+「fallback · 保留」。这样「偏好只重排、永不筛除」是控件本身展示的事实，而不是说明文字里的
+一句主张。外部先例是 Vercel AI Gateway，它把 `order`（只定顺序，未列出的仍在候选里、只是
+靠后）与 `only`（真筛除）做成两个互斥字段名，把语义写进 API 表面；OpenRouter 同样强调
+「优先级列表是偏好，不是 allowlist」。
+
+<a id="candidate-matrix"></a>
+
+**第三步是候选矩阵**，一行一个账户，三列：
+
+| 列 | 作用域 | 写哪个端点 |
+|---|---|---|
+| 账户启用 | **对所有模型生效** | `PUT /admin/copilot/accounts/{account}` |
+| 本模型选中 | **仅当前模型** | `PUT /admin/model-routing/{model}` |
+| 当前结果 | 计算值，带 [排除原因](#exclusion-reasons) 与「去哪改」 | — |
+
+把两层放在一张表上是运维视角的选择（一次看完「这个模型谁在服务」），但它有一个真实
+风险：**左边那一列是全局的**，改了影响所有模型，却和右边那列长得一样。缓解不靠说明文字：
+
+- 列头各带作用域徽标（「对所有模型」vs「仅 `<模型名>`」）
+- 确认框**逐行列明**哪些是全局改动、哪些仅限本模型
+- 勾一个服务不了该模型的账户时，那一行直接标「勾了也不会服务该模型」
+
+**保存是两步写，分别回报。** 两个端点做不到原子提交，就不假装做得到：先写全局启用态，
+再写模型规则。第一步失败则不做第二步；第一步成功而第二步失败时明说「账户启用态已生效、
+模型规则未写入」。
+
+**生效候选在保存前就算出来**（`生效候选 = 勾选 ∩ 能服务`），空集立即告警。数据来自
+`GET /admin/model-routing/{model}`：服务端给出每个账户「能否服务该模型」，客户端只做一次
+平凡交集，不复制策略逻辑。之前这件事只能等写入响应才知道 —— 也就是规则已经上线之后。
+反面教材是 one-api：候选集为空时只抛一个不区分原因的 503，错误文案只回显 group 与 model，
+从不说明是哪个谓词把候选排除了。
 
 #### 第一段：provider 优先序
 

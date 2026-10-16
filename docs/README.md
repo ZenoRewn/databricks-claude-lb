@@ -18,8 +18,11 @@ Author: Zeno Ren
 | 要做的事 | 文档 |
 |---|---|
 | 解锁这一页（面板密码、会话 cookie、退避与回落） | [解锁契约](CONFIGURATION.md#dashboard-unlock-contract) |
+| 在页面上改面板密码、以及多副本边界 | [改面板密码](CONFIGURATION.md#changing-the-panel-password) |
 | 五层策略怎么叠加、谁做减法、在哪收口 | [策略层总览](CONFIGURATION.md#policy-layers-overview) |
 | 配「模型 → Provider → GHCP 账户」规则 | [路由规则](CONFIGURATION.md#routing-rules) |
+| **某账户为何不接某模型的流量** | [排除原因闭集](CONFIGURATION.md#exclusion-reasons)、[候选矩阵](CONFIGURATION.md#candidate-matrix) |
+| 账户开着却不接流量 | [已启用 vs 实际接流量](CONFIGURATION.md#enabled-versus-receiving-traffic) |
 | 按密钥限渠道、以及怎么重置回基线 | [渠道限制](CONFIGURATION.md#per-key-provider-allowlist) |
 | GHCP 账户先落地、确认后再启用 | [三态启用](CONFIGURATION.md#ship-inert-then-enable) |
 | 录入上游凭据与 GHCP device flow | [凭据录入](CONFIGURATION.md#entering-upstream-credentials) |

@@ -39,7 +39,10 @@ node tests/test_dashboard_ui.cjs
 | 渠道 allowlist、降级规则 | `tests/test_key_policy.py`（`DegradationFallsBackToTheConfigBaselineTests` 横跨五层断言） |
 | provider 偏好、模型→账户、`/v1/models` 目录一致性 | `tests/test_model_routing.py` |
 | 账户启用三态、capability 与 `allowed_models` | `tests/test_copilot_accounts.py` |
-| 面板密码、会话 cookie、退避 | `tests/test_panel_session.py` |
+| 面板密码、会话 cookie、退避、页内改密码 | `tests/test_panel_session.py` |
+| 排除原因（reason 闭集）与它和 `supports()` 的一致性 | `tests/test_key_policy.py::ExclusionReasonTests`、`tests/test_model_routing.py::SupportReasonTests`（组合式断言，防两份逻辑漂移） |
+| 候选诊断端点、候选矩阵的数据源 | `tests/test_model_routing.py::CandidateDiagnosticEndpointTests` |
+| 「已启用但闲置」与「已停用」是不同状态 | `tests/test_copilot_accounts.py::EnabledButIdleIsItsOwnStateTests` |
 | 凭据封装、device flow | `tests/test_provider_credentials.py` |
 | 任何新路由或鉴权变更 | `tests/test_api_surface_contract.py`（双向核验 `CLAUDE.md` 的 API 表） |
 | 存储 schema | `tests/test_release_schema.py`（「不存在放行、存在严格匹配」） |
@@ -90,7 +93,15 @@ docker run --rm -p 127.0.0.1:8000:8000 \
 **给 Copilot 候选加条件只能改 `CopilotEndpoint.supports()`。** 它是唯一收口，
 `can_handle` / `supports_model` / `/models` 目录 / 会话亲和的「配置态合格集合」全走它。
 绕过去的后果见 [收口说明](CONFIGURATION.md#supports-is-the-choke-point) —— 目录曾因此
-宣传过一个实际没有候选的模型。
+宣传过一个实际没有候选的模型。注意条件本体现在住在 `_copilot_support_reason()` 里，
+`supports()` 只是「没有排除原因」—— 收口没变，新条件仍然加在那个函数里。
+
+**诊断与判断必须是同一份代码，而且方向是「reason 为主、布尔为派生」。** Dashboard 要说出
+是哪一层摘掉了某个账户；把那个解释另写一份，漂移的必然是诊断，而诊断恰好是被人当真的
+那一份。所以 `supports()` ≡ `reason is None`，`key_policy` 的两个布尔读者也委托给各自的
+reason 读者。守卫是对所有 (账户 × 模型 × api_type × 存储状态) 组合断言两者永不相左 ——
+加新 reason 时那组断言会一并覆盖它。原因必须进
+[闭集](CONFIGURATION.md#exclusion-reasons)，不要返回自由文本。
 
 **`CopilotEndpoint` 新字段要追加在 dataclass 末尾。** 文件里有一行既有注释写明了这点：
 插在中间会让 `main.CopilotEndpoint('name', '', 1, [], {...})` 这类位置参数构造静默错位，
@@ -110,8 +121,24 @@ key 的调用方。`LB_CREDENTIAL_KEY` 与 `LB_DASHBOARD_PASSWORD` 都是直接 
 排查入口见 [排障 19](TROUBLESHOOTING.md)。
 
 **新表用新表，别给既有表加列。** 生产里的策略表是惰性创建的，一旦存在，加列就是真迁移。
-`model_copilot_account` 之所以独立成表而不是挂到 `model_provider_preference` 上，就是
+`model_copilot_account` 与 `panel_password` 之所以独立成表而不是挂到既有表上，就是
 为了零迁移。`release_probe.py` 对每张表沿用「不存在放行、存在则严格匹配」，加表要同步它。
+
+**要验证的秘密存哈希，要重放的秘密才存密文。** 上游凭据必须重放给上游，所以 AES-GCM 封装；
+面板密码只需要验证，所以存 PBKDF2-SHA256 单向验证器 —— 即使 `LB_CREDENTIAL_KEY` 泄露也
+推不出密码，而且这条路径不依赖那把密钥。代价要在 UI 和文档里写明：**忘记即不可恢复**。
+PBKDF2 是同步 CPU 操作（六十万轮 HMAC），**必须 `asyncio.to_thread`**，直接算会卡住事件循环。
+
+**门禁用 `hidden`，不要用模糊，也不要给容器加 `aria-hidden`。** 纯 CSS 模糊后的内容仍可
+Tab 到、仍被屏幕阅读器完整朗读；而给含可聚焦控件的外层加 `aria-hidden` 是 WCAG 4.1.2
+Level A 失败（axe `aria-hidden-focus`，impact Serious）。`display:none` 一次解决两件事。
+毛玻璃可以用在解锁卡片自身，但别拿它冒充门禁；页面区域也不要标 `aria-modal`，那是对话框
+的声明，APG 要求「代码真正阻断交互」与「视觉遮蔽」同时成立才可声明。
+
+**Dashboard 预览里有 `/admin/*` 的合成夹具**（`tests/dashboard_preview.py`）。改了这一页
+就顺手在那边走一遍：锁定 → 解锁 → 候选矩阵 → 两步保存 → 改密码。夹具故意包含一个
+「已启用但闲置」的账户和一个未发现能力的 inert 账户，那两个状态只有在那里才看得到。
+注意预览的会话是进程内全局的、不校验 cookie —— 它不是鉴权测试。
 
 ## 文档维护
 
