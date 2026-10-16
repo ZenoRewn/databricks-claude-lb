@@ -165,3 +165,77 @@ class ProxyBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ep.total_errors,0)
         self.assertEqual(metrics.outcomes[('messages','deadline_exceeded')],1)
         self.assertIn(b'request_deadline_exceeded',b''.join(m.get('body',b'') for m in sent))
+
+
+class RetryBudgetTests(unittest.IsolatedAsyncioTestCase):
+    """A retry must not get a fresh full budget; it inherits what is left.
+
+    `startup_seconds()` returns a fixed per-attempt value, so three replay-safe
+    retries could each wait the whole startup budget. In the 2026-10-16 GHCP
+    event each attempt happened to end at ~121s because upstream sent
+    RST_STREAM, so the budget was not the binding constraint — but a hung
+    upstream would have produced 3 x 180s while the client had already given up.
+    `remaining_seconds()` existed the whole time and was only ever logged.
+    """
+
+    def setUp(self):
+        self.token = None
+        self.addCleanup(lambda: request_budget.CURRENT_DEADLINE.reset(self.token)
+                        if self.token else None)
+
+    def _deadline(self, seconds):
+        self.token = request_budget.CURRENT_DEADLINE.set(
+            request_budget.time.monotonic() + seconds)
+
+    def test_without_a_deadline_the_fixed_budget_is_unchanged(self):
+        budget, source = request_budget.effective_startup_seconds('copilot', 'responses', 'm')
+        self.assertEqual(budget, request_budget.STARTUP_TIMEOUT)
+        self.assertEqual(source, 'fixed')
+
+    def test_a_generous_deadline_does_not_shrink_the_budget(self):
+        self._deadline(request_budget.STARTUP_TIMEOUT * 4)
+        budget, source = request_budget.effective_startup_seconds('copilot', 'responses', 'm')
+        self.assertEqual(budget, request_budget.STARTUP_TIMEOUT)
+        self.assertEqual(source, 'fixed')
+
+    def test_a_tight_deadline_clamps_the_budget_and_says_so(self):
+        self._deadline(12.0)
+        budget, source = request_budget.effective_startup_seconds('copilot', 'responses', 'm')
+        self.assertLessEqual(budget, 12.0)
+        self.assertGreater(budget, 0)
+        self.assertEqual(source, 'clamped_by_remaining',
+                         'an operator must be able to tell the budget was bound by the deadline')
+
+    def test_a_retry_that_cannot_finish_is_not_started(self):
+        # Waiting out a budget that expires before any plausible response is
+        # pure cost: tail latency, upstream load, and a replay risk for nothing.
+        self._deadline(request_budget.MIN_RETRY_SECONDS / 2)
+        self.assertFalse(request_budget.retry_within_budget())
+
+    def test_a_retry_with_room_left_is_allowed(self):
+        self._deadline(request_budget.MIN_RETRY_SECONDS * 4)
+        self.assertTrue(request_budget.retry_within_budget())
+
+    def test_no_deadline_never_blocks_a_retry(self):
+        # Routes outside the budget middleware (and tests) have no deadline;
+        # absence must not be read as "no time left".
+        self.assertTrue(request_budget.retry_within_budget())
+
+    def test_an_exhausted_deadline_clamps_to_a_positive_budget(self):
+        # asyncio.timeout(0) would fire before the call is even issued, turning a
+        # deadline into a different failure mode. The middleware owns expiry.
+        self._deadline(0)
+        budget, _ = request_budget.effective_startup_seconds('copilot', 'responses', 'm')
+        self.assertGreater(budget, 0)
+
+    def test_route_overrides_are_still_honoured_then_clamped(self):
+        with patch.dict(request_budget.STARTUP_OVERRIDES,
+                        {('copilot', 'responses', 'slow-model'): 600.0}, clear=False):
+            budget, source = request_budget.effective_startup_seconds(
+                'copilot', 'responses', 'slow-model')
+            self.assertEqual((budget, source), (600.0, 'fixed'))
+            self._deadline(30.0)
+            budget, source = request_budget.effective_startup_seconds(
+                'copilot', 'responses', 'slow-model')
+            self.assertLessEqual(budget, 30.0)
+            self.assertEqual(source, 'clamped_by_remaining')

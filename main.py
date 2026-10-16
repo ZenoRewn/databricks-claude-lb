@@ -11,16 +11,18 @@ from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_
 from request_telemetry import note_parameter_transforms, require_image_trim_consent, note_reported_model, safe_id, note_stream_end, context_hint_headers
 from chat_adapter import build_payload as build_chat_payload, messages_to_items, tools_to_items, content as chat_content
 import model_capabilities
-from model_capabilities import observe_route_budget, estimate_payload
+from model_capabilities import observe_route_budget, estimate_payload, payload_has_image
 from build_metadata import runtime_identity, release_identity
 from safe_diagnostics import (DiagnosticFilter, DiagnosticStreamHandler, DiagnosticTextFormatter, default_handler,
                               render_metrics as diagnostic_metrics, EVENT_NAMES, transport_details)
 from request_timing import (observed_phase, begin_stream as timing_begin_stream,
-                            end_stream as timing_end_stream, observe_event)
+                            end_stream as timing_end_stream, observe_event,
+                            CURRENT as CURRENT_TIMING)
 from upstream_body import (read_error_body, render_metrics as error_body_metrics,
                            MAX_BYTES as UPSTREAM_ERROR_BODY_MAX_BYTES,
                            TIMEOUT as UPSTREAM_ERROR_BODY_TIMEOUT_SECONDS)
-from request_budget import (RequestBudgetMiddleware, headers_received,
+from request_budget import (RequestBudgetMiddleware, headers_received, remaining_seconds,
+                            retry_within_budget,
                             TOTAL_TIMEOUT as INFERENCE_TOTAL_TIMEOUT_SECONDS,
                             STARTUP_TIMEOUT as UPSTREAM_STARTUP_TIMEOUT_SECONDS)
 from admission import (AdmissionMiddleware, AdmissionError, CURRENT_LEASE,
@@ -2685,6 +2687,40 @@ def _graceful_shutdown_failure(exc):
             and details.get('http2_error_code') == 0)
 
 
+def _upstream_headers_seen():
+    """Did upstream answer with response headers on this request's last attempt?
+
+    The one fact that separates «we learned nothing» from «upstream accepted the
+    stream» when a trial ends without a result. Returns None outside a measured
+    request rather than guessing False.
+    """
+    timeline = CURRENT_TIMING.get()
+    attempt = getattr(timeline, 'active_attempt', None) if timeline is not None else None
+    return attempt.header_seconds is not None if attempt is not None else None
+
+
+def _may_replay_transport(exc, attempt, max_retries):
+    """Replay-safe **and** still worth starting.
+
+    Safety and budget are separate questions and stay separate functions:
+    `_replay_safe_transport_failure` also decides the terminal status code,
+    where time left is irrelevant. But a retry that cannot finish inside the
+    request's remaining deadline is pure cost — tail latency, upstream load and
+    replay exposure for a result nobody will receive. The 2026-10-16 GHCP event
+    spent 367 seconds on three attempts of one small request before answering
+    503.
+    """
+    if not (_replay_safe_transport_failure(exc) and attempt < max_retries - 1):
+        return False
+    if retry_within_budget():
+        return True
+    log_event({'kind': 'lb_retry_decision', 'reason': 'attempt_budget_exhausted',
+               'retry_allowed': False, 'execution_certainty': 'known_not_executed',
+               'remaining_loop_attempts': max(0, max_retries - attempt - 1),
+               'remaining_seconds': remaining_seconds()})
+    return False
+
+
 def _copilot_failure_scope(*, exception=None, reason=None):
     # Typed RST_STREAM confines the failure to one stream; REFUSED_STREAM and
     # ENHANCE_YOUR_CALM are overload signals, so retain shared account protection.
@@ -2803,6 +2839,37 @@ class RequestAttempt:
 
 
 @dataclass(eq=False)
+class CircuitRecovery:
+    """Per-circuit recovery evidence: who tried, when, and how it ended.
+
+    Recovery depends on a suitable business request arriving, so «how long has
+    the cooldown been over with nobody trying» is a real operational number. The
+    2026-10-16 GHCP review had to reconstruct a nine-minute gap from logs
+    because nothing reported it.
+
+    `contributing` holds the business request ids behind the current error
+    streak. Five failed *attempts* can come from two *requests* — one
+    replay-safe failure is retried up to three times — and conflating them makes
+    a threshold of five read as five independent health signals.
+    """
+    last_trial_at: Optional[float] = None
+    last_trial_outcome: Optional[str] = None
+    trial_started_at: Optional[float] = None
+    contributing: set = field(default_factory=set)
+    contributing_attempts: int = 0
+
+    def note_failure(self, request_id):
+        self.contributing_attempts += 1
+        # A missing id (routes outside the telemetry middleware) must not merge
+        # distinct requests into one bucket, so fall back to a unique object.
+        self.contributing.add(request_id if request_id else object())
+
+    def reset_streak(self):
+        self.contributing.clear()
+        self.contributing_attempts = 0
+
+
+@dataclass(eq=False)
 class ModelAPICircuit:
     owner: object = field(repr=False)
     model: str
@@ -2837,6 +2904,10 @@ class LoadBalancer:
         # id(state) -> circuit_generation that saw a qualifying small request.
         # Keyed on generation so a new cooldown never inherits stale evidence.
         self._small_input_evidence = {}
+        # id(state) -> CircuitRecovery. Same id()-keyed lifecycle as the evidence
+        # above rather than new dataclass fields: CopilotEndpoint is built with
+        # positional arguments in places, so inserting fields there is a trap.
+        self._recovery = {}
 
     def _route_circuit(self, ep, model, api_type, *, create=False):
         if (not LB_SETTINGS.copilot_scoped_circuits or not isinstance(ep, CopilotEndpoint) or api_type not in ep.api_types
@@ -2852,6 +2923,7 @@ class LoadBalancer:
                     return None  # Bounded cache full: retain shared protection.
                 # Drop the evidence with the state so a reused id() cannot revive it.
                 self._small_input_evidence.pop(id(self._route_circuits[discard]), None)
+                self._recovery.pop(id(self._route_circuits[discard]), None)
                 del self._route_circuits[discard]
             state = self._route_circuits[key] = ModelAPICircuit(ep, model, api_type)
         return state
@@ -2860,6 +2932,12 @@ class LoadBalancer:
         if not ep.circuit_open:
             return "CLOSED"
         return "HALF_OPEN" if time.monotonic() >= ep.circuit_retry_at else "OPEN"
+
+    def recovery(self, state) -> "CircuitRecovery":
+        record = self._recovery.get(id(state))
+        if record is None:
+            record = self._recovery[id(state)] = CircuitRecovery()
+        return record
 
     def _is_small_input(self, payload):
         # Unknown image/opaque/prior-state size is never small: an incomplete
@@ -2941,7 +3019,7 @@ class LoadBalancer:
                                                "message": "Recovery briefly prefers small complete-input requests; retry after the preference window."
                                                if deferred else "Configured upstream temporarily unavailable; retry after cooldown."}})
 
-    def _circuit_event(self, ep, previous, reason):
+    def _circuit_event(self, ep, previous, reason, extra=None):
         provider = 'copilot' if isinstance(ep, (CopilotEndpoint, ModelAPICircuit)) else 'azure_openai' if isinstance(ep, AzureOpenAIEndpoint) else 'databricks'
         fields = {'kind': 'lb_circuit_transition', 'provider': provider, 'endpoint_alias': ep.name,
                   'circuit_scope': 'model_api' if isinstance(ep, ModelAPICircuit) else 'endpoint',
@@ -2952,15 +3030,25 @@ class LoadBalancer:
             fields.update(forwarded_model=ep.model, api_type=ep.api_type)
         if reason in ('trial_admitted', 'administrative_reset'):
             fields['upstream_attempt_id'] = None
+        if reason == 'failure_threshold':
+            # Attempts and requests are different numbers: one replay-safe
+            # failure is retried up to three times, so a threshold of five can
+            # be filled by two business requests. Reported rather than silently
+            # recounted — see docs/RESILIENCE.md for why the counting stands.
+            record = self.recovery(ep)
+            fields.update(contributing_attempts=record.contributing_attempts,
+                          contributing_requests=len(record.contributing))
+        if extra:
+            fields.update(extra)
         log_event(fields)
 
-    def _open(self, ep, *, reason='failure_threshold'):
+    def _open(self, ep, *, reason='failure_threshold', extra=None):
         previous = self.circuit_state(ep)
         ep.circuit_open = True
         ep.circuit_generation += 1
         ep.circuit_retry_at = time.monotonic() + self.circuit_breaker_timeout
         ep.half_open_in_flight = False
-        self._circuit_event(ep, previous, reason)
+        self._circuit_event(ep, previous, reason, extra)
         logger.warning("Circuit breaker opened for %s", ep.name)
 
     def reset_circuit(self, ep):
@@ -3091,7 +3179,9 @@ class LoadBalancer:
         probe = endpoint.circuit_open
         if probe:
             endpoint.half_open_in_flight = True
-            self._circuit_event(endpoint, 'OPEN', 'trial_admitted')
+            self._note_trial_started(endpoint)
+            self._circuit_event(endpoint, 'OPEN', 'trial_admitted',
+                                self._admission_evidence(endpoint, payload))
         lease = RequestAttempt(endpoint, endpoint.circuit_generation, probe)
         if route is not None:
             lease.route_circuit = route
@@ -3100,7 +3190,9 @@ class LoadBalancer:
             route.active_requests += 1
             if lease.route_probe:
                 route.half_open_in_flight = True
-                self._circuit_event(route, 'OPEN', 'trial_admitted')
+                self._note_trial_started(route)
+                self._circuit_event(route, 'OPEN', 'trial_admitted',
+                                    self._admission_evidence(route, payload))
         self._attempts.setdefault(id(endpoint), {})[id(lease)] = lease
         endpoint.active_requests += 1
         endpoint.total_requests += 1
@@ -3128,44 +3220,106 @@ class LoadBalancer:
             endpoint.last_error_time = time.time()
         else:
             endpoint.neutral_requests += 1
+        request_id = telemetry_request_id()
         route = lease.route_circuit
         if route is not None:
             route.active_requests = max(0, route.active_requests - 1)
             self._settle_circuit(route, lease.route_generation, lease.route_probe, success,
-                                 failed and failure_scope == 'model_api')
+                                 failed and failure_scope == 'model_api',
+                                 cancelled=cancelled, request_id=request_id)
         self._settle_circuit(endpoint, lease.generation, lease.probe, success,
-                             failed and (failure_scope != 'model_api' or route is None))
+                             failed and (failure_scope != 'model_api' or route is None),
+                             cancelled=cancelled, request_id=request_id)
 
-    def _settle_circuit(self, endpoint, generation, probe, success, failed):
+    def _settle_circuit(self, endpoint, generation, probe, success, failed,
+                        *, cancelled=False, request_id=None):
         # Old in-flight results still count in telemetry, never override a newer trip/trial.
         if generation != endpoint.circuit_generation:
             return
+        record = self.recovery(endpoint)
         if probe:
             endpoint.half_open_in_flight = False
+            record.trial_started_at = None
+            record.last_trial_at = time.monotonic()
+            record.last_trial_outcome = ('succeeded' if success
+                                         else 'failed' if failed else 'inconclusive')
             if success:
                 endpoint.circuit_open = False
                 endpoint.consecutive_errors = 0
                 endpoint.circuit_generation += 1
+                record.reset_streak()
                 self._circuit_event(endpoint, 'HALF_OPEN', 'trial_succeeded')
                 logger.info("Circuit breaker recovered for %s", endpoint.name)
             else:
                 # A cancelled/client-rejected trial is inconclusive, not recovery.
                 # Delay the next real trial to prevent repeated cancellation storms.
                 if failed:
+                    record.note_failure(request_id)
                     endpoint.consecutive_errors += 1
-                self._open(endpoint, reason='trial_failed' if failed else 'trial_inconclusive')
+                # Which kind, and whether upstream ever answered, is the
+                # discriminator for deciding later whether this full cooldown is
+                # the right price: a cancellation before any response header
+                # says nothing about upstream, while one after headers at least
+                # proves it accepted the stream. Recorded, not acted on yet.
+                extra = None if failed else {
+                    'inconclusive_kind': 'cancelled' if cancelled else 'neutral',
+                    'upstream_headers_received': _upstream_headers_seen()}
+                self._open(endpoint, reason='trial_failed' if failed else 'trial_inconclusive',
+                           extra=extra)
         elif success:
             endpoint.consecutive_errors = 0
+            record.reset_streak()
         elif failed:
+            record.note_failure(request_id)
             endpoint.consecutive_errors += 1
             if endpoint.consecutive_errors >= self.circuit_breaker_threshold:
                 self._open(endpoint)
+
+    def _note_trial_started(self, state):
+        record = self.recovery(state)
+        record.trial_started_at = record.last_trial_at = time.monotonic()
+
+    def _admission_evidence(self, state, payload):
+        """Why this trial was admitted, as fields rather than as an inference.
+
+        The small-request preference already existed; nothing reported whether
+        it had evidence to act on, so «did it work» was unanswerable from logs.
+        """
+        estimate = estimate_payload(payload) if payload is not None else None
+        return {'small_input_evidence': self._has_small_input_evidence(state),
+                'preference_window_remaining': self._trial_preference_wait(state, payload),
+                'admitted_payload_small': (self._is_small_input(payload)
+                                           if payload is not None else None),
+                'admitted_estimate_complete': (bool(estimate['estimate_complete'])
+                                               if estimate else None)}
+
+    def recovery_stats(self, ep):
+        """How long recovery has been waiting, and what the last trial did.
+
+        Recovery needs a suitable business request to arrive, so «the cooldown
+        ended N seconds ago and nobody has tried» is a real operational number.
+        The 2026-10-16 GHCP review had to reconstruct a nine-minute gap from
+        logs because nothing exposed it.
+        """
+        now = time.monotonic()
+        record = self.recovery(ep)
+        overdue = (ep.circuit_open and not ep.half_open_in_flight
+                   and now >= ep.circuit_retry_at)
+        return {"cooldown_elapsed_seconds": round(now - ep.circuit_retry_at, 3) if overdue else 0,
+                "seconds_since_last_trial": (round(now - record.last_trial_at, 3)
+                                             if record.last_trial_at is not None else None),
+                "last_trial_outcome": record.last_trial_outcome,
+                "last_trial_age_seconds": (round(now - record.last_trial_at, 3)
+                                           if record.last_trial_outcome else None),
+                "trial_in_flight_age_seconds": (round(now - record.trial_started_at, 3)
+                                                if record.trial_started_at is not None else None)}
 
     def resilience_stats(self, ep):
         return {"circuit_state": self.circuit_state(ep),
                 "consecutive_errors": ep.consecutive_errors,
                 "half_open_in_flight": ep.half_open_in_flight,
                 "retry_after_seconds": self.retry_after([ep]) if ep.circuit_open else 0,
+                **self.recovery_stats(ep),
                 "cancelled_requests": ep.cancelled_requests,
                 "neutral_requests": ep.neutral_requests,
                 "completed_requests": ep.completed_requests,
@@ -3478,7 +3632,7 @@ class ClaudeProxy:
                 logger.error(f"{endpoint.name} failed: {e}")
                 await self.load_balancer.on_request_end(endpoint, success=False, lease=attempt_lease,
                                                         is_client_error=isinstance(e, httpx.PoolTimeout) or _graceful_shutdown_failure(e))
-                if _replay_safe_transport_failure(e) and attempt < max_retries - 1:
+                if _may_replay_transport(e, attempt, max_retries):
                     await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                     continue
                 break
@@ -3674,7 +3828,7 @@ class ClaudeProxy:
                     logger.error(f"Stream network error on {current_endpoint.name}: {error_detail}")
                     await end_current_request(success=False, is_client_error=False)
 
-                    if response is None and not sent_any_content and _replay_safe_transport_failure(e) and attempt < max_retries - 1:
+                    if response is None and not sent_any_content and _may_replay_transport(e, attempt, max_retries):
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         new_endpoint = proxy_self.load_balancer.select_endpoint(model=model, tried=tried)
                         if new_endpoint:
@@ -3907,7 +4061,7 @@ class AzureOpenAIProxy:
                 logger.error(f"{endpoint.name} failed: {e}")
                 await end_attempt(success=False,
                                   is_client_error=isinstance(e, httpx.PoolTimeout) or _graceful_shutdown_failure(e))
-                if _replay_safe_transport_failure(e) and attempt < max_retries - 1:
+                if _may_replay_transport(e, attempt, max_retries):
                     await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                     continue
                 break
@@ -4083,7 +4237,7 @@ class AzureOpenAIProxy:
                     await end_current_request(success=False)
 
                     # 已向客户端输出过 chunk 就不能再重放; 否则可以切端点重试
-                    if response is None and not sent_any_chunk and _replay_safe_transport_failure(e) and attempt < max_retries - 1:
+                    if response is None and not sent_any_chunk and _may_replay_transport(e, attempt, max_retries):
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         new_endpoint = proxy_self.load_balancer.select_endpoint_for_model(model, tried=tried)
                         if new_endpoint:
@@ -5378,18 +5532,16 @@ class CopilotProxy:
 
     @staticmethod
     def _has_image(body: dict) -> bool:
-        msgs = body.get("messages")
-        if not isinstance(msgs, list):
-            msgs = body.get("input")
-        if not isinstance(msgs, list):
-            return False
-        for m in msgs:
-            content = m.get("content") if isinstance(m, dict) else None
-            if isinstance(content, list):
-                for c in content:
-                    if isinstance(c, dict) and c.get("type") in ("image_url", "input_image"):
-                        return True
-        return False
+        """Gates `Copilot-Vision-Request`. Delegated, never reimplemented.
+
+        This used to walk only the top level of messages/input and only accept a
+        list-shaped `content`, so an image in tool output, under a mapping
+        `content`, typed `image` rather than `input_image`, or given as a bare
+        `data:` URL was invisible — and the request then went upstream without
+        the vision header. It also disagreed with the `image_count` the budget
+        event logged for the same body (observed 2026-10-16: 16 versus False).
+        """
+        return payload_has_image(body)
 
     @staticmethod
     def _strip_input_item_ids(body: dict, api_type: str) -> int:
@@ -6049,7 +6201,7 @@ class CopilotProxy:
                     await end_attempt(success=False,
                                       is_client_error=isinstance(e, httpx.PoolTimeout) or _graceful_shutdown_failure(e),
                                       failure_scope=_copilot_failure_scope(exception=e))
-                    if _replay_safe_transport_failure(e) and attempt < max_retries - 1:
+                    if _may_replay_transport(e, attempt, max_retries):
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         continue
                     break
@@ -6737,7 +6889,7 @@ class CopilotProxy:
 
                     # POST replay 只在 connect/pool 类瞬时失败允许（不 replay read/write timeout、协议错）
                     # 且 response 必须是 None（未拿到任何响应字节）
-                    if response is None and not sent_any_chunk and _replay_safe_transport_failure(e) and attempt < max_retries - 1:
+                    if response is None and not sent_any_chunk and _may_replay_transport(e, attempt, max_retries):
                         await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         new_endpoint = proxy_self._select_endpoint(model, api_type, pinned=stateful_pin,
                                                                  session_key=session_key, tried=tried, body=body)
@@ -8936,13 +9088,25 @@ async def metrics(schema: str = 'lb-metrics-v2'):
         for field_name, kind in (("consecutive_errors", "gauge"), ("usage_record_errors", "counter"), ("cancelled_requests", "counter"),
                                  ("neutral_requests", "counter"), ("completed_requests", "counter"),
                                  ("rejected_requests", "counter"), ("half_open_in_flight", "gauge"),
-                                 ("retry_after_seconds", "gauge")):
+                                 ("retry_after_seconds", "gauge"),
+                                 # Recovery needs a suitable business request to
+                                 # arrive. «Cooldown ended N seconds ago and
+                                 # nobody has tried» is the number that was
+                                 # missing when a 2026-10-16 GHCP circuit sat
+                                 # open for nine minutes.
+                                 ("cooldown_elapsed_seconds", "gauge"),
+                                 ("trial_in_flight_age_seconds", "gauge")):
             metric = f"{provider}_endpoint_{field_name}" + ("_total" if kind == "counter" else "")
             samples = []
             for ep in instance.load_balancer.endpoints:
                 label = json.dumps(ep.name, ensure_ascii=True)
-                value = int(instance.load_balancer.resilience_stats(ep)[field_name])
-                samples.append(f'{metric}{{endpoint={label}}} {value}')
+                stat = instance.load_balancer.resilience_stats(ep)[field_name]
+                # None means "no trial in flight", which is not zero seconds.
+                # Emitting 0 for it would make «nothing running» and «just
+                # started» the same sample.
+                if stat is None:
+                    continue
+                samples.append(f'{metric}{{endpoint={label}}} {int(stat)}')
             emit(metric, "Local admission/accounting state; not a synthetic upstream health probe", kind, samples)
 
     # Latency histogram (p50/p95/p99 per provider+api_type)

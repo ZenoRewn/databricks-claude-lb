@@ -20,6 +20,10 @@ IDENTIFIERS = set('kind lb_request_id request_id req operation_id upstream_attem
                   'body_size_bucket client_class capability_status estimate_method estimate_confidence context_status '
                   'budget_mode route image_trim_policy previous_state circuit_state transition_reason'.split())
 IDENTIFIERS.update(('protocol_error_kind', 'protocol_scope', 'circuit_scope', 'context_advice'))
+# When the event itself happened, as opposed to when its request began
+# (`started_at_unix`, below). Dating events by request start is what forced four
+# retractions in the 2026-10-16 GHCP review.
+IDENTIFIERS.update(('event_time', 'startup_budget_source', 'inconclusive_kind', 'last_trial_outcome'))
 NUMBERS = set('schema_version upstream_status upstream_http_status http_status duration_seconds attempt admissions '
               'upstream_sends input_bytes body_size_bytes input_tokens output_tokens cache_read_tokens chunks '
               'chunks_yielded decoded_bytes decoded_deliveries frames pending_eof_bytes peak_pending_bytes '
@@ -30,10 +34,14 @@ NUMBERS = set('schema_version upstream_status upstream_http_status http_status d
               'circuit_generation consecutive_errors'.split())
 NUMBERS.update(('http2_error_code', 'http2_stream_id', 'http2_last_stream_id', 'upstream_idle_seconds',
                 'seconds_since_headers', 'threshold_seconds'))
+NUMBERS.update(('event_monotonic', 'preference_window_remaining', 'contributing_requests',
+                'contributing_attempts', 'cooldown_elapsed_seconds', 'seconds_since_last_trial',
+                'last_trial_age_seconds', 'trial_in_flight_age_seconds', 'remaining_budget_seconds'))
 BOOLEANS = set('retry retry_allowed retryable retry_after_present downstream_headers_sent downstream_content_started '
                'downstream_body_completed draining_at_finish saw_completion terminal_seen terminal_valid has_image '
                'sent_any_chunk account_neutral read_timeout probe_ok httpx_pool_observed_full upstream_headers_received '
-               'stream upstream_stream estimate_complete enforcement_allowed'.split())
+               'stream upstream_stream estimate_complete enforcement_allowed '
+               'small_input_evidence admitted_payload_small admitted_estimate_complete'.split())
 LIST_FIELDS = {'parameters', 'dropped_parameters', 'rejected_parameters', 'transformed_parameters', 'removed_params', 'unknown_components'}
 POOL_KEYS = {'total', 'active', 'idle', 'closing', 'requests_waiting', 'max_connections', 'max_keepalive_connections'}
 PROBE_KEYS = {'ok', 'cached', 'dns_ms', 'tcp_ms'}

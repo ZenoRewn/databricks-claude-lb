@@ -32,6 +32,65 @@ class CircuitEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ep.completed_requests, 1)
 
 
+class EventTimeTests(unittest.IsolatedAsyncioTestCase):
+    """Every structured event carries when *it* happened.
+
+    The 2026-10-16 GHCP review had to retract four statements for one reason:
+    the event payload's only self-contained time field was `started_at_unix`,
+    which is the *request's* start. A request that retried for six minutes
+    therefore looked like several things happening at one instant, and the
+    analysis dated a circuit trip, a trial admission and a trial outcome to
+    request-start times.
+
+    Production runs LOG_FORMAT=json, whose formatter does emit `ts` from
+    `record.created`, so the information was not missing there — but the trap
+    was, and the default text formatter carries no time at all. An explicit
+    `event_time` inside the payload removes the trap in both formats and
+    survives export and re-parsing.
+    """
+
+    async def test_an_event_says_when_it_happened_not_when_the_request_began(self):
+        ep = main.WorkspaceEndpoint('synthetic', 'https://fixture.invalid', 'synthetic')
+        lb = main.LoadBalancer([ep], circuit_breaker_threshold=1, circuit_breaker_timeout=10)
+        now = [5000.0]
+        with patch.object(main.time, 'monotonic', side_effect=lambda: now[0]), \
+             self.assertLogs('main', level='INFO') as logs:
+            lease = await lb.on_request_start(ep)
+            await lb.on_request_end(ep, False, lease=lease)
+        events = [r for r in logs.records if getattr(r, 'kind', '') == 'lb_circuit_transition']
+        self.assertTrue(events)
+        for record in events:
+            self.assertTrue(getattr(record, 'event_time', None),
+                            'every structured event needs its own wall-clock time')
+            # ISO-8601 with a Z suffix, same wire shape the JSON formatter uses.
+            self.assertRegex(record.event_time,
+                             r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$')
+            self.assertIsNotNone(getattr(record, 'event_monotonic', None))
+
+    async def test_events_separated_in_time_do_not_share_one_timestamp(self):
+        """The actual defect: a six-minute retry sequence collapsing to a point."""
+        from request_telemetry import RequestRecord, CURRENT, RequestTelemetry, log_event
+
+        record = RequestRecord('responses', RequestTelemetry())
+        token = CURRENT.set(record)
+        self.addCleanup(CURRENT.reset, token)
+        clock = [1_760_000_000.0]
+        with patch('request_telemetry.time.time', side_effect=lambda: clock[0]), \
+             self.assertLogs('main', level='INFO') as logs:
+            log_event({'kind': 'lb_upstream_error', 'attempt': 0})
+            clock[0] += 121.3
+            log_event({'kind': 'lb_upstream_error', 'attempt': 1})
+            clock[0] += 121.3
+            log_event({'kind': 'lb_upstream_error', 'attempt': 2})
+        stamps = [r.event_time for r in logs.records if getattr(r, 'kind', None)]
+        self.assertEqual(len(stamps), 3)
+        self.assertEqual(len(set(stamps)), 3, 'three attempts minutes apart need three times')
+        self.assertEqual(stamps, sorted(stamps), 'event_time must be monotonic in wall clock')
+        starts = {r.started_at_unix for r in logs.records if getattr(r, 'kind', None)}
+        self.assertEqual(len(starts), 1,
+                         'started_at_unix keeps its meaning: the request start, shared')
+
+
 class UsageEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_v3_reports_accepted_acknowledged_and_oldest_pending_separately(self):
         with tempfile.TemporaryDirectory() as directory:

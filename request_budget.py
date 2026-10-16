@@ -49,6 +49,45 @@ def startup_seconds(provider, api_type, model):
     return STARTUP_OVERRIDES.get((provider, api_type, model), STARTUP_TIMEOUT)
 
 
+# A retry with less than this much budget left cannot plausibly finish, so
+# starting it only buys tail latency, upstream load and replay exposure.
+MIN_RETRY_SECONDS = float(os.getenv('UPSTREAM_MIN_RETRY_SECONDS', '5'))
+if not math.isfinite(MIN_RETRY_SECONDS) or MIN_RETRY_SECONDS <= 0:
+    raise ValueError('UPSTREAM_MIN_RETRY_SECONDS must be finite and positive')
+# Clamping to exactly zero would make asyncio.timeout fire before the call is
+# even issued, converting a deadline into a different failure mode. Expiry is
+# the middleware's job; this floor keeps the per-attempt timer meaningful.
+_BUDGET_FLOOR_SECONDS = 0.05
+
+
+def effective_startup_seconds(provider, api_type, model):
+    """The fixed per-attempt budget, capped by what the request has left.
+
+    A retry inherits the remaining deadline rather than a fresh full budget.
+    Otherwise three replay-safe retries can each wait the whole startup budget,
+    long after the caller stopped waiting — which is what the 2026-10-16 GHCP
+    review asked for under "重试只使用剩余预算".
+
+    Returns (seconds, source) so the log can say whether the deadline actually
+    bound the attempt; `remaining_seconds()` used to be logged and never used.
+    """
+    budget = startup_seconds(provider, api_type, model)
+    remaining = remaining_seconds()
+    if remaining is None or remaining >= budget:
+        return budget, 'fixed'
+    return max(_BUDGET_FLOOR_SECONDS, remaining), 'clamped_by_remaining'
+
+
+def retry_within_budget():
+    """Is there enough budget left for another attempt to be worth starting?
+
+    No deadline means this route is not under the budget middleware; absence is
+    not "no time left", so it never blocks a retry.
+    """
+    remaining = remaining_seconds()
+    return remaining is None or remaining >= MIN_RETRY_SECONDS
+
+
 class UpstreamStartupTimeout(httpx.ReadTimeout):
     """Headers did not arrive in budget; execution is unknown, never replay-safe."""
 

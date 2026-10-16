@@ -8,6 +8,7 @@ import asyncio
 from collections import Counter
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -15,7 +16,8 @@ import re
 import time
 import uuid
 from fastapi import HTTPException
-from request_budget import startup_budget, startup_seconds, UpstreamStartupTimeout, remaining_seconds
+from request_budget import (startup_budget, effective_startup_seconds, UpstreamStartupTimeout,
+                            remaining_seconds)
 from request_timing import CURRENT as CURRENT_TIMING, Timeline, PhaseMetrics, observe_event
 from response_semantics import REASONS, assess_json, exception_reason, failure_reason
 from safe_diagnostics import safe_fields, safe_identifier, DIAGNOSTIC_DROPS, transport_details
@@ -66,9 +68,29 @@ def context_hint_headers(summary):
     return headers
 
 
+def event_stamp():
+    """When *this event* happened, as its own field inside the payload.
+
+    `started_at_unix` is the request's start and is deliberately shared by every
+    event of that request — which is exactly the trap the 2026-10-16 GHCP review
+    fell into: a request that retried for six minutes produced a circuit trip, a
+    trial admission and a trial outcome that all carried the same instant, and
+    four statements had to be retracted. The JSON formatter does emit `ts` from
+    `record.created`, so production was not missing the data; what was missing
+    was a time *in the event* that survives export, re-parsing, and the default
+    text formatter (which carries no time at all).
+
+    Monotonic is recorded alongside because wall clock can step; ordering within
+    a process should not depend on NTP behaving.
+    """
+    return {'event_time': datetime.fromtimestamp(time.time(), timezone.utc)
+                                  .isoformat(timespec='milliseconds').replace('+00:00', 'Z'),
+            'event_monotonic': round(time.monotonic(), 6)}
+
+
 def log_event(fields):
     try:
-        fields = safe_fields({**log_context(), **fields, 'schema_version': 1})
+        fields = safe_fields({**log_context(), **event_stamp(), **fields, 'schema_version': 1})
         logger.info('%s', fields['kind'], extra=fields)
     except Exception:
         # Observability must never cancel generation or strand an owned response.
@@ -401,7 +423,9 @@ async def inference_call(awaitable, provider, api_type, *, model=None, endpoint=
     result = 'transport_error'
     status = None
     http_version = 'unknown'
-    budget = startup_seconds(provider, api_type, model)
+    # Capped by whatever deadline the request has left: a retry inherits the
+    # remaining budget instead of a fresh full one.
+    budget, budget_source = effective_startup_seconds(provider, api_type, model)
     timeline = CURRENT_TIMING.get()
     timing = timeline.begin_attempt(budget) if timeline is not None else None
     try:
@@ -430,7 +454,8 @@ async def inference_call(awaitable, provider, api_type, *, model=None, endpoint=
                 'result':result,'upstream_status':status if type(status) is int else None,
                 'http_version': http_version,
                 'duration_seconds':round(time.monotonic()-started,6)}
-        fields.update(startup_budget_seconds=budget,
+        fields.update(startup_budget_seconds=budget, startup_budget_source=budget_source,
+                      remaining_budget_seconds=remaining_seconds(),
                       upstream_headers_received=timing.header_seconds is not None if timing else None,
                       phase_seconds={'send_to_headers': timing.header_seconds if timing else None,
                                      'send_call': timing.send_seconds if timing else None})

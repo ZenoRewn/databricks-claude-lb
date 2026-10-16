@@ -1143,3 +1143,69 @@ print('策略存储:', {k: b['policy'].get(k) for k in ('state','backend','model
 此时「规则没生效」是预期行为，先修存储。
 
 **没有列出的模型维持原本规则**，这是设计而非遗漏：规则表只列有人显式配过的模型。
+
+---
+
+## 21. GHCP 熔断后恢复慢 / 一直停在 HALF_OPEN
+
+### 症状
+
+某个 GHCP 账户熔断后长时间不恢复；`/metrics` 里 `circuit_open=1` 却 `retry_after_seconds=0`；
+或者看起来「每 60 秒重试一次却总是失败」。
+
+### 先分清两件事
+
+**HALF_OPEN 不是「正在重试」，而是「允许一个真实请求来试」。** 没有业务请求到达时停在这个
+状态是**正常设计**，不是死锁，也没有任何后台定时器在发请求。所以恢复慢通常不是熔断器坏了，
+而是**没有合适的请求来认领试探槽**。
+
+一条命令把等待变成数字（2026-10-16 之前这个数只能靠翻日志反推）：
+
+```bash
+curl -s https://lb.zeno.ink/stats -H "x-api-key: $KEY" \
+  | python3 -c "
+import json, sys
+for ep in json.load(sys.stdin).get('github_copilot', {}).get('endpoints', []):
+    print(f\"{ep['name']:14s} {ep['circuit_state']:9s}\"
+          f\" 冷却已过={ep['cooldown_elapsed_seconds']}s\"
+          f\" 距上次试探={ep['seconds_since_last_trial']}\"
+          f\" 上次试探={ep['last_trial_outcome']}（{ep['last_trial_age_seconds']}s 前）\"
+          f\" 在途试探={ep['trial_in_flight_age_seconds']}\")"
+```
+
+| 读到的 | 含义 | 下一步 |
+|---|---|---|
+| `cooldown_elapsed_seconds` 很大、`last_trial_outcome` 为 `null` | 冷却早就过了，**从来没有请求来试过** | 发一个**小的**真实请求即可恢复（注意：这是真调用、真计费，不是只读健康检查） |
+| `trial_in_flight_age_seconds` 很大 | 有一笔试探**占着槽**迟迟不结束 | 多半是大请求/流式请求卡在上游；它结束前不会有第二次试探 |
+| `last_trial_outcome` 为 `inconclusive` 且反复 | 试探被取消而非失败 | 看事件里的 `inconclusive_kind` 与 `upstream_headers_received`：未收到响应头的取消**对上游零证据** |
+| `last_trial_outcome` 为 `failed` 且反复 | 上游真的还在拒 | 查 `lb_upstream_error` 的 `http2_error_code` 与作用域 |
+
+### 为什么阈值 5 可能只来自 2 个请求
+
+一次可重放失败（HTTP/2 `REFUSED_STREAM`，code 7）最多重试 **3** 次，每次都是一个独立
+attempt，各记一次错误。所以**两个业务请求就能打满阈值 5**。跳闸事件自己会说：
+
+```bash
+# contributing_attempts=5, contributing_requests=2
+kubectl -n zeno-apps logs deploy/claude-lb --since=1h \
+  | grep lb_circuit_transition | grep failure_threshold
+```
+
+这是**有意不改**的口径，理由见 [有意未改的部分](RESILIENCE.md#deliberately-unchanged) ——
+按请求计数会让端点真死时保护晚得多。
+
+### 读日志时的时间口径
+
+用 **`event_time`**，不要用 `started_at_unix`。后者是**请求**的起点，同一请求的所有事件
+共用它；拿它当事件时间，一个重试了六分钟的请求会被压成同一瞬间。2026-10-16 的复盘就是
+这样导致四条表述被撤回。详见
+[事件时间](OBSERVABILITY_AND_CONTEXT.md#event-time-and-image-detection)。
+
+### 不要做的几件事
+
+- **不要只把熔断阈值调大** —— 只会让更多请求去经历那段长时间失败。
+- **不要把客户端取消算成上游失败** —— 会误伤账户健康度。
+- **不要因为取消的试探就判定上游已恢复** —— 没有拿到上游成功证据。
+- **不要仅因备用账户存在就启用它** —— 要先验模型/API/鉴权与会话亲和。
+- **不要无条件关掉 HTTP/2 或每次 RST 就重建整个连接池** —— 需要受控对照，否则会伤到
+  并发与健康请求。

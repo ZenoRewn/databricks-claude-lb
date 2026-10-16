@@ -142,3 +142,53 @@ DNS/TCP/TLS/pool 没有可靠独立 hook，保持 null。阶段可能嵌套，�
 特性检查包含 Responses `function_call_output.output` 数组中的图片，同时继续排除工具 schema/example 内的示意数据。Chat 入口不再通过整数强转把布尔值或小数输出上限当零删除；适配器会明确拒绝这些非法类型，保留原有合法整数及整数文本的兼容行为。
 
 `GET /admin/model-capabilities` 沿用管理接口的 LB 鉴权，显示目录来源和状态；标准 `/v1/models` 的 data/models 返回结构保持兼容。`/config/effective` 展示实际开关与目录 hash，并返回构建身份、文件匹配和完整 manifest 覆盖状态。
+
+<a id="event-time-and-image-detection"></a>
+
+## 8. 事件时间与图片判定（2026-10-16 事件后）
+
+### `event_time` vs `started_at_unix`
+
+每条结构化事件都带：
+
+- **`event_time`** —— 这条事件**自己**何时发生（UTC ISO，毫秒）
+- **`event_monotonic`** —— 同一时刻的单调值；墙钟会跳，进程内的先后顺序不该依赖 NTP
+- **`started_at_unix`** —— **请求**的起点，同一请求的所有事件共用它（含义不变）
+
+为什么要分开：2026-10-16 的 GHCP 复盘把熔断跳闸、试探准入、试探结果三件事都标到了请求
+起点，于是一个重试了六分钟的请求被读成同一瞬间，**四条表述因此被撤回**。生产用
+`LOG_FORMAT=json`，它的 formatter 本来就输出 `ts`（取 `record.created`），所以数据没丢 ——
+丢的是「事件载荷自己说得清自己何时发生」。导出、转存、二次解析只带走载荷；而默认的
+text 格式连时间都没有。
+
+新增事件字段**必须**加进 `safe_diagnostics` 的白名单，否则会被静默过滤掉（实现时就撞过）。
+
+### 「这个请求带不带图」只有一个实现
+
+`model_capabilities.payload_has_image()`，与 `estimate_payload` 共用遍历。
+
+这不只是日志口径问题：`CopilotProxy._has_image` 门控 `Copilot-Vision-Request: true`，
+**漏判等于把带图请求裸发给上游**。旧实现只看顶层 `messages`/`input`，且要求 `content`
+是 list、类型只认 `image_url`/`input_image`，于是以下四种形状全漏：
+
+| 形状 | 旧实现 |
+|---|---|
+| 图片在 tool 输出等更深层 | 漏 |
+| `content` 是 mapping 而不是 list | 漏 |
+| Anthropic 的 `type: "image"` | 漏 |
+| 裸 `data:image/...` 字符串 | 漏 |
+
+同一个 body 因此能同时记下 `image_count=16` 与 `has_image=False`（2026-10-16 实测）。
+
+假阳性那一侧由遍历本身兜住：`tools`/`response_format`/`text`/`output_config` 是
+definition 子树，**描述**图片的 schema 不算图片 —— 给工具 schema 发 vision 头是镜像缺陷。
+
+代价是 copilot 路径上多一次 body 遍历（受既有的 `visited > 100000` 与深度 128 两个上限
+约束）；`observe_route_budget` 已经遍历过一次，所以这是第二次而非第一次。
+
+超量裁剪里的 `collect` **没有**统一进来：它要的是 `(parent, index)` 定位以便替换节点，
+是另一个问题，动它会改裁剪行为。
+
+**这不是那次事件的根因结论。** 它是独立成立的缺陷，可能影响带图的那一部分请求；但触发
+最终熔断的是一个**没有图**的小请求，同样的 code 7。见
+[有意未改的部分](RESILIENCE.md#deliberately-unchanged)。

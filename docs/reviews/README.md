@@ -6,6 +6,7 @@ Author: Zeno Ren
 
 | 日期 | 范围 | 入口 |
 |---|---|---|
+| 2026-10-16 | GHCP HALF_OPEN 事件：事件时间口径、重试预算、恢复可见性与图片判定收敛；三项优化候选有意未改并记明理由 | [事件回执](2026-10-16-ghcp-half-open/REPORT.md) |
 | 2026-10-15 | 面板独立密码与 HttpOnly 会话 AKS 发布；两步发布，并记下一次差点造成镜像回滚的误判 | [部署回执](2026-10-15-panel-password-aks/REPORT.md) |
 | 2026-10-14 | 路由规则三段式（模型 → Provider → GHCP 账户）与面板解锁 AKS 发布；密钥驻留契约变更，三处缺陷在验证中发现并修复 | [部署回执](2026-10-14-routing-rules-aks/REPORT.md) |
 | 2026-10-14 | 账户先落地后启用、凭据录入与 Foundry v1 AKS 发布；首轮因控制器缺一个 Secret 读权限而在 preflight 中止 | [部署回执](2026-10-14-inert-accounts-aks/REPORT.md) |

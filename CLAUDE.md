@@ -41,6 +41,13 @@ Copilot 的 opaque-state 拒绝是请求级问题，不应污染账户熔断；�
 
 连接池排障使用 `httpx_pool_observed_full` 这一观测字段；池等待超时本身不能证明 TCP/TLS 故障。不要恢复已撤回的二分类诊断。症状入口见 [排障指南](docs/TROUBLESHOOTING.md)。
 
+## 事件时间与重试预算
+
+- **每条结构化事件自带 `event_time`（和 `event_monotonic`）。** `started_at_unix` 是**请求**的起点，同一请求的所有事件共用它 —— 拿它当事件时间，一个重试了六分钟的请求就会被压成同一瞬间。2026-10-16 的 GHCP 复盘正是这样把熔断跳闸、试探准入、试探结果三件事都标到了请求起点，**撤回了四条表述**。生产的 json formatter 本来就输出 `ts`（取 `record.created`），所以数据没丢，丢的是「事件自己说得清自己何时发生」；默认 text 格式则完全没有时间。新增事件字段必须进 `safe_diagnostics` 白名单，否则会被静默过滤。
+- **重试继承剩余预算，不另拿一份完整预算。** 每次 attempt 的启动预算 = `min(固定预算, 剩余 deadline)`，由 `effective_startup_seconds()` 收口，日志里 `startup_budget_source` 说明是否被 deadline 绑住。剩余预算低于 `UPSTREAM_MIN_RETRY_SECONDS` 时**不开始**重试：注定完不成的重试只换来拖尾延迟、上游负担与重放暴露。这不改「执行状态不明不重放」的边界 —— 安全性由 `_replay_safe_transport_failure` 判定，预算由 `retry_within_budget()` 判定，两个问题两个函数。
+- **「这个账户为什么不接流量」与候选判断同源，熔断恢复状态必须可见而不是可推。** 试探准入事件带 `small_input_evidence` / `preference_window_remaining` / `admitted_payload_small` / `admitted_estimate_complete`；inconclusive 结算带 `inconclusive_kind` 与 `upstream_headers_received`（未收到响应头的取消对上游零证据，收到了的至少证明上游接了流）。`resilience_stats` 暴露 `cooldown_elapsed_seconds` / `seconds_since_last_trial` / `last_trial_outcome` / `trial_in_flight_age_seconds`。**attempt 数与业务请求数是两个口径**：一次可重放失败最多重试 3 次，所以阈值 5 可以由 2 个业务请求打满；转换事件用 `contributing_attempts` / `contributing_requests` 把这件事摆出来，而**不**改计数语义 —— 改成按请求计数会让端点真死时保护晚得多。
+- **「这个请求带不带图」只有一个实现**：`model_capabilities.payload_has_image()`，与 `estimate_payload` 共用遍历。它不只是日志字段 —— `_has_image` 门控 `Copilot-Vision-Request` 头，所以漏判等于把带图请求裸发给上游。旧实现只看顶层 `messages`/`input` 且要求 `content` 是 list，于是 tool 输出里的图、mapping 形 `content`、Anthropic 的 `type: image`、裸 `data:` URL 全漏，并与同一个 body 的 `image_count` 对不上（2026-10-16 实测 16 vs False）。假阳性那侧由遍历本身兜住：`tools`/`response_format`/`text`/`output_config` 是 definition 子树，描述图片的 schema 不算图片。
+
 ## API 端点
 
 | 端点 | 方法 | 认证 | 说明 |
