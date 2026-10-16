@@ -254,6 +254,24 @@ def requested_features(payload):
             'structured_output': any(isinstance(fmt, dict) and fmt.get('type') in ('json_schema', 'json_object') for fmt in formats)}
 
 
+def payload_has_image(payload) -> bool:
+    """Does this body carry an image? Single source of truth.
+
+    Shares `estimate_payload`'s traversal, so `has_image` and `image_count` can
+    never disagree about one body again — they did on 2026-10-16, and the
+    narrower of the two gates the `Copilot-Vision-Request` header, meaning an
+    image-bearing request could be sent upstream without it.
+
+    Inherits two properties from that traversal that a hand-written check kept
+    getting wrong: it recurses to any depth (images live in tool output too),
+    and it ignores definition subtrees (`tools`, `response_format`, `text`,
+    `output_config`) so a schema *describing* an image is not an image.
+    """
+    if not isinstance(payload, dict):
+        return False
+    return estimate_payload(payload)['image_count'] > 0
+
+
 def evaluate_budget(catalog, provider, api_type, model, payload, *, endpoint_alias=None, mode='observe'):
     if mode not in ('off', 'observe', 'enforce'):
         raise ValueError('Invalid context budget mode')

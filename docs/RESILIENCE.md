@@ -243,10 +243,99 @@ domain and are deliberately not pre-seeded.
   unsupported-model rejection, may follow the existing configured Azure route.
   No new provider/account/model substitution policy is added.
 
+* **A retry inherits the request's remaining deadline.** The per-attempt startup
+  budget is `min(fixed budget, remaining deadline)`, resolved by
+  `effective_startup_seconds()`; `startup_budget_source` in the send event says
+  whether the deadline actually bound it. Below `UPSTREAM_MIN_RETRY_SECONDS`
+  (default 5) a retry is **not started** — it cannot finish, so it only buys
+  tail latency, upstream load and replay exposure. Replay *safety* is still
+  decided solely by `_replay_safe_transport_failure`; budget is a separate
+  question in a separate function, because the safety predicate also chooses the
+  terminal status code, where time left is irrelevant.
+
+  With the defaults (1800s total, 180s startup) the clamp only engages late in a
+  long request, so it would **not** have altered the 2026-10-16 event, where
+  three attempts took 367s in total and each ended at ~121s because upstream
+  sent RST_STREAM. It matters when a startup override is large enough that three
+  attempts can consume the whole total budget, or when upstream hangs instead of
+  resetting. This is a correctness property, not a fix for that incident.
+
 HTTP semantics reference: RFC 9110 sections 9.2.2, 10.2.3, 15.5.5, 15.6.4.
 In particular, no received-content heuristic establishes POST idempotency.
 Circuit-pattern reference:
 https://learn.microsoft.com/en-us/azure/architecture/patterns/circuit-breaker
+
+<a id="recovery-observability"></a>
+
+### Recovery is observable, because it depends on traffic arriving
+
+HALF_OPEN only means *a* trial may be admitted; a real business request has to
+show up to claim it. So "the cooldown ended N seconds ago and nobody has tried"
+is an operational fact, not an inference. On 2026-10-16 a GHCP circuit sat
+recoverable for roughly nine minutes and the gap had to be reconstructed from
+logs afterwards.
+
+`resilience_stats` (hence `/stats` and `/metrics`) now reports:
+
+| Field | Question it answers |
+|---|---|
+| `cooldown_elapsed_seconds` | How long has it been eligible with no trial running? `0` while still cooling down |
+| `seconds_since_last_trial` | When did anything last try? `null` if nothing ever did |
+| `last_trial_outcome` | `succeeded` / `failed` / `inconclusive`, or `null` |
+| `last_trial_age_seconds` | How stale is that verdict |
+| `trial_in_flight_age_seconds` | How long the current trial has held the slot (`null` = none; **not** `0`, which would conflate "nothing running" with "just started") |
+
+Trial admission events carry **why** they were admitted — `small_input_evidence`,
+`preference_window_remaining`, `admitted_payload_small`,
+`admitted_estimate_complete` — because the small-request preference already
+existed and nothing reported whether it had evidence to act on, leaving "did it
+work" unanswerable.
+
+Inconclusive settlements carry `inconclusive_kind` (`cancelled` / `neutral`) and
+`upstream_headers_received`. That last field is the discriminator that was
+missing: a cancellation *before* any response header tells us nothing about
+upstream, while one *after* headers at least proves upstream accepted the
+stream. `null` means the request was not measured — absence, not `False`.
+
+A breaker trip also reports `contributing_attempts` and
+`contributing_requests`, because they are different numbers (see below).
+
+<a id="deliberately-unchanged"></a>
+
+### Evaluated after 2026-10-16 and deliberately not changed
+
+Each of these was proposed, has a real argument for it, and was left alone with
+a reason. `tests/test_circuit_admission.py::DeliberatelyUnchangedTests` pins all
+three, so changing one later is a decision rather than a side effect.
+
+**The breaker still counts attempts, not business requests.** One replay-safe
+failure is retried up to three times, so a threshold of five can be filled by
+two requests — and in the 2026-10-16 event it was (three code-7 attempts of one
+small request, two of a large one). Recounting per request sounds more honest
+but makes protection *later*: a genuinely dead endpoint would need five failing
+requests, each burning its own three long attempts first. Raising the threshold
+is worse still — it just means more requests experience the long failure. So the
+amplification is reported on the transition event and the arithmetic stands.
+
+**An inconclusive trial still rearms the full cooldown.** Shortening it would
+help exactly the observed case — a client disconnected 90 seconds into a trial,
+before upstream sent any header, and the endpoint paid another 60 seconds for
+zero evidence. But the full cooldown is what prevents a cancel/reprobe storm,
+and one incident is thin evidence for relaxing a protection boundary. The
+discriminator (`inconclusive_kind` + `upstream_headers_received`) is now
+recorded; the policy waits for data.
+
+**Nothing probes the upstream on its own.** A background recovery probe would
+remove the dependency on suitable traffic, but it sends a real, billable
+inference request — the `say ok` that closed the circuit on 2026-10-16 was a
+real call with real cost, not a read-only health check. The wait is exposed as a
+number instead, and intervening stays a human decision.
+
+Still unknown and **not** claimed to be fixed: which layer emitted the
+RST_STREAM and why. The image-detector unification (see
+`docs/OBSERVABILITY_AND_CONTEXT.md`) fixed a real defect that plausibly affected
+the image-bearing subset, but it cannot explain the small request that failed
+the same way with no images at all.
 
 ## Health endpoints
 

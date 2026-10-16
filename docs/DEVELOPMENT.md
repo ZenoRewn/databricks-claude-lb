@@ -46,6 +46,10 @@ node tests/test_dashboard_ui.cjs
 | 凭据封装、device flow | `tests/test_provider_credentials.py` |
 | 任何新路由或鉴权变更 | `tests/test_api_surface_contract.py`（双向核验 `CLAUDE.md` 的 API 表） |
 | 存储 schema | `tests/test_release_schema.py`（「不存在放行、存在严格匹配」） |
+| 熔断恢复可见性、试探准入证据、attempt/请求口径 | `tests/test_circuit_admission.py` 的 `RecoveryEvidenceTests`；`DeliberatelyUnchangedTests` 钉住**有意未改**的三项 |
+| 重试预算（继承剩余 deadline、不足则不重试） | `tests/test_request_budget.py::RetryBudgetTests` |
+| 事件自带 `event_time` | `tests/test_operational_evidence.py::EventTimeTests` |
+| 图片判定与 `Copilot-Vision-Request` 门控 | `tests/test_vision_header_detection.py` |
 | Dashboard 行为 | `tests/test_dashboard_ui.cjs`（按 `// ---------- X` 注释切片取 JS，改动要保留这些标记） |
 
 MySQL 的 opt-in 测试必须使用一次性隔离实例，不指向生产。发布工具的 Kind/中断/接管场景有独立环境与证据要求，见 [发布测试说明](../tests/release/README.md)。不为通过 CI 削弱协议、账本或退出码断言。
