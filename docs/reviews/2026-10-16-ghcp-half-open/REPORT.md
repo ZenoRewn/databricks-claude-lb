@@ -21,12 +21,18 @@ Author: Zeno Ren
 
 ## 核验：复盘里要修正的一条
 
-复盘称「日志缺真实事件时间」。**数据没丢**：生产是 `LOG_FORMAT=json`
-（`deploy/k8s/deployment.yaml`），该 formatter 输出 `ts`（取 `record.created`）。
+复盘称「日志缺真实事件时间」—— **这条是对的，我在首轮核验时判错了，发布后实测纠正。**
 
-真正的缺陷窄一些但确实存在：**事件载荷自身**只有 `started_at_unix`（请求起点，同一请求
-所有事件共用），于是读 JSON 体的人自然把它当事件时间。这正是前一轮分析里 **8 条表述中
-4 条**被撤回的原因。默认的 text 格式则连时间都没有。
+我当时读 `deploy/k8s/deployment.yaml` 看到 `LOG_FORMAT=json`，于是断言「生产输出 `ts`、
+数据没丢」。但那个文件是**示例形态**，文档本来就写明不是线上形态。发布后读 live 对象：
+Deployment 的 env 是
+`[COPILOT_STREAM_*×4, IMG_MAX_COUNT, LB_CREDENTIAL_KEY, LB_DASHBOARD_PASSWORD]`，
+**没有 `LOG_FORMAT`** → 走默认 `text` formatter → 输出 `LEVEL:logger:{payload}`，
+**一个时间字段都没有**。这正是分析者当时必须退回 `kubectl logs --timestamps=true` 的原因。
+
+所以 `event_time` 补的是**真正缺失的数据**，不只是消除一个坑。教训与 10-15 那次
+「apply 管理 ≠ last-applied 可信」同形：**仓库里的 manifest ≠ 线上对象**，判断生产事实
+只能读 live。
 
 ## 本轮改了什么
 
@@ -133,3 +139,61 @@ node tests/test_dashboard_ui.cjs
 `DeliberatelyUnchangedTests`（3 项）。
 
 **未发布 AKS。** 本轮全部是源码与文档改动；发布时机等通知。
+
+## 发布记录（2026-10-16）
+
+| | |
+|---|---|
+| 源码 | `0e42828`（功能提交 `a524eeb`，PR #42） |
+| 镜像 | `zenoseaacr.azurecr.io/databricks-claude-lb@sha256:c71661e4…`（本地 image ID `f9b4b50f…`，两者是不同证据） |
+| source manifest | `2e316f92386cc7bcd72ebce00121a3cc0f22fe9a287f5a566623ce0a8db6503`（23 个运行文件） |
+| 线上此前 | `db8845a`，generation 128 |
+| 线上现在 | `0e42828` / `matched`，generation 132 |
+| 发布耗时 | r2 共 109.2 秒，11 个阶段全过 |
+| 业务探针 | messages / responses / chat 三协议均 `completed` + `marker_found` |
+
+镜像内自检 20 项全过（build attestation、23 个运行文件、`event_time`、预算 clamp 的
+三种分支、四种图片形状 + 假阳性护栏、恢复字段、以及**有意未改**的两条边界仍在）。
+
+### 首轮失败：发布工具的潜伏缺陷，不是本批代码
+
+r1（`lb-20261016-ghcp-half-open-0e42828`）在 **preflight** 以
+`image_preflight_failed` 回滚。**未进入维护窗口**（`maintenance_started_at: null`），
+生产零影响：版本、Pod、generation 全程未变。
+
+根因在 `operations/release/backend.py::_image_preflight`：校验 Pod 带
+`activeDeadlineSeconds=90`，而该函数在 preflight 阶段的**每个 tick（1 秒）都被重新调用**，
+结论是从 `pod.status.phase` **现场推导**的。实测时间线：
+
+| 时刻 | 事件 |
+|---|---|
+| t+0 | preflight 开始 |
+| t+66 | `-new` 校验通过（拉取 + 校验 23 个文件共 66s），创建 `-old` |
+| t+81 | `-old` 容器 **exit 0**、打印 `OLD_IMAGE_IMPORT_OK` —— 检查其实**通过了** |
+| t+156 | `-old` 的 90s deadline 到；Pod phase 迟迟没落到 `Succeeded`（sandbox 到 t+169 才拆），被 kubelet 判 `DeadlineExceeded` → `Failed` |
+| t+171 | 下一个 tick 读到 `Failed` → `RuntimeError('image_preflight_failed')` |
+
+即**一个已经通过的检查被读成了硬失败**。r2 换 release id 重跑即通过（两个镜像已缓存在
+节点上，preflight 快于 deadline 窗口）。
+
+建议的修法（**本轮未做**，它要重建并重新部署控制器镜像）：让 `_image_preflight` 把首次
+观察到的成功结果记进 `action_receipts`，后续 tick 不再重新推导 —— 与工具里其他步骤的既有
+写法一致。不建议单纯调大 `activeDeadlineSeconds`：那只是把时间炸弹的引线加长。
+
+### 发布后实测纠正了我自己的一条判断
+
+见上面「复盘里要修正的一条」—— 我把仓库示例 manifest 当成了生产事实。live Deployment
+没有 `LOG_FORMAT`，走默认 text formatter，**完全没有时间字段**。所以 `event_time` 补的是
+真缺失的数据。教训与 10-15 那次「apply 管理 ≠ last-applied 可信」同形。
+
+### 线上实测
+
+- `/version` → `0e42828` / `matched`；`/health/{live,ready,accepting}` 全 200
+- `copilot_endpoint_cooldown_elapsed_seconds` 五个端点各有 0 样本
+- `copilot_endpoint_trial_in_flight_age_seconds` **只有 HELP/TYPE、没有样本** —— 这是
+  刻意的：没有在途试探时不发 0，否则「没在跑」与「刚开始」会变成同一个样本
+- 生产日志实测一条 `lb_request_end`：`event_time` 比 `started_at_unix` **晚 29 秒**，
+  正是这条修正要区分的东西
+- `/stats` 对未认证调用返回 302（入口层 OAuth），符合设计；指标走 `/metrics`
+
+**进程内累计计数器随本次重启归零**（事件取证里那些 855/812/8 等累计值），这是预期的。
