@@ -6,7 +6,7 @@ Author: Zeno Ren
 
 | 日期 | 范围 | 入口 |
 |---|---|---|
-| 2026-10-16 | GHCP HALF_OPEN 事件：事件时间口径、重试预算、恢复可见性与图片判定收敛；三项优化候选有意未改并记明理由 | [事件回执](2026-10-16-ghcp-half-open/REPORT.md) |
+| 2026-10-16 | GHCP HALF_OPEN 事件的证据口径（事件时间、重试预算、恢复可见性、图片判定收敛）AKS 发布；三项优化候选有意未改并记明理由，首轮因发布工具把已通过的镜像预检读成失败而回滚，发布后实测纠正了我自己的一条判断 | [事件与发布回执](2026-10-16-ghcp-half-open/REPORT.md) |
 | 2026-10-15 | 面板独立密码与 HttpOnly 会话 AKS 发布；两步发布，并记下一次差点造成镜像回滚的误判 | [部署回执](2026-10-15-panel-password-aks/REPORT.md) |
 | 2026-10-14 | 路由规则三段式（模型 → Provider → GHCP 账户）与面板解锁 AKS 发布；密钥驻留契约变更，三处缺陷在验证中发现并修复 | [部署回执](2026-10-14-routing-rules-aks/REPORT.md) |
 | 2026-10-14 | 账户先落地后启用、凭据录入与 Foundry v1 AKS 发布；首轮因控制器缺一个 Secret 读权限而在 preflight 中止 | [部署回执](2026-10-14-inert-accounts-aks/REPORT.md) |
@@ -16,6 +16,8 @@ Author: Zeno Ren
 | 2026-10-09 | 120 秒上游取消的生产取证；两项保护的实测局限 | [流取证](2026-10-09-stream-forensics/REPORT.md) |
 | 2026-10-09 | 流协议取证与分层保护 AKS 发布；原故障未复现、未归因 | [部署回执](2026-10-09-stream-aks/REPORT.md)、[本地验证](2026-10-09-stream-reliability/REPORT.md) |
 | 2026-10-08 | 图片像素修复 AKS 发布；额外大图上游 503 边界 | [部署回执](2026-10-08-image-budget-aks/REPORT.md)、[本地验证](2026-10-08-image-budget/REPORT.md) |
+| 2026-10-01 | 每周价格刷新与 Logo AKS 发布；首次刷新成功不等于已观察一周 | [部署回执](2026-10-01-pricing-aks/REPORT.md)、[本地验证](2026-10-01-pricing-refresh/VALIDATION.md) |
+| 2026-10-01 | 历史页参考费用修复：档位不可判时给上下界，无价仍显示未知 | [只读验证](2026-10-01-history-pricing/VALIDATION.md) |
 | 2026-09-30 | Dashboard、明亮配色与版本标识 AKS 发布 | [部署回执](2026-09-30-dashboard-aks/REPORT.md) |
 | 2026-09-30 | 图表明亮配色与 usage 告警只读评估 | [现场证据与建议](2026-09-30-chart-usage-review/ASSESSMENT.md) |
 | 2026-09-30 | Dashboard、运行版本与仓库整理 | [本轮记录](2026-09-30-dashboard/REPORT.md) |

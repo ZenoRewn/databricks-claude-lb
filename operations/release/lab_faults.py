@@ -41,7 +41,8 @@ class LabFaults:
         if fault.get('mode')=='ack_loss_after_gate' and namespace.startswith('lb-lab') and kind=='service':
             closes=any(op.get('path')=='/spec/selector' and op.get('value',{}).get('lb.zeno.ink/release-gate')==release_id for op in body)
             if closes:
-                result=self.original(method,kind,namespace,name,body,query,patch)
+                # 真写一次再模拟 ACK 丢失：返回值无用，副作用才是这个故障的全部意义。
+                self.original(method,kind,namespace,name,body,query,patch)
                 self.consume(obj,fault)
                 raise UncertainOperation('lab_ack_loss_after_real_service_write')
         if fault.get('mode')=='journal_failure' and namespace==self.namespace and kind=='configmap' and name=='lb-release-'+release_id:

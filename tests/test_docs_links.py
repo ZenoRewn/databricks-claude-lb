@@ -136,6 +136,30 @@ class DocumentationLinkTests(unittest.TestCase):
                     broken.append(f'{path} -> {target}')
         self.assertEqual(broken, [], 'the file exists but has no such anchor')
 
+    def test_the_review_index_reaches_every_receipt_directory(self):
+        """A receipt nobody links to is evidence nobody can find.
+
+        Link resolution only catches links that point at nothing; it says
+        nothing about a receipt that no link points *at*. Three directories had
+        drifted out that way — `2026-10-01-pricing-aks` was reachable only from
+        a stale release paragraph in `docs/AKS.md`, and when that paragraph was
+        replaced by a pointer to this index (which did not list it) the receipt
+        became unreachable. The other two 2026-10-01 directories had never been
+        listed at all.
+
+        `docs/reviews/README.md` is what `docs/AKS.md` and `README.md` now name
+        as the single place release history is maintained, so its coverage has
+        to be enforced rather than remembered.
+        """
+        index = ROOT / 'docs' / 'reviews' / 'README.md'
+        body = index.read_text()
+        directories = sorted(p.name for p in index.parent.iterdir()
+                             if p.is_dir() and not p.name.startswith('.'))
+        self.assertGreater(len(directories), 20, 'receipt tree unexpectedly small')
+        unreferenced = [name for name in directories if name not in body]
+        self.assertEqual(unreferenced, [],
+                         'these receipts exist but the review index links none of them')
+
     def test_the_api_table_entry_point_still_links_the_documents_it_cites(self):
         # CLAUDE.md is the collaboration entry point; if its own links rot the
         # reader has no route into the rest of the documentation.

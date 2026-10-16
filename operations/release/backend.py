@@ -1,5 +1,4 @@
 """Kubernetes effects: conditional, bounded and recoverable by a new leader."""
-import base64
 import copy
 import json
 from pathlib import Path
@@ -8,7 +7,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from .engine import OwnershipLost,PendingOperation,UnsafeState
-from .model import APP_FILES,CONTROL,EPOCH,FINALIZER,GATE,RECOVER,SPEC,SOURCE,digest,target_pod_spec,source_annotations,verify_target_template
+from .model import CONTROL,EPOCH,FINALIZER,GATE,RECOVER,SPEC,SOURCE,digest,target_pod_spec,source_annotations,verify_target_template
 from .snapshot import protected_spec,matches,verify_pod_image
 
 def escape(value):return value.replace('~','~0').replace('/','~1')

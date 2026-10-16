@@ -9,7 +9,7 @@ import tempfile
 from urllib.parse import urlsplit
 
 from packaging.requirements import Requirement
-from packaging.tags import cpython_tags,compatible_tags,parse_tag
+from packaging.tags import cpython_tags,compatible_tags
 from packaging.utils import parse_wheel_filename
 
 

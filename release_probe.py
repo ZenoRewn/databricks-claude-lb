@@ -9,7 +9,6 @@ import re
 import ssl
 import tempfile
 import time
-import uuid
 
 import httpx
 import yaml
@@ -32,7 +31,7 @@ async def image_check(hashes):
     import main
     if 'Dashboard unavailable' in main.DASHBOARD_HTML or not main.DASHBOARD_HTML.rstrip().endswith('</html>'):
         raise ValueError('dashboard_incomplete')
-    cfg=configuration();clients=[]
+    configuration();clients=[]  # 只为校验 config 能解析成 dict，结果由 load_config 另取
     try:
         db,az,cp,storage=main.load_config(os.getenv('CONFIG_PATH','/app/config.yaml'));clients=[db,az,cp]
         if not any(p and p.load_balancer.endpoints for p in clients):raise ValueError('no_configured_routes')

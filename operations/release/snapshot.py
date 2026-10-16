@@ -1,7 +1,7 @@
 """Read-only discovery; keep complete selectors and private rollback material."""
 import copy
 
-from .model import CONTROL,GATE,DIGEST,digest,public_snapshot
+from .model import CONTROL,GATE,DIGEST,digest
 
 
 def matches(selector,labels):
