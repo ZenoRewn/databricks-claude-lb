@@ -2,17 +2,13 @@
 
 Author: Zeno Ren
 
-2026-10-10 已发布应用源码 `5f2463e`：落地两项 h2 协议保证 —— `REFUSED_STREAM` 进入重放白名单（**自编写以来首次扩展**，有 RFC 7540 §8.1.4 依据，生产未验证）、`GOAWAY`+`NO_ERROR` 不再累积熔断错误；另含裸 `response.failed` 的明确归因与 `elevated_input` 提示层。维护约 66 秒，三探针、账本与清理通过。上游三类拒绝均未解决。见 [本次发布回执](reviews/2026-10-10-replay-aks/REPORT.md)。以下为历史发布记录，不代表当前运行版本。
+## 当前运行版本
 
-2026-10-10 曾发布应用源码 `97c7e64`：首个内容前停滞信号、恢复优先窗口的证据门控。维护约 48 秒，三个常规业务探针、账本与清理通过。**首次提交被 preflight 以 `old_backend_not_healthy` 正当拒绝**（Azure MySQL 处于 Stopped，646 条用量事件悬在内存），启动数据库后 646 条全部落盘再重新发布；发布后另有一次独立 rollout 移除 `COPILOT_RECOVERY_PREFERENCE_SECONDS=0`。上游 120 秒取消与限流均未解决。见 [本次发布回执](reviews/2026-10-10-stall-aks/REPORT.md)。以下为历史发布记录，不代表当前运行版本。
+最近一次已记录的 AKS 发布：**2026-10-16，应用源码 `0e42828`**，全程 109.2 秒，11 个阶段全过，三协议业务探针、账本与清理验收通过。内容是 GHCP HALF_OPEN 事件的证据口径（每条事件自带 `event_time`、重试继承剩余预算、熔断恢复状态可见、图片判定收敛到一个实现）。**不是对该故障的修复** —— RST_STREAM 来自哪一层、90 秒取消的责任层仍未确认。首轮提交在 preflight 被发布工具的一个潜伏缺陷误判为失败（未进维护窗口、生产零影响，见 [已知缺陷](RELEASE_TOOL.md)）。见 [本次发布回执](reviews/2026-10-16-ghcp-half-open/REPORT.md)。
 
-2026-10-09 曾发布应用源码 `fea7d60`：h2 协议取证、Copilot 模型/API 局部熔断、冷却后小请求优先窗口与上下文提示。维护约 156 秒，三个常规业务探针、账本与清理通过。本次上线的是取证与局部保护，**不是对断流故障的修复**；发布后 30 分钟观察期零协议错误不构成故障已消除的证据。本次未做数据库快照与独立 QA。见 [本次发布回执](reviews/2026-10-09-stream-aks/REPORT.md)。以下为历史发布记录，不代表当前运行版本。
+**历次发布记录不在本文维护，而在 [验证与发布索引](reviews/README.md)** —— 那里逐次记录范围、失败、修复与未验证边界。此处曾堆叠逐次发布的摘要，与索引重复、且在 2026-10-14 至 10-16 的四次发布中都没有被同步更新，于是「当前运行版本」这一行长期指向早已不在线上的 `5f2463e`。一份事实只在一个地方维护。
 
-2026-10-08 曾发布应用源码 `284ca53`：图片在独立源图预算内逐张缩小后再检查 100M 输出预算。维护约 98 秒，三个常规业务探针、账本与清理通过；额外 108M 大图请求已通过 LB 准入并保留全部图片，但 Copilot 返回 503，端到端生成未通过，未重发。见 [本次发布回执](reviews/2026-10-08-image-budget-aks/REPORT.md)。以下为历史发布记录，不代表当前运行版本。
-
-2026-10-01 已发布应用源码 `7b71cdb`：每周 Copilot 官方价格刷新与汇流 Logo 已在 AKS 生效，维护约 57 秒，业务、账本与清理验收通过。见 [本次发布回执](reviews/2026-10-01-pricing-aks/REPORT.md)。下文 9 月 30 日记录为此前发布，不代表当前运行版本。
-
-2026-09-30 曾完成应用源码 `ccb25cd` 的 AKS 发布，维护约 63 秒，新增 Dashboard、明亮配色及 Release 标识；业务、账本、路由与清理通过，见 [Dashboard 部署回执](reviews/2026-09-30-dashboard-aks/REPORT.md)。当天较早的 `1d75685` 发布另见 [前次回执](reviews/2026-09-30-aks-release/REPORT.md)。配置、指标版本与兼容性变化见 [当前契约](OBSERVABILITY_AND_CONTEXT.md)。本轮新增渠道能力 JSON 如需使用，应先审阅来源与有效期，再作为单独只读文件挂载；不从 `config/effective` 或 Git revision 注解单独推断运行文件一致。图片裁剪默认值和 token-count 鉴权变化仍需真实客户端验收。本文历史 live 表格不构成当前现场快照，也不授权整份覆盖生产 manifest。
+判断线上究竟跑什么**只能读 live 对象或 `/version`**：本仓库的文档、`deploy/k8s/` 示例与 Git 最新提交都不是生产事实（2026-10-16 我把示例 manifest 的 `LOG_FORMAT=json` 当成线上形态，由此得出的结论是反的）。配置、指标版本与兼容性变化见 [当前契约](OBSERVABILITY_AND_CONTEXT.md)。渠道能力 JSON 如需使用，应先审阅来源与有效期，再作为单独只读文件挂载；不从 `config/effective` 或 Git revision 注解单独推断运行文件一致。**本文的历史 live 表格不构成当前现场快照，也不授权整份覆盖生产 manifest。**
 
 把 `databricks-claude-lb` 部署到 Azure Kubernetes Service，目标是**单 Pod 长期稳定运行 + GitHub Copilot token 完全自动刷新 + 无需重启 Pod 即可滚动 Secret**。
 

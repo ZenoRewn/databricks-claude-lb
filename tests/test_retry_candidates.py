@@ -1,5 +1,4 @@
 """Prefer compatible untried endpoints without relaxing replay or account pinning."""
-import json
 import unittest
 from unittest.mock import AsyncMock, patch
 

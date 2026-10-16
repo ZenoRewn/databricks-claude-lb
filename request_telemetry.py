@@ -9,7 +9,6 @@ from collections import Counter
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import json
 import logging
 import os
 import re

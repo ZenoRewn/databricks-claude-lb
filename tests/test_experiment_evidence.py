@@ -1,5 +1,4 @@
 """Experiments require matched cohorts, coverage and actual improvement. Author: Zeno Ren."""
-import copy
 from datetime import datetime, timezone
 import unittest
 

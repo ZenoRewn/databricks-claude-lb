@@ -5,7 +5,6 @@ from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock
 
 import httpx
-from h2.events import ConnectionTerminated
 
 import main
 from tests.test_protocol_diagnostics import reset_error

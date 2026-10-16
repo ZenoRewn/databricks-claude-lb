@@ -12,7 +12,6 @@ from urllib.parse import urlsplit
 import yaml
 
 from operations.release.kube import KubeAPI
-from operations.release.manifests import objects
 
 NS='lb-lab';OPS='lb-release-system'
 

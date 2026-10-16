@@ -1,5 +1,4 @@
 """Low-cardinality observations of cleanup owners. Author: Zeno Ren."""
-import asyncio
 from collections import Counter
 import time
 import weakref

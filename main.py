@@ -9,7 +9,7 @@ from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_
                                log_context, note_request_context, note_exception,
                                note_local_terminal, note_failure, log_event, note_content_offered)
 from request_telemetry import note_parameter_transforms, require_image_trim_consent, note_reported_model, safe_id, note_stream_end, context_hint_headers
-from chat_adapter import build_payload as build_chat_payload, messages_to_items, tools_to_items, content as chat_content
+from chat_adapter import build_payload as build_chat_payload
 import model_capabilities
 from model_capabilities import observe_route_budget, estimate_payload, payload_has_image
 from build_metadata import runtime_identity, release_identity
@@ -2297,27 +2297,23 @@ def _copilot_account_allows(name: str, model: str) -> bool:
 
 
 def _copilot_model_selection_reason(model: str, name: str) -> Optional[str]:
-    """per-model 账户选择把这个账户摘掉的原因，没摘掉则 None。"""
-    store = key_policy_store
-    if store is None:
-        return None
-    return store.model_accounts_exclusion_reason(model, name)
+    """per-model 账户选择把这个账户摘掉的原因，没摘掉则 None。
 
-
-def _copilot_model_allows_account(model: str, name: str) -> bool:
-    """运行时 per-model 账户选择：这个模型被限定到哪几个账户，只做减法。
-
-    与 `_copilot_account_allows` 是同一件事的两个方向 —— 那个回答「这个账户允许
-    哪些模型」，这个回答「这个模型用哪些账户」，两者取交集。从模型侧表达一次
-    意图不该要求去改每个账户的 allowlist（那会连带动到别的模型）。
+    运行时的 per-model 账户选择只做减法。它与 `_copilot_account_exclusion_reason`
+    是同一件事的两个方向 —— 那个回答「这个账户允许哪些模型」，这个回答「这个模型
+    用哪些账户」，两者取交集。从模型侧表达一次意图不该要求去改每个账户的
+    allowlist（那会连带动到别的模型）。
 
     筛的是**同一 provider 内的哪个账户**，不是哪个 provider，所以 provider 级的
     Copilot 优先 → Azure fallback 不受影响。选到的账户都服务不了该模型时，
     Copilot 候选集为空，请求按既有逻辑落到 Azure —— 与那些账户全部熔断同效。
 
-    存储未配置或从未加载成功时一律放行，即回落配置基线（不限定）。
+    存储未配置或从未加载成功时一律返回 None，即回落配置基线（不限定）。
     """
-    return _copilot_model_selection_reason(model, name) is None
+    store = key_policy_store
+    if store is None:
+        return None
+    return store.model_accounts_exclusion_reason(model, name)
 
 
 def _copilot_account_enabled(endpoint) -> bool:
@@ -3732,13 +3728,8 @@ class ClaudeProxy:
                         is_client_error = 400 <= response.status_code < 500 and response.status_code not in (401, 403, 429)
 
                         upstream_ct = response.headers.get("content-type", "")
-                        try:
-                            error_json = json.loads(error_body)
-                            error_msg = error_json.get('message', 'Request failed')
-                            logger.error("Upstream stream request rejected (%s)", response.status_code)
-                        except Exception:
-                            error_msg = error_body.decode('utf-8') if isinstance(error_body, bytes) else str(error_body)
-                            logger.error("Upstream stream request rejected (%s)", response.status_code)
+                        # 只记状态码：上游错误正文不进日志（见 safe_diagnostics 的边界）。
+                        logger.error("Upstream stream request rejected (%s)", response.status_code)
 
                         # P1.3: 用 _build_upstream_error_detail 复用 HTML 识别通道，然后
                         # 只把 upstream_html_error 触发软熔断（不改 event: error 帧的 shape）
@@ -3851,7 +3842,6 @@ class ClaudeProxy:
                     return
 
                 except Exception as e:
-                    import traceback
                     note_exception(e)
                     error_detail = f"{type(e).__name__}: Upstream request could not complete; execution may have occurred."
                     logger.error("Stream failed (%s)", type(e).__name__)
@@ -4163,7 +4153,6 @@ class AzureOpenAIProxy:
                             content_type=upstream_ct, upstream_headers=response.headers,
                         )
                         is_client_error = is_client_error or _request_local_rejection(upstream_detail)
-                        log_snippet = error_text[:300].replace("\n", " ") if error_text else ""
                         is_html = upstream_detail.get("error", {}).get("code") == "upstream_html_error"
                         # P1.3: HTML 检测触发软熔断（Azure stream 侧）
                         if is_html:
@@ -6443,7 +6432,6 @@ class CopilotProxy:
             current_headers = headers
             input_tokens = 0
             output_tokens = 0
-            cache_read_tokens = 0
             sent_any_chunk = False
             saw_completion = False
             # 每请求一次的 401 auth repair 预算，**与 attempt 计数解耦**（见下方
@@ -6543,7 +6531,6 @@ class CopilotProxy:
                     # 给客户端 SSE 消费者，客户端 SDK 解析失败自己报 "HTML error page"。
                     # 现在同 status>=400 分支合并成一条 HTML 路径，都触发软熔断。
                     upstream_ct = response.headers.get("content-type", "") if response is not None else ""
-                    upstream_ct_is_html = upstream_ct.strip().lower().startswith("text/html")
                     if response.status_code >= 400 or invalid_stream_type(upstream_ct):
                         error_body = await _bounded_error_body(response)
                         try:
@@ -6570,8 +6557,7 @@ class CopilotProxy:
                             lb_request_id=request_id,
                         )
                         is_client_error = is_client_error or _request_local_rejection(upstream_detail)
-                        # 日志只截断 + 标注是否 HTML
-                        log_snippet = error_text[:300].replace("\n", " ") if error_text else ""
+                        # 日志只记状态码与是否 HTML，不带上游正文
                         is_html = upstream_detail.get("error", {}).get("code") == "upstream_html_error"
                         if is_html:
                             ids = upstream_detail["error"].get("upstream_ids") or {}
@@ -6722,7 +6708,6 @@ class CopilotProxy:
                             saw_completion = observation.terminal is not None
                             input_tokens = observation.input_tokens
                             output_tokens = observation.output_tokens
-                            cache_read_tokens = observation.cache_read_tokens
                             stream_state.update(
                                 chunks_yielded=chunks_yielded_count,
                                 first_event=first_event_name, last_event=last_event_name,
@@ -7987,32 +7972,6 @@ def _drop_nonpositive_token_limits(body: dict) -> list:
             body.pop(field_name, None)
             removed.append(field_name)
     return removed
-
-
-def _positive_int(value) -> Optional[int]:
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        numeric = int(value)
-    except (TypeError, ValueError):
-        return None
-    return numeric if numeric > 0 else None
-
-
-def _chat_content_for_responses(content):
-    return chat_content(content)
-
-
-def _messages_to_responses_input(messages) -> list:
-    return messages_to_items(messages)
-
-
-def _has_tool_result(messages) -> bool:
-    return any(isinstance(message, dict) and message.get("role") == "tool" for message in messages or [])
-
-
-def _tools_to_responses_tools(tools) -> Optional[list]:
-    return tools_to_items(tools)
 
 
 def _responses_adapter_removed_sampling_fields(chat_body: dict) -> list:

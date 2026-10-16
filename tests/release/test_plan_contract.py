@@ -1,7 +1,6 @@
 """Reviewable changes, bounded probes, and private immutable planning files."""
 import copy
 import importlib
-import json
 from pathlib import Path
 import stat
 import tempfile

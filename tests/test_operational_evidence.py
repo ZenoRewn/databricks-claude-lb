@@ -1,6 +1,5 @@
 """Circuit history and volatile usage boundaries, without production access. Author: Zeno Ren."""
 from datetime import date
-import json
 from pathlib import Path
 import subprocess
 import sys
@@ -42,11 +41,19 @@ class EventTimeTests(unittest.IsolatedAsyncioTestCase):
     analysis dated a circuit trip, a trial admission and a trial outcome to
     request-start times.
 
-    Production runs LOG_FORMAT=json, whose formatter does emit `ts` from
-    `record.created`, so the information was not missing there — but the trap
-    was, and the default text formatter carries no time at all. An explicit
-    `event_time` inside the payload removes the trap in both formats and
-    survives export and re-parsing.
+    Production has no timestamp at all. Verified against the live Deployment
+    on 2026-10-16: its env does not set LOG_FORMAT, so the default `text`
+    formatter runs and emits `LEVEL:logger:{payload}` — no time field anywhere.
+    That is why the analysis had to fall back to `kubectl logs --timestamps`,
+    which is the container runtime's clock rather than the event's.
+
+    (`deploy/k8s/deployment.yaml` does set LOG_FORMAT=json, but that file is
+    the example shape, not the live one. Reading it as production fact yields
+    the opposite conclusion; I made exactly that mistake in the first pass.)
+
+    Even under `json` the formatter's `ts` sits outside the payload, so export
+    and re-parsing can drop it. An explicit `event_time` inside the payload is
+    present in both formats and survives both.
     """
 
     async def test_an_event_says_when_it_happened_not_when_the_request_began(self):

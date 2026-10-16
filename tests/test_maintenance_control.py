@@ -3,7 +3,6 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 import gateway_lifecycle as lifecycle
 from admission import AdmissionController, AdmissionError
