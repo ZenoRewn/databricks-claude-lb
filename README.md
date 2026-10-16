@@ -72,7 +72,14 @@ OpenAI 兼容客户端使用 `http://127.0.0.1:8000/v1`，API Key 同样使用�
 
 按渠道查看主要指标、模型分布、端点状态和连接池观测；历史页展示持久化用量。支持深浅主题、暂停/手动刷新、明确的失败提示和需要鉴权确认的数据维护。
 
-「密钥与渠道」页是运维面：客户端密钥身份与渠道限制、**模型 → Provider → GHCP 账户的三段式路由规则**、GHCP 账户的启用与能力勾选、上游凭据录入（含网关驱动的 GitHub device flow）。解锁用一个独立于 API Key 的面板密码（`LB_DASHBOARD_PASSWORD`），换到 HttpOnly 会话 cookie 之后**页面脚本不持有任何凭据**；未配置密码时回落到用 API Key 解锁，但同样换成会话。契约与边界见 [解锁契约](docs/CONFIGURATION.md#dashboard-unlock-contract)，策略叠加关系见 [策略层总览](docs/CONFIGURATION.md#policy-layers-overview)。
+「密钥与渠道」页是运维面，解锁后分五个子页，每页只做一件事：客户端密钥身份与渠道限制、**模型 → Provider → GHCP 账户的路由规则**、GHCP 账户的启用与能力勾选、上游凭据录入（含网关驱动的 GitHub device flow）、面板密码。
+
+- **锁定时只渲染密码卡片**，被门禁的内容整块不渲染（`display:none`，同时退出 tab 序与无障碍树）。毛玻璃只是卡片自身的观感 —— 模糊本身不是门禁，模糊后的内容仍可 Tab 到并被屏幕阅读器朗读。
+- 解锁用一个独立于 API Key 的面板密码，换到 HttpOnly 会话 cookie 之后**页面脚本不持有任何凭据**；LB API Key 始终可以换同一种会话（也是忘记密码后的回头路）。
+- 路由规则的第三步是**候选矩阵**：选中模型后逐个账户列出「是否接流量」以及**是哪一层摘掉了它**，生效候选在**保存之前**就算出来，空集立即告警。
+- 面板密码可在页面上更改，存的是 **PBKDF2 单向验证器**而不是密码 —— 即使 `LB_CREDENTIAL_KEY` 泄露也推不出密码，代价是**忘记即不可恢复**。
+
+契约与边界见 [解锁契约](docs/CONFIGURATION.md#dashboard-unlock-contract) 与 [改面板密码](docs/CONFIGURATION.md#changing-the-panel-password)，策略叠加关系见 [策略层总览](docs/CONFIGURATION.md#policy-layers-overview)，排除原因的闭集见 [排除原因](docs/CONFIGURATION.md#exclusion-reasons)。
 
 ![Dashboard 桌面预览，合成数据](docs/reviews/2026-09-30-chart-usage-review/dashboard-light.jpg)
 

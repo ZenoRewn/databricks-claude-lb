@@ -196,9 +196,23 @@ kubectl create secret generic claude-lb-copilot-cache -n $NS \
 
 #### Dashboard 面板密码：加它之前先看控制器 Role
 
-面板解锁密码取自 `LB_DASHBOARD_PASSWORD`（≥12 字符）。示例 manifest 用 `envFrom.secretRef`
-指向 `claude-lb-secrets`，所以在那条路径上**只需往该 Secret 加一个 key**，Deployment
-模板不变。
+面板解锁密码有两个来源：**`LB_DASHBOARD_PASSWORD`（env，基线）** 与**存储里的覆盖值**
+（运维在 Dashboard 的「面板密码」页写入，存 PBKDF2 单向验证器）。有覆盖值时它优先；
+覆盖值缺失或策略存储未加载时回落 env；**两者都没有则面板密码登录整体不可用而不是放行**。
+无论哪种来源都要求 ≥12 个**字符**（非字节）。
+
+所以 Secret 仍然是该配的基线，三个理由：
+
+1. 策略存储**只在启动时加载**，所以页内改的密码只对**当前副本**即时生效；其余副本在
+   重启前仍然接受 env 里的那份。扩副本或滚动重启后，Secret 里是什么就以什么为准
+2. 覆盖值被忘记时只能用 LB API Key 解锁后重设（验证器单向、找不回来）—— 有一份 env
+   基线能少一次尴尬
+3. 全新集群第一次打开面板时还没有覆盖值
+
+**页内改完密码请同步更新 Secret，再滚动重启**，否则下次重启会静默回到旧密码。
+
+示例 manifest 用 `envFrom.secretRef` 指向 `claude-lb-secrets`，所以在那条路径上**只需往
+该 Secret 加一个 key**，Deployment 模板不变。
 
 **live 集群（zeno-apps）不是这样**：它没有 `claude-lb-secrets`，`envFrom` 为空，env 秘密
 各自用单独的 `secretKeyRef`（当前只有 `LB_CREDENTIAL_KEY` → `claude-lb-credential-key`）。

@@ -761,5 +761,233 @@ class RoutingRuleAdminTests(unittest.TestCase):
                                          json={'copilot_accounts': ['acct-a']}).status_code, 401)
 
 
+class SupportReasonTests(unittest.IsolatedAsyncioTestCase):
+    """`supports()` answers *whether*; the same code has to answer *why*.
+
+    The Dashboard merges account enablement and the per-model account selection
+    into one matrix, so it must label every row with the layer that dropped it.
+    Writing that explanation separately would produce a second implementation of
+    candidacy, and the copy that drifts is the one people read. So the reason is
+    primary and `supports()` is `reason is None` — these tests pin that, and the
+    combinatorial one at the bottom is the guard that actually holds the line.
+    """
+
+    async def asyncSetUp(self):
+        self.store = key_policy.KeyPolicyStore(None)
+        await self.store.start()
+        await self.store.set_account_capability('acct-a', ('gpt-4o', 'kimi-k3'))
+        p = patch.object(main, 'key_policy_store', self.store)
+        p.start()
+        self.addCleanup(p.stop)
+        self.a = main.CopilotEndpoint(name='acct-a', github_token='synthetic')
+
+    async def test_a_candidate_account_has_no_reason(self):
+        self.assertIsNone(main._copilot_support_reason(self.a, 'gpt-4o', 'responses'))
+
+    async def test_an_operator_disabled_account_is_distinct_from_one_never_enabled(self):
+        # Both are out of service, but only one of them is somebody's decision.
+        # Conflating them makes an operator hunt for a switch they never threw.
+        await self.store.set_account('acct-a', enabled=False)
+        self.assertEqual(main._copilot_support_reason(self.a, 'gpt-4o'), 'account_disabled')
+        inert = main.CopilotEndpoint(name='fresh', github_token='synthetic',
+                                     enabled_in_config=False)
+        self.assertEqual(main._copilot_support_reason(inert, 'gpt-4o'),
+                         'account_never_enabled')
+
+    async def test_the_model_side_selection_is_named_as_such(self):
+        await self.store.set_model_accounts('gpt-4o', ['acct-b'])
+        self.assertEqual(main._copilot_support_reason(self.a, 'gpt-4o'),
+                         'not_selected_for_model')
+
+    async def test_capability_and_allowed_models_stay_apart(self):
+        self.assertEqual(main._copilot_support_reason(self.a, 'gpt-5.4'), 'not_in_capability')
+        await self.store.set_account('acct-a', allowed_models=['kimi-k3'])
+        self.assertEqual(main._copilot_support_reason(self.a, 'gpt-4o'),
+                         'excluded_by_allowed_models')
+
+    async def test_the_configured_models_list_is_its_own_reason(self):
+        # Fixing this one needs a config change and a restart, unlike every
+        # other reason, so it must not be reported as an overlay decision.
+        pinned = main.CopilotEndpoint(name='acct-a', github_token='synthetic', models=['kimi-k3'])
+        self.assertEqual(main._copilot_support_reason(pinned, 'gpt-4o'),
+                         'not_in_configured_models')
+
+    async def test_an_api_type_mismatch_is_reported_only_when_asked(self):
+        chat_only = main.CopilotEndpoint(name='acct-a', github_token='synthetic',
+                                         api_types=['chat'])
+        self.assertEqual(main._copilot_support_reason(chat_only, 'gpt-4o', 'responses'),
+                         'api_type_unsupported')
+        self.assertIsNone(main._copilot_support_reason(chat_only, 'gpt-4o'))
+
+    async def test_ignoring_the_selection_answers_the_would_it_serve_question(self):
+        # This is what lets the Dashboard preview an *unsaved* selection without
+        # reimplementing policy: the server says "could serve", the client only
+        # intersects that with the checkboxes.
+        await self.store.set_model_accounts('gpt-4o', ['acct-b'])
+        self.assertEqual(main._copilot_support_reason(self.a, 'gpt-4o'), 'not_selected_for_model')
+        self.assertIsNone(main._copilot_support_reason(self.a, 'gpt-4o',
+                                                       ignore_model_selection=True))
+
+    async def test_ignoring_the_selection_does_not_ignore_any_other_layer(self):
+        await self.store.set_account('acct-a', enabled=False)
+        self.assertEqual(
+            main._copilot_support_reason(self.a, 'gpt-4o', ignore_model_selection=True),
+            'account_disabled')
+
+    async def test_no_store_means_no_reason(self):
+        with patch.object(main, 'key_policy_store', None):
+            self.assertIsNone(main._copilot_support_reason(self.a, 'anything'))
+
+    async def test_supports_and_the_reason_never_disagree(self):
+        """The anti-drift guard for the layer `supports()` actually owns."""
+        await self.store.set_account_capability('capped', ('gpt-4o',))
+        await self.store.set_account('capped', allowed_models=['gpt-4o'])
+        await self.store.set_account('off', enabled=False)
+        await self.store.set_model_accounts('gpt-4o', ['capped'])
+        endpoints = [
+            main.CopilotEndpoint(name='acct-a', github_token='t'),
+            main.CopilotEndpoint(name='capped', github_token='t'),
+            main.CopilotEndpoint(name='off', github_token='t'),
+            main.CopilotEndpoint(name='inert', github_token='t', enabled_in_config=False),
+            main.CopilotEndpoint(name='pinned', github_token='t', models=['kimi-k3']),
+            main.CopilotEndpoint(name='chatty', github_token='t', api_types=['chat']),
+        ]
+        for state in ('loaded', 'unavailable'):
+            self.store._state = state
+            for ep in endpoints:
+                for model in ('gpt-4o', 'kimi-k3', 'gpt-5.4'):
+                    for api_type in (None, 'responses', 'chat'):
+                        with self.subTest(state=state, account=ep.name, model=model,
+                                          api_type=api_type):
+                            self.assertEqual(
+                                ep.supports(model, api_type),
+                                main._copilot_support_reason(ep, model, api_type) is None)
+
+    async def test_every_reason_is_in_the_published_closed_set(self):
+        self.assertEqual(
+            main.COPILOT_EXCLUSION_REASONS,
+            key_policy.EXCLUSION_REASONS | {'account_never_enabled',
+                                            'not_in_configured_models',
+                                            'api_type_unsupported'})
+
+
+class CandidateDiagnosticEndpointTests(unittest.TestCase):
+    """`GET /admin/model-routing/{model}` — the matrix's data source.
+
+    One model, every account, each with the layer that decided. Modelled on
+    GCP's Policy Troubleshooter: a per-layer verdict next to the roll-up, so
+    «why is this account not receiving traffic» is answered in one place rather
+    than inferred by comparing two screens. The anti-pattern it exists to avoid
+    is one-api's: an empty candidate set reported as an undifferentiated 503
+    that echoes only the model name.
+    """
+
+    KEY = 'lb-candidate-diagnostic-key-01'
+
+    def setUp(self):
+        from starlette.testclient import TestClient
+
+        class _Stub:
+            api_key = CandidateDiagnosticEndpointTests.KEY
+
+            def verify_api_key(self, key):
+                return bool(key) and key == self.api_key
+
+        self.store = _store()
+        asyncio.run(self.store.set_account_capability('acct-a', ('gpt-4o', 'kimi-k3')))
+        asyncio.run(self.store.set_account_capability('acct-b', ('gpt-4o',)))
+        self.endpoints = [
+            main.CopilotEndpoint(name='acct-a', github_token='synthetic'),
+            main.CopilotEndpoint(name='acct-b', github_token='synthetic'),
+            main.CopilotEndpoint(name='acct-inert', github_token='synthetic',
+                                 enabled_in_config=False),
+        ]
+        copilot = main.CopilotProxy.__new__(main.CopilotProxy)
+        copilot.load_balancer = main.LoadBalancer(self.endpoints)
+        copilot.verify_api_key = _Stub().verify_api_key
+        main.API_KEY_TO_TENANT.clear()
+        main.API_KEY_TO_TENANT[self.KEY] = 'default'
+        self.addCleanup(main.API_KEY_TO_TENANT.clear)
+        for attr, value in (('proxy', _Stub()), ('copilot_proxy', copilot),
+                            ('key_policy_store', self.store)):
+            p = patch.object(main, attr, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.client = TestClient(main.app, raise_server_exceptions=False)
+        self.H = {'x-api-key': self.KEY}
+
+    def _rows(self, model):
+        r = self.client.get(f'/admin/model-routing/{model}', headers=self.H)
+        self.assertEqual(r.status_code, 200)
+        return r.json(), {row['account']: row for row in r.json()['accounts']}
+
+    def test_it_lists_every_configured_account_not_just_the_candidates(self):
+        # Listing only the survivors would hide exactly the rows an operator
+        # opened this view to understand.
+        _, rows = self._rows('gpt-4o')
+        self.assertEqual(sorted(rows), ['acct-a', 'acct-b', 'acct-inert'])
+
+    def test_a_serving_account_is_marked_with_no_reason(self):
+        _, rows = self._rows('gpt-4o')
+        self.assertTrue(rows['acct-a']['serves_model'])
+        self.assertIsNone(rows['acct-a']['reason'])
+
+    def test_each_row_names_the_layer_that_dropped_it(self):
+        self.client.put('/admin/model-routing/gpt-4o', headers=self.H,
+                        json={'copilot_accounts': ['acct-a']})
+        _, rows = self._rows('gpt-4o')
+        self.assertEqual(rows['acct-b']['reason'], 'not_selected_for_model')
+        self.assertEqual(rows['acct-inert']['reason'], 'account_never_enabled')
+        self.assertFalse(rows['acct-b']['serves_model'])
+
+    def test_it_separates_would_serve_from_does_serve(self):
+        # The two columns of the matrix: "is it selected" versus "could it ever
+        # serve this model". Without the second, selecting a capability-less
+        # account looks like it worked until the request fails.
+        self.client.put('/admin/model-routing/gpt-4o', headers=self.H,
+                        json={'copilot_accounts': ['acct-a']})
+        _, rows = self._rows('gpt-4o')
+        self.assertFalse(rows['acct-b']['serves_model'])
+        self.assertTrue(rows['acct-b']['serves_model_ignoring_selection'],
+                        'acct-b has gpt-4o capability; only the selection excludes it')
+        _, kimi = self._rows('kimi-k3')
+        self.assertFalse(kimi['acct-b']['serves_model_ignoring_selection'],
+                         'no kimi-k3 capability, so selecting it would change nothing')
+
+    def test_it_reports_which_accounts_the_rule_currently_names(self):
+        self.client.put('/admin/model-routing/gpt-4o', headers=self.H,
+                        json={'copilot_accounts': ['acct-a']})
+        body, rows = self._rows('gpt-4o')
+        self.assertTrue(rows['acct-a']['selected'])
+        self.assertFalse(rows['acct-b']['selected'])
+        self.assertEqual(body['copilot_accounts'], ['acct-a'])
+
+    def test_capability_unknown_is_a_warning_not_an_exclusion(self):
+        # An account with no discovered capability serves everything. That is a
+        # wildcard, not a reason to drop it, so it must not be reported as one —
+        # but the operator still needs to see it before enabling.
+        _, rows = self._rows('gpt-4o')
+        self.assertFalse(rows['acct-inert']['capability_known'])
+        self.assertNotIn('capability_unknown', main.COPILOT_EXCLUSION_REASONS)
+
+    def test_it_carries_the_same_rule_view_as_the_listing(self):
+        body, _ = self._rows('gpt-4o')
+        for field in ('model', 'effective_openai_order', 'effective_copilot_accounts',
+                      'copilot_candidates_empty'):
+            self.assertIn(field, body)
+
+    def test_an_unconfigured_copilot_answers_404_rather_than_an_empty_matrix(self):
+        with patch.object(main, 'copilot_proxy', None):
+            self.assertEqual(
+                self.client.get('/admin/model-routing/gpt-4o', headers=self.H).status_code, 404)
+
+    def test_the_diagnostic_requires_a_valid_key(self):
+        self.assertEqual(self.client.get('/admin/model-routing/gpt-4o').status_code, 401)
+
+    def test_it_never_returns_token_material(self):
+        body = self.client.get('/admin/model-routing/gpt-4o', headers=self.H).text
+        self.assertNotIn('synthetic', body)
+
+
 if __name__ == '__main__':
     unittest.main()

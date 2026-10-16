@@ -125,7 +125,7 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   // The session now rides an HttpOnly cookie, so the page has to say what it
   // holds (nothing) and where the credential comes from.
   assert.match(html, /HttpOnly cookie/, 'the session mechanism must be stated');
-  assert.match(html, /页面脚本本身不持有任何凭据/, 'the no-credential property must be stated');
+  assert.match(html, /页面脚本不持有任何凭据/, 'the no-credential property must be stated');
   assert.match(html, /LB_DASHBOARD_PASSWORD/, 'the password source must be named');
   assert.match(html, /不会退化为无密码放行/, 'the no-fallback-to-open rule must be stated');
   assert.match(html, /id="panelPassword"/, 'the panel needs a password field');
@@ -208,6 +208,22 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
       allowed_models: null}], policy: {state: 'loaded', backend: 'mysql', tenants: 1}},
     '/admin/credentials': {store: {key: 'present', key_fingerprint: 'kf', unopenable: 0},
       credentials: []},
+    // The candidate diagnostic: one row per account naming the layer that
+    // decided. acct-b is enabled and capable but not selected; acct-c is
+    // selected-eligible on paper but has no capability for this model.
+    '/admin/model-routing/gpt-4o': {model: 'gpt-4o',
+      effective_openai_order: ['copilot', 'azure_openai'],
+      copilot_accounts: ['acct-a'], effective_copilot_accounts: ['acct-a'],
+      copilot_candidates_empty: false,
+      accounts: [
+        {account: 'acct-a', enabled: true, enablement_source: 'operator', selected: true,
+         serves_model: true, reason: null, serves_model_ignoring_selection: true,
+         reason_ignoring_selection: null, capability_known: true},
+        {account: 'acct-b', enabled: true, enablement_source: 'config', selected: false,
+         serves_model: false, reason: 'not_selected_for_model',
+         serves_model_ignoring_selection: true, reason_ignoring_selection: null,
+         capability_known: true}],
+      policy: {state: 'loaded', backend: 'mysql', tenants: 1}},
   };
   // Mirrors the server: GET reports state, POST mints a session, DELETE drops it.
   let session = {authenticated: false, password_configured: true};
@@ -220,7 +236,9 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
       if (method === 'POST') { session = {...session, authenticated: true}; return ok({authenticated: true, expires_in: 1800}); }
       if (method === 'DELETE') { session = {...session, authenticated: false}; return ok({authenticated: false}); }
       return ok({authenticated: session.authenticated, expires_in: session.authenticated ? 1800 : 0,
-                 password_configured: session.password_configured});
+                 password_configured: session.password_configured,
+                 password_source: session.password_source
+                   || (session.password_configured ? 'env' : 'none')});
     }
     if (!session.authenticated) return {ok: false, status: 401, json: async () => ({detail: 'no session'})};
     const payload = PANEL_PAYLOADS[url];
@@ -234,7 +252,7 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   element('keysAdminKey').value = '';
   requests = [];
   context.fetch = panelFetch();
-  await context.unlockPanels();
+  await context.unlockPanels(false);
   const login = requests[0];
   assert.equal(login.url, '/admin/session');
   assert.equal(login.options.method, 'POST');
@@ -249,11 +267,18 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
     .every(r => !(r.options.headers || {})['x-api-key']),
     'section reads ride the cookie, not a header');
   assert.equal(element('panelPassword').value, '', 'the password field is cleared after use');
-  assert.match(element('keysStatus').textContent, /已解锁/);
+  assert.match(element('panelSessionBar').textContent, /已解锁/);
   assert.match(element('keysContent').innerHTML, /team-a/);
   assert.match(element('accountsContent').innerHTML, /acct-a/);
   assert.match(element('ruleModel').innerHTML, /gpt-4o/, 'the model dropdown is populated on unlock');
-  assert.match(element('ruleAccounts').innerHTML, /acct-a/, 'the account checkboxes are populated');
+  // The matrix is per model, so with none chosen it says so rather than showing
+  // verdicts that belong to no model.
+  assert.match(element('ruleAccounts').innerHTML, /先在第 1 步选一个模型/,
+    'the matrix must not render verdicts before a model is chosen');
+  element('ruleModel').value = 'gpt-4o';
+  await context.refreshRoutingDiagnostic();
+  assert.match(element('ruleAccounts').innerHTML, /acct-a/, 'the matrix lists every account');
+  assert.match(element('ruleAccounts').innerHTML, /acct-b/);
   assert.match(element('panelSessionBar').textContent, /已解锁/, 'the session bar shows the state');
   assert.match(element('panelSessionBar').textContent, /分钟/, 'and how long is left');
 
@@ -277,7 +302,7 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   context.fetch = panelFetch();
   const restored = await context.refreshPanelSession();
   assert.equal(restored, true, 'a live session must be detected on load');
-  await context.loadAllPanels(element('keysStatus'));
+  await context.loadAllPanels();
   assert.match(element('keysContent').innerHTML, /team-a/,
     'the panel restores itself without any credential being entered');
   assert.ok(!requests.some(r => (r.options.headers || {})['x-api-key']));
@@ -294,14 +319,14 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
                         restricted: false, policy: {state: 'loaded', backend: 'mysql', tenants: 0}})}});
   await context.resetTenantProviders('team-a');
   assert.equal(requests[0].options.method, 'DELETE');
-  assert.match(element('keysStatus').textContent, /配置基线/,
+  assert.match(element('clientkeysFeedback').textContent, /配置基线/,
     'reset must name what it returns to, not just say "done"');
 
   requests = [];
   context.fetch = panelFetch({'/admin/api-keys/team-a/providers': {ok: false, status: 503,
     json: async () => ({detail: {error: {code: 'policy_write_failed'}}})}});
   await context.resetTenantProviders('team-a');
-  assert.match(element('keysStatus').textContent, /原有限制仍然生效/,
+  assert.match(element('clientkeysFeedback').textContent, /原有限制仍然生效/,
     'a failed reset must not claim the tenant is now unrestricted');
 
   nodes = [{selector: '#keysTable [data-tenant="team-a"]', checked: true, dataset: {provider: 'copilot'}}];
@@ -309,15 +334,15 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   context.fetch = panelFetch({'/admin/api-keys/team-a/providers': {ok: false, status: 503,
     json: async () => ({detail: {error: {code: 'policy_write_failed'}}})}});
   await context.saveTenantProviders('team-a');
-  assert.match(element('keysStatus').textContent, /执行中的策略保持不变/,
+  assert.match(element('clientkeysFeedback').textContent, /执行中的策略保持不变/,
     'a failed write must not claim the policy changed');
 
   nodes = [{selector: '#keysTable [data-tenant="team-a"]', checked: false, dataset: {provider: 'copilot'}}];
   requests = [];
   await context.saveTenantProviders('team-a');
   assert.equal(requests.length, 0, 'an empty allow-list must not reach the server');
-  assert.match(element('keysStatus').textContent, /至少要允许一个渠道/);
-  assert.match(element('keysStatus').textContent, /重置/, 'it must point at the control that does work');
+  assert.match(element('clientkeysFeedback').textContent, /至少要允许一个渠道/);
+  assert.match(element('clientkeysFeedback').textContent, /重置/, 'it must point at the control that does work');
 
   // Rotating the source may invalidate the key behind the session, so the
   // panel locks rather than keeping something that may no longer work.
@@ -327,10 +352,10 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   await context.reloadKeysFromSource();
   assert.equal(requests[0].url, '/admin/api-keys/reload');
   assert.equal(requests[0].options.method, 'POST');
-  assert.match(element('keysStatus').textContent, /滚动重启/,
+  assert.match(element('panelLockFeedback').textContent, /滚动重启/,
     'env-sourced values still need a restart and the panel must say so');
-  assert.match(element('keysStatus').textContent, /已自动锁定/);
-  assert.match(element('keysContent').innerHTML, /已锁定/, 'locking clears the identity material');
+  assert.match(element('panelLockFeedback').textContent, /已自动锁定/);
+  assert.equal(element('keysContent').innerHTML, '', 'locking clears the identity material');
   assert.ok(requests.some(r => r.url === '/admin/session' && (r.options.method || '') === 'DELETE'),
     'locking must invalidate the session server-side, not just locally');
 
@@ -339,17 +364,17 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   await context.saveTenantProviders('team-a');
   assert.equal(requests.filter(r => r.url !== '/admin/session').length, 0,
     'a locked panel must not issue writes');
-  assert.match(element('keysStatus').textContent, /请先解锁/);
+  assert.match(element('clientkeysFeedback').textContent, /请先解锁/);
 
   // Lock clears every section, not just the session.
   session = {authenticated: false, password_configured: true};
   element('panelPassword').value = 'panel-password-value';
   context.fetch = panelFetch();
-  await context.unlockPanels();
+  await context.unlockPanels(false);
   assert.match(element('accountsContent').innerHTML, /acct-a/);
   await context.lockPanels();
   for (const id of ['keysContent', 'routingContent', 'accountsContent', 'credentialsContent']) {
-    assert.match(element(id).innerHTML, /已锁定/, id + ' must be cleared on lock');
+    assert.equal(element(id).innerHTML, '', id + ' must be cleared on lock');
   }
   assert.equal(element('keysPolicyState').innerHTML, '');
   assert.equal(element('ruleAccounts').innerHTML, '');
@@ -362,7 +387,7 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   element('keysAdminKey').value = 'lb-fallback-key';
   requests = [];
   context.fetch = panelFetch();
-  await context.unlockPanels();
+  await context.unlockPanels(true);
   assert.equal(requests[0].url, '/admin/session');
   assert.equal(requests[0].options.headers['x-api-key'], 'lb-fallback-key');
   assert.equal(element('keysAdminKey').value, '', 'the key field is cleared after the exchange');
@@ -377,22 +402,22 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   element('panelPassword').value = '';
   element('keysAdminKey').value = '';
   requests = [];
-  await context.unlockPanels();
+  await context.unlockPanels(false);
   assert.equal(requests.filter(r => r.url !== '/admin/session').length, 0);
-  assert.match(element('keysStatus').textContent, /LB API Key/,
+  assert.match(element('panelLockFeedback').textContent, /LB API Key/,
     'with no password configured the prompt must point at the key');
   session = {authenticated: false, password_configured: true};
   await context.refreshPanelSession();
-  await context.unlockPanels();
-  assert.match(element('keysStatus').textContent, /面板密码/,
+  await context.unlockPanels(false);
+  assert.match(element('panelLockFeedback').textContent, /面板密码/,
     'with a password configured the prompt must point at the password');
 
   // A rejected password must leave the panel locked and say which it was.
   element('panelPassword').value = 'wrong-password';
   context.fetch = panelFetch({'/admin/session': {ok: false, status: 401,
     json: async () => ({detail: {error: {code: 'invalid_panel_password'}}})}});
-  await context.unlockPanels();
-  assert.match(element('keysStatus').textContent, /密码不正确/);
+  await context.unlockPanels(false);
+  assert.match(element('panelLockFeedback').textContent, /密码不正确/);
   requests = [];
   nodes = [{selector: '#keysTable [data-tenant="team-a"]', checked: true, dataset: {provider: 'copilot'}}];
   await context.saveTenantProviders('team-a');
@@ -403,15 +428,15 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   element('panelPassword').value = 'wrong-password';
   context.fetch = panelFetch({'/admin/session': {ok: false, status: 429,
     json: async () => ({detail: {error: {code: 'too_many_attempts'}}})}});
-  await context.unlockPanels();
-  assert.match(element('keysStatus').textContent, /过于频繁/);
+  await context.unlockPanels(false);
+  assert.match(element('panelLockFeedback').textContent, /过于频繁/);
 
   // A password typed where none is configured must explain the fallback.
   element('panelPassword').value = 'panel-password-value';
   context.fetch = panelFetch({'/admin/session': {ok: false, status: 503,
     json: async () => ({detail: {error: {code: 'panel_password_not_configured'}}})}});
-  await context.unlockPanels();
-  assert.match(element('keysStatus').textContent, /LB API Key/);
+  await context.unlockPanels(false);
+  assert.match(element('panelLockFeedback').textContent, /LB API Key/);
 
   // A section that fails must not take the rest of the page down with it.
   session = {authenticated: false, password_configured: true};
@@ -419,19 +444,19 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   requests = [];
   context.fetch = panelFetch({'/admin/credentials': {ok: false, status: 503,
     json: async () => ({detail: 'storage down'})}});
-  await context.unlockPanels();
+  await context.unlockPanels(false);
   assert.match(element('keysContent').innerHTML, /team-a/, 'the healthy sections still render');
   assert.match(element('credentialsContent').innerHTML, /暂时无法读取/);
-  assert.match(element('keysStatus').textContent, /其余各块可用/);
+  assert.match(element('clientkeysFeedback').textContent, /其余各块可用/);
 
   // A channel that is simply not configured reads as a fact, not a failure.
   session = {authenticated: false, password_configured: true};
   element('panelPassword').value = 'panel-password-value';
   context.fetch = panelFetch({'/admin/copilot/accounts': {ok: false, status: 404,
     json: async () => ({detail: {error: {message: 'GitHub Copilot is not configured'}}})}});
-  await context.unlockPanels();
+  await context.unlockPanels(false);
   assert.match(element('accountsContent').innerHTML, /该渠道未配置/);
-  assert.doesNotMatch(element('keysStatus').textContent, /读取失败/);
+  assert.ok(element('clientkeysFeedback').hidden || !/读取失败/.test(element('clientkeysFeedback').textContent));
 
   // A storage layer that was never set up answers 503 with a code; a broken one
   // answers 503 without. Treating both as a failure made every deployment
@@ -441,26 +466,230 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   context.fetch = panelFetch({'/admin/credentials': {ok: false, status: 503,
     json: async () => ({detail: {error: {code: 'credential_store_unavailable',
                                          message: 'Credential storage is not configured.'}}})}});
-  await context.unlockPanels();
+  await context.unlockPanels(false);
   assert.match(element('credentialsContent').innerHTML, /该渠道未配置/,
     'an unconfigured store is not a failure to report');
-  assert.doesNotMatch(element('keysStatus').textContent, /读取失败/);
+  assert.ok(element('clientkeysFeedback').hidden || !/读取失败/.test(element('clientkeysFeedback').textContent));
 
   session = {authenticated: false, password_configured: true};
   element('panelPassword').value = 'panel-password-value';
   context.fetch = panelFetch({'/admin/credentials': {ok: false, status: 503,
     json: async () => ({detail: {error: {code: 'storage_unreachable'}}})}});
-  await context.unlockPanels();
+  await context.unlockPanels(false);
   assert.match(element('credentialsContent').innerHTML, /暂时无法读取/,
     'a genuinely broken store must still be reported');
-  assert.match(element('keysStatus').textContent, /读取失败/);
+  assert.match(element('clientkeysFeedback').textContent, /读取失败/);
 
   // Back to a usable state for the sections below.
   session = {authenticated: true, password_configured: true};
   await context.refreshPanelSession();
   context.fetch = panelFetch();
-  await context.loadAllPanels(element('keysStatus'));
+  await context.loadAllPanels();
 
+
+  // ---- the gate ----
+  // Locked means the content is not rendered, not merely blurred. Blurring
+  // leaves it in the tab order and screen readers still read it in full; the
+  // usual patch for that — aria-hidden on the wrapper — is itself a WCAG 4.1.2
+  // failure (axe `aria-hidden-focus`) because the wrapper holds focusable
+  // controls. So `hidden` (display:none) is the primitive, and the frosted
+  // glass is only the card's styling.
+  assert.match(html, /id="panelLock"/, 'the gate needs its own card');
+  assert.match(html, /id="panelBody"[^>]*hidden/,
+    'the gated content must start hidden, not merely styled as unavailable');
+  const panelBodyMarkup = html.slice(html.indexOf('id="panelBody"'),
+                                     html.indexOf('</section>', html.indexOf('id="sub-panel"')));
+  // aria-hidden is fine on a decorative span; it is forbidden on a focusable
+  // element or on any ancestor of one. So the rule to enforce is that every use
+  // inside the gated area is a self-contained decorative span, and that the
+  // containers themselves never carry it.
+  for (const tag of (panelBodyMarkup.match(/<[a-z]+[^>]*aria-hidden="true"[^>]*>/g) || [])) {
+    assert.match(tag, /^<span class="(step-no|lock-mark)"/,
+      'aria-hidden may only mark a decorative span, never a container: ' + tag);
+  }
+  assert.doesNotMatch(panelBodyMarkup.slice(0, panelBodyMarkup.indexOf('>')), /aria-hidden/,
+    'aria-hidden on a container holding focusable controls is a WCAG 4.1.2 failure');
+  assert.doesNotMatch(html.slice(html.indexOf('id="panelLock"'), html.indexOf('id="panelBody"')),
+    /aria-modal/, 'this is a page section, not a dialog, so it must not claim modality');
+  // The blur is decoration on the card itself, never the gate.
+  assert.match(html, /\.lock-card[^}]*backdrop-filter/,
+    'the frosted glass belongs to the card');
+
+  session = {authenticated: false, password_configured: true};
+  context.fetch = panelFetch();
+  await context.refreshPanelSession();
+  assert.equal(element('panelLock').hidden, false, 'locked shows the card');
+  assert.equal(element('panelBody').hidden, true, 'locked hides everything else');
+  assert.match(element('panelLockTitle').textContent, /面板密码/);
+  session = {authenticated: true, password_configured: true};
+  await context.refreshPanelSession();
+  assert.equal(element('panelLock').hidden, true, 'unlocked hides the card');
+  assert.equal(element('panelBody').hidden, false, 'unlocked reveals the content');
+
+  // With no password configured the key is the only way in, so it must not be
+  // buried behind a closed disclosure.
+  session = {authenticated: false, password_configured: false};
+  await context.refreshPanelSession();
+  assert.match(element('panelLockTitle').textContent, /LB API Key/);
+  assert.equal(element('panelKeyFallback').open, true,
+    'the only usable field must be open');
+  assert.equal(element('unlockPanels').hidden, true,
+    'a password button is pointless where no password exists');
+  session = {authenticated: false, password_configured: true};
+  await context.refreshPanelSession();
+  assert.equal(element('panelKeyFallback').open, false,
+    'with a password configured the key is a fallback, not the headline');
+
+  // ---- sub-tabs ----
+  // Four surfaces used to share one screen and one feedback line at the top, so
+  // acting on the bottom section put the result out of view.
+  for (const id of ['sub-clientkeys', 'sub-routing', 'sub-accounts', 'sub-credentials',
+                    'sub-panel']) {
+    assert.match(html, new RegExp('id="' + id + '"'), id + ' must exist');
+  }
+  assert.match(html, /role="tablist"[^>]*aria-label="密钥与渠道"/,
+    'the sub-tabs must be a labelled tablist');
+  for (const id of ['clientkeysFeedback', 'routingFeedback', 'accountsFeedback',
+                    'credentialsFeedback', 'panelFeedback']) {
+    assert.match(html, new RegExp('id="' + id + '"'), id + ' must exist');
+  }
+  assert.doesNotMatch(html, /id="keysStatus"/,
+    'the shared status line is what put feedback off-screen; it must be gone');
+  // Observable behaviour rather than the module-level `let`: the selected tab
+  // is the one whose button reports aria-selected="true".
+  let subtabSelected = [];
+  const subtabStubs = ['clientkeys', 'routing', 'accounts', 'credentials', 'panel'].map(name => ({
+    selector: '.subtab-btn', dataset: {subtab: name},
+    classList: {add() {}, remove() {}, toggle() {}},
+    setAttribute(key, value) {
+      if (key === 'aria-selected' && value === 'true') subtabSelected.push(name);
+    },
+  }));
+  nodes = [...subtabStubs,
+           {selector: '.subtab-panel', id: 'sub-routing',
+            classList: {add() {}, remove() {}, toggle() {}}}];
+  context.switchSubtab('routing');
+  assert.deepEqual(subtabSelected, ['routing'], 'exactly one tab may be selected');
+  subtabSelected = [];
+  context.switchSubtab('not-a-tab');
+  assert.deepEqual(subtabSelected, [], 'an unknown name must change nothing');
+  nodes = [];
+
+  // ---- what the client-key page can and cannot do ----
+  // The honest answer to "where is the reveal button" is that there is none,
+  // and why. Saying so is the fix; adding a button that cannot work is not.
+  assert.match(html, /这一页做不到/, 'the page must say what it cannot do, not only what it holds');
+  assert.match(html, /显示明文/, 'and name revealing plaintext as one of those things');
+  assert.match(html, /不生成也不存储/, 'and that the gateway does not issue keys');
+  assert.match(html, /怎么轮换一把客户端密钥/, 'rotation must be explained, not just refused');
+  assert.match(html, /sha256 前缀/, 'the fingerprint column must say what it is');
+
+  // ---- panel password ----
+  assert.match(html, /id="panelPasswordForm"/, 'changing the password needs a form');
+  assert.match(html, /单向验证器/, 'storing a verifier rather than the password must be stated');
+  assert.match(html, /忘记即不可恢复/, 'the irreversibility must be stated before use');
+  assert.match(html, /只在启动时加载/, 'the multi-replica caveat must be on screen');
+  assert.match(html, /是字符数，不是字节数|字符<\/strong>而不是字节/,
+    'the characters-not-bytes trap must be stated');
+
+  session = {authenticated: true, password_configured: true, password_source: 'env'};
+  await context.refreshPanelSession();
+  assert.match(element('panelPasswordSource').textContent, /环境变量/,
+    'the page must say where the current password comes from');
+  session = {authenticated: true, password_configured: true, password_source: 'store'};
+  await context.refreshPanelSession();
+  assert.match(element('panelPasswordSource').textContent, /存储/);
+
+  // Mismatched confirmation never reaches the server.
+  element('pwCurrent').value = 'current-password-value';
+  element('pwNew').value = 'a-brand-new-password';
+  element('pwRepeat').value = 'a-brand-new-passwerd';
+  requests = [];
+  await context.changePanelPassword();
+  assert.equal(requests.length, 0, 'a typo in the confirmation must be caught locally');
+  assert.match(element('panelFeedback').textContent, /不一致/);
+
+  // The floor counts characters, matching the gateway. `kubectl describe
+  // secret` reports bytes, which is how a short multi-byte password looks long.
+  element('pwNew').value = '短密码';
+  element('pwRepeat').value = '短密码';
+  requests = [];
+  await context.changePanelPassword();
+  assert.equal(requests.length, 0);
+  assert.match(element('panelFeedback').textContent, /12 个字符/);
+  element('pwCurrent').value = 'current-password-value';
+  element('pwNew').value = '密码密码密码密码密码密码';
+  element('pwRepeat').value = '密码密码密码密码密码密码';
+  requests = [];
+  context.fetch = panelFetch({'/admin/panel-password': {ok: true, status: 200,
+    json: async () => ({configured: true, password_source: 'store',
+                        other_sessions_invalidated: true})}});
+  await context.changePanelPassword();
+  assert.equal(requests[0].url, '/admin/panel-password',
+    'twelve multi-byte characters are long enough');
+  assert.equal(requests[0].options.method, 'PUT');
+
+  // A successful change says the other sessions are gone and that the Secret
+  // still needs updating, because other replicas read it at startup.
+  element('pwCurrent').value = 'current-password-value';
+  element('pwNew').value = 'a-brand-new-password';
+  element('pwRepeat').value = 'a-brand-new-password';
+  requests = [];
+  await context.changePanelPassword();
+  const change = JSON.parse(requests[0].options.body);
+  assert.equal(change.new_password, 'a-brand-new-password');
+  assert.equal(change.current_password, 'current-password-value');
+  assert.equal((requests[0].options.headers || {})['x-api-key'], undefined,
+    'the cookie authorises this; no key is held in the page');
+  assert.equal(element('pwNew').value, '', 'the new password is cleared after use');
+  assert.equal(element('pwCurrent').value, '', 'and so is the current one');
+  assert.equal(element('pwRepeat').value, '');
+  assert.match(element('panelFeedback').textContent, /其他会话已失效/);
+  assert.match(element('panelFeedback').textContent, /Secret/,
+    'other replicas keep the old password until they restart, so say so');
+
+  // A wrong current password and a lockout are different, actionable messages.
+  for (const [status, code, pattern] of [
+      [401, 'invalid_panel_password', /当前密码不正确/],
+      [429, 'too_many_attempts', /退避期内正确密码也会被拒/],
+      [503, 'policy_store_unavailable', /改环境变量/]]) {
+    element('pwCurrent').value = 'current-password-value';
+    element('pwNew').value = 'a-brand-new-password';
+    element('pwRepeat').value = 'a-brand-new-password';
+    context.fetch = panelFetch({'/admin/panel-password': {ok: false, status,
+      json: async () => ({detail: {error: {code}}})}});
+    await context.changePanelPassword();
+    assert.match(element('panelFeedback').textContent, pattern, code + ' needs its own message');
+  }
+
+  // Clearing the overlay falls back to the environment, and when that is unset
+  // the honest report is that password login is now unavailable.
+  element('pwClearCurrent').value = 'current-password-value';
+  requests = [];
+  context.fetch = panelFetch({'/admin/panel-password': {ok: true, status: 200,
+    json: async () => ({configured: true, password_source: 'env'})}});
+  await context.clearPanelPassword();
+  assert.equal(requests[0].options.method, 'DELETE');
+  assert.match(element('panelFeedback').textContent, /环境变量/);
+  assert.equal(element('pwClearCurrent').value, '');
+
+  element('pwClearCurrent').value = 'current-password-value';
+  context.fetch = panelFetch({'/admin/panel-password': {ok: true, status: 200,
+    json: async () => ({configured: false, password_source: 'none'})}});
+  await context.clearPanelPassword();
+  assert.match(element('panelFeedback').textContent, /不可用/,
+    'with no baseline left, password login is unavailable and must be reported');
+  assert.equal(element('panelFeedback').dataset.state, 'warn');
+
+  // Neither password may ever appear in a URL.
+  assert.ok(!requests.some(r => r.url.includes('password-value')
+                                || r.url.includes('a-brand-new-password')),
+    'a password must never travel in a URL');
+
+  session = {authenticated: true, password_configured: true};
+  await context.refreshPanelSession();
+  context.fetch = panelFetch();
+  await context.loadAllPanels();
 
   // ---- GHCP accounts ----
   assert.match(html, /id="accountsContent"/, 'account area needs a container');
@@ -512,7 +741,7 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   requests = [];
   await context.saveAccount('biz');
   assert.equal(requests.length, 0, 'an all-unchecked save must be refused locally');
-  assert.match(element('keysStatus').textContent, /取消「启用」/);
+  assert.match(element('accountsFeedback').textContent, /取消「启用」/);
 
   // Enabling an inert account with no capability must not reach the server:
   // it would be a wildcard candidate for every model until discovery runs.
@@ -521,7 +750,7 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   requests = [];
   await context.saveAccount('fresh');
   assert.equal(requests.length, 0, 'enabling without capability must be refused locally');
-  assert.match(element('keysStatus').textContent, /先点「刷新能力」/);
+  assert.match(element('accountsFeedback').textContent, /先点「刷新能力」/);
 
   // Disabling that same account is always allowed — the guard is about enabling.
   nodes = [{selector: '#accountsTable [data-enable="fresh"]', checked: false,
@@ -544,19 +773,23 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   await context.discoverAccount('biz');
   assert.equal(requests[0].url, '/admin/copilot/accounts/biz/discover');
   assert.equal(requests[0].options.method, 'POST');
-  assert.match(element('keysStatus').textContent, /非能力认证/);
+  assert.match(element('accountsFeedback').textContent, /非能力认证/);
   assert.ok(!requests.some(r => r.url.includes('lb-panel-key')));
 
   requests = [];
   context.fetch = panelFetch({'/admin/copilot/accounts/biz/discover': {ok: false, status: 503,
     json: async () => ({detail: {error: {code: 'policy_write_failed'}}})}});
   await context.discoverAccount('biz');
-  assert.match(element('keysStatus').textContent, /已有快照保持不变/,
+  assert.match(element('accountsFeedback').textContent, /已有快照保持不变/,
     'a failed discovery must not claim the snapshot changed');
 
   // ---- routing rules: model → provider → GHCP account ----
   assert.match(html, /id="routingContent"/, 'routing area needs a container');
-  assert.match(html, /只重排不筛除/, 'reorder-not-filter must be stated for the provider segment');
+  assert.match(html, /只重排，不筛除/, 'reorder-not-filter must be stated for the provider segment');
+  // Stronger than the prose: both providers are rendered and the trailing one is
+  // labelled as kept, so the control itself shows that nothing was filtered.
+  assert.match(html, /fallback · 保留/, 'the kept provider must be visible, not just described');
+  assert.match(html, /id="ruleOrderPreview"/, 'the resulting order needs somewhere to render');
   assert.match(html, /仍然只走 ADB/, 'the /v1/messages limit must be stated');
   assert.match(html, /没有列出的模型维持原本的规则/, 'the baseline for unlisted models must be stated');
   assert.match(html, /id="ruleModel"/, 'the model segment must be a control, not free text only');
@@ -590,6 +823,9 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   const gptRow = element('routingContent').innerHTML.split('<tr>').find(r => r.includes('gpt-5.4'));
   assert.doesNotMatch(gptRow, /已在 OpenAI 风格入口放行/, 'a non-claude model must not be flagged');
   assert.match(gptRow, /不限定/, 'no account limit must read as "not limited", not as empty');
+  // A rule used to be clearable but not editable, so changing one meant filling
+  // the whole form in again.
+  assert.match(gptRow, /data-edit-route="gpt-5\.4"/, 'an existing rule must be editable in place');
 
   // An emptied candidate set is the one outcome an operator will not expect.
   context.renderRouting({policy: {state: 'loaded', backend: 'mysql', tenants: 0},
@@ -609,30 +845,146 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
                    copilot_accounts: ['<img onerror=bad>'], effective_copilot_accounts: []}]});
   assert.doesNotMatch(element('routingContent').innerHTML, /<img onerror/, 'model names escaped');
   assert.doesNotMatch(element('ruleModel').innerHTML, /<img onerror/, 'dropdown options escaped');
-  assert.doesNotMatch(element('ruleAccounts').innerHTML, /<img onerror/, 'account labels escaped');
 
+  // `routingDiagnostic` is a module-level `let`, which is not reachable from the
+  // test context, so the diagnostic is always driven through the stub — closer
+  // to the real path anyway.
+  const setDiagnostic = async (model, accounts) => {
+    element('ruleModel').value = '';
+    element('ruleModelCustom').value = model;
+    context.fetch = panelFetch({['/admin/model-routing/' + model]: {ok: true, status: 200,
+      json: async () => ({model, effective_openai_order: ['copilot', 'azure_openai'],
+        copilot_accounts: accounts.filter(a => a.selected).map(a => a.account),
+        effective_copilot_accounts: accounts.filter(a => a.serves_model).map(a => a.account),
+        copilot_candidates_empty: !accounts.some(a => a.serves_model),
+        accounts, policy: {state: 'loaded'}})}});
+    await context.refreshRoutingDiagnostic();
+  };
+
+  // ---- the candidate matrix ----
+  // Two layers side by side: account enablement is global, the per-model
+  // selection is not. The headers have to say which is which, because the
+  // whole risk of merging them into one table is a global change that looks
+  // local. Each row also names the layer that dropped it — GCP's Policy
+  // Troubleshooter pattern — so "why is this account idle" is answered here
+  // rather than by comparing two screens.
   context.renderRouting({policy: {state: 'loaded', backend: 'json', tenants: 0},
     default_openai_order: ['copilot', 'azure_openai'], preferences: [],
     known_models: ['gpt-4o'], copilot_accounts_available: [{account: 'acct-a', enabled: true},
-                                                           {account: 'acct-b', enabled: false}]});
+                                                           {account: 'acct-b', enabled: true},
+                                                           {account: 'acct-c', enabled: false}]});
   assert.match(element('routingContent').innerHTML, /全部模型按默认顺序/);
-  assert.match(element('ruleAccounts').innerHTML, /一个都不勾 = 不限定/,
+  await setDiagnostic('gpt-4o', [
+    {account: 'acct-a', enabled: true, selected: true, serves_model: true, reason: null,
+     serves_model_ignoring_selection: true, reason_ignoring_selection: null, capability_known: true},
+    {account: 'acct-b', enabled: true, selected: false, serves_model: false,
+     reason: 'not_selected_for_model', serves_model_ignoring_selection: true,
+     reason_ignoring_selection: null, capability_known: true},
+    {account: 'acct-c', enabled: false, selected: false, serves_model: false,
+     reason: 'account_never_enabled', serves_model_ignoring_selection: false,
+     reason_ignoring_selection: 'account_never_enabled', capability_known: false}]);
+  let matrix = element('ruleAccounts').innerHTML;
+  assert.match(matrix, /acct-a/); assert.match(matrix, /acct-b/); assert.match(matrix, /acct-c/);
+  assert.match(matrix, /一个都不勾 = 不限定/,
     'the empty-selection semantics must be on screen, not just in the API');
-  assert.match(element('ruleAccounts').innerHTML, /未启用/,
-    'an inert account must be labelled in the picker');
+  assert.match(matrix, /账户启用<span class="scope-tag global">对所有模型<\/span>/,
+    'the global column must be labelled global');
+  assert.match(matrix, /本模型选中<span class="scope-tag local">仅 gpt-4o<\/span>/,
+    'the per-model column must name the model it applies to');
+  assert.match(matrix, /两张不同的表/, 'the two columns write different tables and must say so');
+  // Each verdict names its layer and points at the control that fixes it.
+  assert.match(matrix, /本模型没选它/, 'the model-side exclusion must be named');
+  assert.match(matrix, /从未启用/, 'never-enabled must not read as operator-disabled');
+  assert.match(matrix, /尚未发现能力/, 'a wildcard account must be flagged before enabling');
+  assert.match(matrix, /接流量/, 'a serving account must be marked as such');
+
+  // Ticking an account that cannot serve this model is futile, and saying so
+  // beforehand beats discovering it after the save.
+  await setDiagnostic('gpt-4o', [
+    {account: 'acct-a', enabled: true, selected: false, serves_model: false,
+     reason: 'not_in_capability', serves_model_ignoring_selection: false,
+     reason_ignoring_selection: 'not_in_capability', capability_known: true}]);
+  assert.match(element('ruleAccounts').innerHTML, /勾了也不会服务该模型/,
+    'a checkbox that cannot help must say so');
+  assert.match(element('ruleAccounts').innerHTML, /上游没有这个模型/);
+
+  // ---- the resulting provider order ----
+  // Both providers always rendered, the trailing one labelled as kept: that is
+  // "reorders, never filters" expressed by the control instead of the prose.
+  element('ruleProvider').value = '';
+  context.renderOrderPreview();
+  assert.match(element('ruleOrderPreview').innerHTML, /copilot/);
+  assert.match(element('ruleOrderPreview').innerHTML, /azure_openai/);
+  element('ruleProvider').value = 'azure_openai';
+  context.renderOrderPreview();
+  let chain = element('ruleOrderPreview').innerHTML;
+  assert.ok(chain.indexOf('azure_openai') < chain.indexOf('copilot'),
+    'the chosen provider must lead');
+  assert.match(chain, /fallback · 保留/, 'the other provider stays a candidate and must look like it');
+  assert.match(chain, /没被提前的那个仍在候选里/);
+
+  // ---- the effective set, before saving ----
+  // The server said which accounts could serve this model; the page only
+  // intersects that with the checkboxes. No policy logic is duplicated.
+  await setDiagnostic('gpt-4o', [
+    {account: 'acct-a', enabled: true, selected: true, serves_model: true, reason: null,
+     serves_model_ignoring_selection: true, reason_ignoring_selection: null, capability_known: true},
+    {account: 'acct-b', enabled: true, selected: false, serves_model: false,
+     reason: 'not_selected_for_model', serves_model_ignoring_selection: true,
+     reason_ignoring_selection: null, capability_known: true}]);
+  nodes = [{selector: '#ruleMatrix [data-rule-account]', checked: true, dataset: {ruleAccount: 'acct-a'}},
+           {selector: '#ruleMatrix [data-global-enable]', checked: true, dataset: {globalEnable: 'acct-a'}}];
+  context.renderRulePreview();
+  assert.match(element('rulePreview').textContent, /生效候选：acct-a/,
+    'the effective set must be shown before the write, not after it');
+
+  // An empty effective set is a warning *before* saving. It used to be
+  // reported only in the response, i.e. after the rule was already live.
+  nodes = [{selector: '#ruleMatrix [data-rule-account]', checked: true, dataset: {ruleAccount: 'acct-z'}},
+           {selector: '#ruleMatrix [data-global-enable]', checked: true, dataset: {globalEnable: 'acct-a'}}];
+  context.renderRulePreview();
+  assert.match(element('rulePreview').textContent, /没有任何候选/,
+    'an emptied set must be visible before the save');
+  assert.equal(element('rulePreview').dataset.state, 'warn');
+
+  // A pending global change is called out as global in the preview.
+  nodes = [{selector: '#ruleMatrix [data-rule-account]', checked: false, dataset: {ruleAccount: 'acct-a'}},
+           {selector: '#ruleMatrix [data-global-enable]', checked: false, dataset: {globalEnable: 'acct-a'}}];
+  context.renderRulePreview();
+  assert.match(element('rulePreview').textContent, /影响所有模型/,
+    'a queued global change must be labelled before it is written');
+
+  // Enabling an account whose only known blocker was enablement: the server
+  // stopped evaluating there, so whether capability also excludes it is
+  // genuinely unknown. The preview must say so rather than promise a candidate.
+  await setDiagnostic('gpt-4o', [
+    {account: 'acct-off', enabled: false, selected: true, serves_model: false,
+     reason: 'account_disabled', serves_model_ignoring_selection: false,
+     reason_ignoring_selection: 'account_disabled', capability_known: true}]);
+  nodes = [{selector: '#ruleMatrix [data-rule-account]', checked: true,
+            dataset: {ruleAccount: 'acct-off'}},
+           {selector: '#ruleMatrix [data-global-enable]', checked: true,
+            dataset: {globalEnable: 'acct-off'}}];
+  context.renderRulePreview();
+  assert.match(element('rulePreview').textContent, /以保存后的结果为准/,
+    'an optimistic preview must be labelled as approximate, not asserted');
 
   // No model named at all must not reach the server.
   element('ruleModel').value = '';
   element('ruleModelCustom').value = '';
+  nodes = [];
   requests = [];
   await context.saveRule();
   assert.equal(requests.length, 0, 'a rule with no model must be refused locally');
-  assert.match(element('keysStatus').textContent, /手输模型名/);
+  assert.match(element('routingFeedback').textContent, /手输模型名/);
 
   // Accounts alone, with no provider change, is a legitimate rule.
-  element('ruleModel').value = 'gpt-4o';
   element('ruleProvider').value = '';
-  nodes = [{selector: '#ruleAccounts [data-rule-account]', checked: true, dataset: {ruleAccount: 'acct-a'}}];
+  await setDiagnostic('gpt-4o', [
+    {account: 'acct-a', enabled: true, selected: false, serves_model: true, reason: null,
+     serves_model_ignoring_selection: true, reason_ignoring_selection: null, capability_known: true}]);
+  nodes = [{selector: '#ruleMatrix [data-rule-account]', checked: true, dataset: {ruleAccount: 'acct-a'}},
+           {selector: '#ruleMatrix [data-global-enable]', checked: true, dataset: {globalEnable: 'acct-a'}}];
   requests = [];
   context.fetch = panelFetch({'/admin/model-routing/gpt-4o': {ok: true, status: 200,
     json: async () => ({model: 'gpt-4o', providers: [],
@@ -640,23 +992,89 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
       copilot_accounts: ['acct-a'], effective_copilot_accounts: ['acct-a'],
       copilot_candidates_empty: false, policy: {state: 'loaded'}})}});
   await context.saveRule();
-  assert.equal(requests[0].url, '/admin/model-routing/gpt-4o');
-  assert.equal(requests[0].options.method, 'PUT');
-  let body = JSON.parse(requests[0].options.body);
+  const ruleWrite = requests.find(r => r.url === '/admin/model-routing/gpt-4o'
+                                       && (r.options.method || '') === 'PUT');
+  assert.ok(ruleWrite, 'the rule must be written');
+  let body = JSON.parse(ruleWrite.options.body);
   assert.deepEqual(body.copilot_accounts, ['acct-a']);
   assert.equal(body.providers, undefined, 'an unchanged provider segment must not be sent');
-  assert.match(element('keysStatus').textContent, /生效候选/);
+  assert.ok(!requests.some(r => r.url.startsWith('/admin/copilot/accounts/')),
+    'no global write when no global toggle moved');
+  assert.match(element('routingFeedback').textContent, /生效候选/);
 
   // Unchecking everything must still be sent — that is how a limit is undone.
-  nodes = [{selector: '#ruleAccounts [data-rule-account]', checked: false, dataset: {ruleAccount: 'acct-a'}}];
+  nodes = [{selector: '#ruleMatrix [data-rule-account]', checked: false, dataset: {ruleAccount: 'acct-a'}},
+           {selector: '#ruleMatrix [data-global-enable]', checked: true, dataset: {globalEnable: 'acct-a'}}];
   requests = [];
   await context.saveRule();
-  body = JSON.parse(requests[0].options.body);
+  body = JSON.parse(requests.find(r => (r.options.method || '') === 'PUT').options.body);
   assert.deepEqual(body.copilot_accounts, [],
     'an empty selection must be sent explicitly, or clearing a limit is impossible');
 
+  // ---- two endpoints, two writes, no pretence of atomicity ----
+  // The global toggle goes first; the confirmation separates the scopes.
+  await setDiagnostic('gpt-4o', [
+    {account: 'acct-b', enabled: false, selected: false, serves_model: false,
+     reason: 'account_disabled', serves_model_ignoring_selection: false,
+     reason_ignoring_selection: 'account_disabled', capability_known: true}]);
+  nodes = [{selector: '#ruleMatrix [data-rule-account]', checked: true, dataset: {ruleAccount: 'acct-b'}},
+           {selector: '#ruleMatrix [data-global-enable]', checked: true, dataset: {globalEnable: 'acct-b'}}];
+  let confirmText = '';
+  context.confirm = text => { confirmText = text; return true; };
+  requests = [];
+  context.fetch = panelFetch({
+    '/admin/copilot/accounts/acct-b': {ok: true, status: 200,
+      json: async () => ({account: {account: 'acct-b', enabled: true, capability: ['gpt-4o']},
+                          policy: {state: 'loaded'}})},
+    '/admin/model-routing/gpt-4o': {ok: true, status: 200,
+      json: async () => ({model: 'gpt-4o', providers: [],
+        effective_openai_order: ['copilot', 'azure_openai'], copilot_accounts: ['acct-b'],
+        effective_copilot_accounts: ['acct-b'], copilot_candidates_empty: false,
+        policy: {state: 'loaded'}})}});
+  await context.saveRule();
+  assert.match(confirmText, /全局 · 影响所有模型/, 'the global half must be labelled in the confirmation');
+  assert.match(confirmText, /仅 gpt-4o/, 'and the local half scoped to the model');
+  assert.match(confirmText, /两步写入，不是一个事务/,
+    'two endpoints cannot be atomic and the dialog must not imply otherwise');
+  const order = requests.filter(r => (r.options.method || '') === 'PUT').map(r => r.url);
+  assert.deepEqual(order, ['/admin/copilot/accounts/acct-b', '/admin/model-routing/gpt-4o'],
+    'the global write goes first');
+  assert.match(element('routingFeedback').textContent, /全局已写入/);
+
+  // First step succeeds, second fails: say exactly that rather than "failed".
+  await setDiagnostic('gpt-4o', [
+    {account: 'acct-b', enabled: false, selected: false, serves_model: false,
+     reason: 'account_disabled', serves_model_ignoring_selection: false,
+     reason_ignoring_selection: 'account_disabled', capability_known: true}]);
+  requests = [];
+  context.fetch = panelFetch({
+    '/admin/copilot/accounts/acct-b': {ok: true, status: 200,
+      json: async () => ({account: {account: 'acct-b', enabled: true, capability: ['gpt-4o']},
+                          policy: {state: 'loaded'}})},
+    '/admin/model-routing/gpt-4o': {ok: false, status: 503,
+      json: async () => ({detail: {error: {code: 'policy_write_failed'}}})}});
+  await context.saveRule();
+  assert.match(element('routingFeedback').textContent, /账户启用态已生效/,
+    'a half-applied save must report which half landed');
+  assert.match(element('routingFeedback').textContent, /模型规则未写入/);
+
+  // First step fails: the second must not run at all.
+  await setDiagnostic('gpt-4o', [
+    {account: 'acct-b', enabled: false, selected: false, serves_model: false,
+     reason: 'account_disabled', serves_model_ignoring_selection: false,
+     reason_ignoring_selection: 'account_disabled', capability_known: true}]);
+  requests = [];
+  context.fetch = panelFetch({
+    '/admin/copilot/accounts/acct-b': {ok: false, status: 503,
+      json: async () => ({detail: {error: {code: 'policy_write_failed'}}})}});
+  await context.saveRule();
+  assert.ok(!requests.some(r => r.url === '/admin/model-routing/gpt-4o'
+                                && (r.options.method || '') === 'PUT'),
+    'a failed global write must stop the model write');
+  context.confirm = () => true;
+
   // The free-text field wins, so a model missing from the catalogue is reachable.
-  element('ruleModel').value = 'gpt-4o';
+  element('ruleModel').value = '';
   element('ruleModelCustom').value = 'gpt-7-unreleased';
   element('ruleProvider').value = 'copilot';
   nodes = [];
@@ -667,14 +1085,14 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
       effective_copilot_accounts: ['acct-a'], copilot_candidates_empty: false,
       policy: {state: 'loaded'}})}});
   await context.saveRule();
-  assert.equal(requests[0].url, '/admin/model-routing/gpt-7-unreleased',
+  assert.ok(requests.some(r => r.url === '/admin/model-routing/gpt-7-unreleased'),
     'the free-text model name must take precedence over the dropdown');
-  assert.deepEqual(JSON.parse(requests[0].options.body).providers, ['copilot']);
-  assert.equal(element('ruleModelCustom').value, '', 'the one-off field is cleared after use');
+  assert.deepEqual(JSON.parse(requests.find(r => (r.options.method || '') === 'PUT')
+                              .options.body).providers, ['copilot']);
 
   // A rule that empties the candidate set is applied but must be called out.
   element('ruleModelCustom').value = 'gpt-5.4';
-  nodes = [{selector: '#ruleAccounts [data-rule-account]', checked: true, dataset: {ruleAccount: 'acct-b'}}];
+  nodes = [];
   requests = [];
   context.fetch = panelFetch({'/admin/model-routing/gpt-5.4': {ok: true, status: 200,
     json: async () => ({model: 'gpt-5.4', providers: ['copilot'],
@@ -682,17 +1100,16 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
       effective_copilot_accounts: [], copilot_candidates_empty: true,
       policy: {state: 'loaded'}})}});
   await context.saveRule();
-  assert.match(element('keysStatus').textContent, /没有任何候选账户/,
+  assert.match(element('routingFeedback').textContent, /没有任何候选账户/,
     'an emptied candidate set must be reported even though the write succeeded');
-  assert.match(element('keysStatus').textContent, /Foundry/, 'it must say where traffic goes instead');
-  assert.equal(element('keysStatus').dataset.state, 'warn',
+  assert.match(element('routingFeedback').textContent, /Foundry/, 'it must say where traffic goes instead');
+  assert.equal(element('routingFeedback').dataset.state, 'warn',
     'applied-but-probably-unintended is a warning, not a success');
 
   // A claude model pointed at GHCP changes both admission and pricing.
   element('ruleModelCustom').value = 'claude-opus-5.5';
   element('ruleProvider').value = 'copilot';
   nodes = [];
-  let confirmText = '';
   context.confirm = text => { confirmText = text; return true; };
   requests = [];
   context.fetch = panelFetch({'/admin/model-routing/claude-opus-5.5': {ok: true, status: 200,
@@ -703,18 +1120,18 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   await context.saveRule();
   assert.match(confirmText, /放行/, 'opening claude must be confirmed explicitly');
   assert.match(confirmText, /GHCP 分档价/, 'the pricing change must be in the confirmation');
-  assert.match(element('keysStatus').textContent, /已在 OpenAI 风格入口放行/);
+  assert.match(element('routingFeedback').textContent, /已在 OpenAI 风格入口放行/);
   context.confirm = () => true;
 
   // A rejected account name must read as "nothing was applied".
   element('ruleModelCustom').value = 'gpt-4o';
-  nodes = [{selector: '#ruleAccounts [data-rule-account]', checked: true, dataset: {ruleAccount: 'typo'}}];
+  nodes = [{selector: '#ruleMatrix [data-rule-account]', checked: true, dataset: {ruleAccount: 'typo'}}];
   requests = [];
   context.fetch = panelFetch({'/admin/model-routing/gpt-4o': {ok: false, status: 400,
     json: async () => ({detail: {error: {code: 'unknown_copilot_account',
       message: 'Not configured Copilot endpoints: typo'}}})}});
   await context.saveRule();
-  assert.match(element('keysStatus').textContent, /规则未生效/,
+  assert.match(element('routingFeedback').textContent, /规则未生效/,
     'a rejected rule must not look partially applied');
 
   requests = [];
@@ -722,7 +1139,7 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
     json: async () => ({detail: {error: {code: 'policy_write_failed'}}})}});
   await context.clearRouting('claude-opus-5.5');
   assert.equal(requests[0].options.method, 'DELETE');
-  assert.match(element('keysStatus').textContent, /规则保持不变/,
+  assert.match(element('routingFeedback').textContent, /规则保持不变/,
     'a failed clear must not claim the rule changed');
 
   requests = [];
@@ -734,8 +1151,19 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
       policy: {state: 'loaded'}})}});
   await context.clearRouting('gpt-4o');
   assert.match(confirmText, /整条规则/, 'clearing removes both segments and must say so');
-  assert.match(element('keysStatus').textContent, /账户不限定/);
+  assert.match(element('routingFeedback').textContent, /账户不限定/);
   context.confirm = () => true;
+
+  // Clearing the form drops the stale diagnostic with it, so no verdicts are
+  // left on screen describing a model that is no longer selected.
+  await setDiagnostic('gpt-4o', [
+    {account: 'acct-a', enabled: true, selected: true, serves_model: true, reason: null,
+     serves_model_ignoring_selection: true, reason_ignoring_selection: null, capability_known: true}]);
+  assert.match(element('ruleAccounts').innerHTML, /acct-a/);
+  context.resetRuleForm();
+  assert.equal(element('ruleModelCustom').value, '');
+  assert.match(element('ruleAccounts').innerHTML, /先在第 1 步选一个模型/,
+    'clearing the form drops the stale verdicts with it');
 
   // ---- upstream credentials ----
   assert.match(html, /id="credentialsContent"/, 'credential area needs a container');
@@ -784,7 +1212,7 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   await context.submitCredential();
   assert.equal(requests[0].options.method, 'PUT');
   assert.equal(JSON.parse(requests[0].options.body).secret, 'dapi-should-not-persist');
-  assert.match(element('keysStatus').textContent, /静默遮蔽/, 'a 409 must explain the shadowing rule');
+  assert.match(element('credentialsFeedback').textContent, /静默遮蔽/, 'a 409 must explain the shadowing rule');
   assert.equal(element('credSecret').value, '', 'the credential field must be cleared after submit');
   assert.ok(!requests.some(r => r.url.includes('dapi-should-not-persist')),
     'the credential must never travel in a URL');
@@ -831,6 +1259,8 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   assert.match(element('deviceStatus').textContent, /请先解锁/);
 
   console.log('Dashboard UI: authenticated cleanup, honest errors, safe release identity, '
+    + 'panel gate (content hidden, not blurred), sub-tabs with per-section feedback, '
     + 'panel session (password + cookie, zero-interaction restore, key fallback), '
-    + 'key panel, accounts, routing rules, credentials passed.');
+    + 'client keys, accounts (enabled vs idle), routing matrix (two scopes, per-layer '
+    + 'reasons, pre-save preview, two-step save), panel password, credentials passed.');
 })().catch(error => {console.error(error); process.exitCode = 1;});

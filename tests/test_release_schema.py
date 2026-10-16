@@ -66,3 +66,40 @@ class LazilyCreatedPolicyTableTests(unittest.TestCase):
         s=deepcopy(good);s['model_account_unique_indexes']={'PRIMARY':['accounts']};bad.append(s)
         for value in bad:
             with self.subTest(value=value),self.assertRaises(ValueError):validate_schema(value)
+
+
+class LazilyCreatedPanelPasswordTableTests(unittest.TestCase):
+    """The panel password overlay, same absent-is-accepted rule.
+
+    This one is a single row pinned to id 1. A lost primary key would let two
+    rows exist and make which verifier wins depend on row order — i.e. which
+    password opens the panel. The column holds a one-way verifier, never the
+    password and never recoverable ciphertext.
+    """
+
+    PANEL={'panel_password_columns':{'id':['tinyint','NO',None],
+                                     'verifier':['varchar','NO',255],
+                                     'updated_at':['timestamp','NO',None]},
+           'panel_password_unique_indexes':{'PRIMARY':['id']}}
+
+    def test_absent_table_is_accepted(self):
+        from release_probe import validate_schema
+        self.assertNotIn('panel_password_columns',schema())
+        validate_schema(schema())
+
+    def test_the_expected_shape_is_accepted(self):
+        from release_probe import validate_schema
+        validate_schema({**schema(),**deepcopy(self.PANEL)})
+
+    def test_drift_in_the_present_table_is_rejected(self):
+        from release_probe import validate_schema
+        good={**schema(),**deepcopy(self.PANEL)}
+        bad=[]
+        s=deepcopy(good);s['panel_password_columns']['verifier'][2]=128;bad.append(s)
+        s=deepcopy(good);s['panel_password_columns']['verifier'][1]='YES';bad.append(s)
+        s=deepcopy(good);s['panel_password_columns']['id'][0]='int';bad.append(s)
+        s=deepcopy(good);del s['panel_password_columns']['updated_at'];bad.append(s)
+        s=deepcopy(good);s['panel_password_unique_indexes']={};bad.append(s)
+        s=deepcopy(good);s['panel_password_unique_indexes']={'PRIMARY':['verifier']};bad.append(s)
+        for value in bad:
+            with self.subTest(value=value),self.assertRaises(ValueError):validate_schema(value)

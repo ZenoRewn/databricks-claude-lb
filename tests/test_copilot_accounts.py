@@ -535,5 +535,84 @@ class InertAccountAdminTests(unittest.TestCase):
         self.assertFalse(self._view()['enabled'])
 
 
+class EnabledButIdleIsItsOwnStateTests(unittest.TestCase):
+    """«Enabled» and «actually receiving traffic» are different questions.
+
+    An account can be switched on and still serve nothing, because a *different*
+    layer — a per-model account selection written on the routing page — excluded
+    it from every model. A panel that shows only the switch invites the reading
+    "it is on, so it is working".
+
+    AWS ALB has the precedent worth copying: a registered target that no
+    listener rule routes to is reported as `unused`, a first-class status
+    distinct from `unhealthy`, precisely because the cause lives in another
+    layer. LiteLLM's console is the counter-example — it lists models the router
+    has already dropped, and one such case went unnoticed for about 17 days.
+    """
+
+    KEY = 'lb-copilot-idle-key-0123'
+
+    def setUp(self):
+        from starlette.testclient import TestClient
+
+        class _Stub:
+            api_key = EnabledButIdleIsItsOwnStateTests.KEY
+
+            def verify_api_key(self, key):
+                return bool(key) and key == self.api_key
+
+        self.store = _store(biz=BUSINESS, other=BUSINESS)
+        self.endpoints = [_endpoint('biz'), _endpoint('other')]
+        copilot = main.CopilotProxy.__new__(main.CopilotProxy)
+        copilot.load_balancer = main.LoadBalancer(self.endpoints)
+        copilot.verify_api_key = _Stub().verify_api_key
+        main.API_KEY_TO_TENANT.clear()
+        main.API_KEY_TO_TENANT[self.KEY] = 'default'
+        self.addCleanup(main.API_KEY_TO_TENANT.clear)
+        for attr, value in (('proxy', _Stub()), ('copilot_proxy', copilot),
+                            ('key_policy_store', self.store)):
+            p = patch.object(main, attr, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.client = TestClient(main.app, raise_server_exceptions=False)
+        self.H = {'x-api-key': self.KEY}
+
+    def _views(self):
+        payload = self.client.get('/admin/copilot/accounts', headers=self.H).json()
+        return {a['account']: a for a in payload['accounts']}
+
+    def test_an_enabled_account_with_candidates_is_reported_as_serving(self):
+        views = self._views()
+        self.assertTrue(views['biz']['enabled'])
+        self.assertTrue(views['biz']['receiving_traffic'])
+        self.assertEqual(views['biz']['serves_models'], len(BUSINESS))
+
+    def test_an_account_excluded_from_every_model_is_enabled_but_idle(self):
+        # The switch says yes; the routing layer says no to each model. Both are
+        # true, and only showing the first is what confuses people.
+        for model in BUSINESS:
+            self.client.put(f'/admin/model-routing/{model}', headers=self.H,
+                            json={'copilot_accounts': ['biz']})
+        views = self._views()
+        self.assertTrue(views['other']['enabled'], 'nobody turned this account off')
+        self.assertFalse(views['other']['receiving_traffic'])
+        self.assertEqual(views['other']['serves_models'], 0)
+
+    def test_a_disabled_account_is_not_merely_idle(self):
+        # Same observable traffic, different cause and different fix, so the two
+        # must stay distinguishable.
+        self.client.put('/admin/copilot/accounts/other', headers=self.H, json={'enabled': False})
+        view = self._views()['other']
+        self.assertFalse(view['enabled'])
+        self.assertFalse(view['receiving_traffic'])
+
+    def test_the_idle_count_is_scoped_to_the_known_catalogue(self):
+        # Honesty about what was counted: the catalogue is a point-in-time view,
+        # so this is "models we know about", not "all models that exist".
+        payload = self.client.get('/admin/copilot/accounts', headers=self.H).json()
+        self.assertIn('catalogue_models', payload)
+        self.assertGreater(payload['catalogue_models'], 0)
+
+
 if __name__ == '__main__':
     unittest.main()

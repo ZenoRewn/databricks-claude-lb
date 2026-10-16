@@ -406,5 +406,215 @@ class NoSecretLeaksTests(PanelSessionTestCase):
         self.assertNotIn(token, '\n'.join(logs.output))
 
 
+NEW_PASSWORD = 'a-brand-new-panel-password'
+
+
+class _PasswordStoreCase(PanelSessionTestCase):
+    """Harness with a real policy store, so the overlay can actually be written."""
+
+    def setUp(self):
+        import key_policy
+        self.store = key_policy.KeyPolicyStore(None)
+        asyncio_run = __import__('asyncio').run
+        asyncio_run(self.store.start())
+        super().setUp()
+        p = patch.object(main, 'key_policy_store', self.store)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def change(self, new, current=None, **kw):
+        body = {'new_password': new}
+        if current is not None:
+            body['current_password'] = current
+        return self.client.put('/admin/panel-password', json=body, **kw)
+
+
+class PasswordVerifierStorageTests(_PasswordStoreCase):
+    """A panel password is only ever *verified*, so store a one-way verifier.
+
+    Upstream credentials are sealed with AES-GCM because they must be replayed
+    to the upstream. This one never leaves the gateway, so hashing it is
+    strictly better: even with `LB_CREDENTIAL_KEY` in hand nobody recovers the
+    password, and the feature does not depend on that key being configured.
+    """
+
+    def test_the_stored_verifier_is_not_the_password(self):
+        self.login()
+        self.assertEqual(self.change(NEW_PASSWORD, current=PASSWORD).status_code, 200)
+        verifier = self.store.panel_password_verifier()
+        self.assertIsNotNone(verifier)
+        self.assertNotIn(NEW_PASSWORD, verifier)
+        self.assertTrue(verifier.startswith('pbkdf2_sha256$'),
+                        'the algorithm and its cost have to be recorded with the hash')
+
+    def test_a_stored_verifier_takes_precedence_over_the_environment(self):
+        # The project's single rule: config is the baseline, the store is the
+        # overlay. Here the baseline is the env var.
+        self.login()
+        self.change(NEW_PASSWORD, current=PASSWORD)
+        self.client.delete('/admin/session')
+        self.assertEqual(self.login(NEW_PASSWORD).status_code, 200)
+        self.assertEqual(self.login(PASSWORD).status_code, 401,
+                         'the env password must stop working once overridden')
+
+    def test_an_unloaded_store_falls_back_to_the_environment(self):
+        self.login()
+        self.change(NEW_PASSWORD, current=PASSWORD)
+        self.client.delete('/admin/session')
+        self.store._state = 'unavailable'
+        self.assertEqual(self.login(PASSWORD).status_code, 200,
+                         'an overlay that cannot be read falls back to the baseline')
+
+    def test_with_neither_overlay_nor_environment_login_is_unavailable_not_open(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(main.PANEL_PASSWORD_ENV, None)
+            r = self.client.post('/admin/session', json={'password': 'anything-long-enough'})
+            self.assertEqual(r.status_code, 503)
+            self.assertEqual(r.json()['detail']['error']['code'],
+                             'panel_password_not_configured')
+            self.assertEqual(self.client.get('/admin/api-keys').status_code, 401,
+                             'an unavailable password must never unlock anything')
+
+    def test_clearing_the_overlay_returns_to_the_environment_baseline(self):
+        self.login()
+        self.change(NEW_PASSWORD, current=PASSWORD)
+        self.client.delete('/admin/session')
+        self.login(NEW_PASSWORD)
+        r = self.client.request('DELETE', '/admin/panel-password',
+                                json={'current_password': NEW_PASSWORD})
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(self.store.panel_password_verifier())
+        self.client.delete('/admin/session')
+        self.assertEqual(self.login(PASSWORD).status_code, 200)
+
+    def test_the_session_view_names_where_the_password_comes_from(self):
+        self.assertEqual(self.client.get('/admin/session').json()['password_source'], 'env')
+        self.login()
+        self.change(NEW_PASSWORD, current=PASSWORD)
+        self.assertEqual(self.client.get('/admin/session').json()['password_source'], 'store')
+
+    def test_no_source_is_reported_when_nothing_is_configured(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(main.PANEL_PASSWORD_ENV, None)
+            body = self.client.get('/admin/session').json()
+            self.assertEqual(body['password_source'], 'none')
+            self.assertFalse(body['password_configured'])
+
+
+class PasswordChangeAuthorisationTests(_PasswordStoreCase):
+    def test_a_session_alone_is_not_enough(self):
+        # The session may have been obtained with an API key, so it does not
+        # prove the caller knows the current password.
+        self.login()
+        r = self.change(NEW_PASSWORD)
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()['detail']['error']['code'], 'current_password_required')
+        self.assertIsNone(self.store.panel_password_verifier())
+
+    def test_a_wrong_current_password_is_refused(self):
+        self.login()
+        r = self.change(NEW_PASSWORD, current='wrong-but-long-enough')
+        self.assertEqual(r.status_code, 401)
+        self.assertIsNone(self.store.panel_password_verifier())
+
+    def test_an_api_key_may_stand_in_for_the_current_password(self):
+        # The break-glass path: whoever holds a valid LB API Key can already
+        # call every admin endpoint, so this grants nothing new — and it is the
+        # only way back in once a stored password is forgotten.
+        self.login()
+        r = self.change(NEW_PASSWORD, headers={'x-api-key': API_KEY})
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNotNone(self.store.panel_password_verifier())
+
+    def test_an_unauthenticated_caller_cannot_change_it(self):
+        self.assertEqual(self.change(NEW_PASSWORD, current=PASSWORD).status_code, 401)
+        self.assertIsNone(self.store.panel_password_verifier())
+
+    def test_a_too_short_new_password_is_refused(self):
+        self.login()
+        r = self.change('short', current=PASSWORD)
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()['detail']['error']['code'], 'panel_password_too_short')
+        self.assertIsNone(self.store.panel_password_verifier())
+
+    def test_the_length_floor_counts_characters_not_bytes(self):
+        # `kubectl describe secret` reports bytes, so a multi-byte password can
+        # look long enough there and be rejected here. Twelve characters.
+        self.login()
+        self.assertEqual(self.change('密码密码密码密码密码密码', current=PASSWORD).status_code, 200)
+
+    def test_a_wrong_current_password_goes_through_the_same_backoff(self):
+        # Otherwise this endpoint is a way to guess the current password without
+        # ever tripping the login backoff.
+        self.login()
+        for _ in range(main.PANEL_LOCKOUT_THRESHOLD):
+            self.change(NEW_PASSWORD, current='wrong-but-long-enough')
+        r = self.change(NEW_PASSWORD, current=PASSWORD)
+        self.assertEqual(r.status_code, 429,
+                         'the correct password must be refused while locked out too')
+        self.assertIsNone(self.store.panel_password_verifier())
+
+    def test_changing_it_invalidates_other_sessions_but_not_this_one(self):
+        other = TestClient(main.app, raise_server_exceptions=False)
+        other.post('/admin/session', json={'password': PASSWORD})
+        self.assertEqual(other.get('/admin/api-keys').status_code, 200)
+        self.login()
+        self.assertEqual(self.change(NEW_PASSWORD, current=PASSWORD).status_code, 200)
+        self.assertEqual(other.get('/admin/api-keys').status_code, 401,
+                         'a password change must not leave older sessions alive')
+        self.assertEqual(self.client.get('/admin/api-keys').status_code, 200,
+                         'the caller should not have to log in again immediately')
+
+    def test_a_write_failure_keeps_the_old_password_working(self):
+        self.login()
+        with patch.object(self.store, '_backend_write_panel_password',
+                          side_effect=OSError('db down')):
+            r = self.change(NEW_PASSWORD, current=PASSWORD)
+        self.assertEqual(r.status_code, 503)
+        self.client.delete('/admin/session')
+        self.assertEqual(self.login(PASSWORD).status_code, 200)
+
+
+class PasswordChangeLeakTests(_PasswordStoreCase):
+    def test_neither_password_appears_in_any_response(self):
+        self.login()
+        responses = [
+            self.change(NEW_PASSWORD, current=PASSWORD),
+            self.client.get('/admin/session'),
+            self.client.get('/config/effective', headers={'x-api-key': API_KEY}),
+        ]
+        for r in responses:
+            with self.subTest(url=str(r.url)):
+                for secret in (PASSWORD, NEW_PASSWORD):
+                    self.assertNotIn(secret, r.text)
+                    self.assertNotIn(secret, str(dict(r.headers)))
+
+    def test_the_verifier_is_never_returned_either(self):
+        self.login()
+        self.change(NEW_PASSWORD, current=PASSWORD)
+        verifier = self.store.panel_password_verifier()
+        for r in (self.client.get('/admin/session'),
+                  self.client.get('/config/effective', headers={'x-api-key': API_KEY})):
+            with self.subTest(url=str(r.url)):
+                self.assertNotIn(verifier, r.text)
+
+    def test_changing_it_logs_neither_password_nor_verifier(self):
+        self.login()
+        with self.assertLogs('main', level='DEBUG') as logs:
+            logging.getLogger('main').debug('anchor')
+            self.change(NEW_PASSWORD, current=PASSWORD)
+            self.change(NEW_PASSWORD, current='wrong-but-long-enough')
+        joined = '\n'.join(logs.output)
+        for secret in (PASSWORD, NEW_PASSWORD, self.store.panel_password_verifier()):
+            with self.subTest(secret=secret[:6]):
+                self.assertNotIn(secret, joined)
+
+    def test_the_settings_endpoint_never_carries_the_password(self):
+        # /config/effective hands the whole settings dict to any valid key, so
+        # the password must not be in it — same reason LB_CREDENTIAL_KEY is not.
+        body = self.client.get('/config/effective', headers={'x-api-key': API_KEY}).json()
+        self.assertNotIn(main.PANEL_PASSWORD_ENV, str(body))
+
+
 if __name__ == '__main__':
     unittest.main()

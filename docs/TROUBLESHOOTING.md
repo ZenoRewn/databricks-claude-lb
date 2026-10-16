@@ -1030,10 +1030,18 @@ curl -s $LB/metrics | grep copilot_session_affinity_total
 curl -s https://lb.zeno.ink/admin/session | python3 -m json.tool
 ```
 
+`password_source` 先决定往哪查 —— 密码有两个可能的来源，查错了会白费时间：
+
+| `password_source` | 现在生效的是 | 往哪查 |
+|---|---|---|
+| `store` | **存储里的覆盖值**（页内改过），它优先于环境变量 | 环境变量此刻不生效，核对 Secret 没有意义。忘了就用 LB API Key 解锁后在「面板密码」页重设 —— 验证器是单向的，**找不回来** |
+| `env` | `LB_DASHBOARD_PASSWORD` | 见下方「长度陷阱」 |
+| `none` | 两者都没有 → 密码登录整体不可用 | 用 LB API Key 解锁（那条路径**始终**可用），再在「面板密码」页设一个 |
+
 | `password_configured` | 含义 | 解决 |
 |---|---|---|
-| `false` | `LB_DASHBOARD_PASSWORD` 没配，**或配了但短于 12 个字符** | 见下方「长度陷阱」；也可直接用 LB API Key 解锁，那条回落路径一直可用 |
-| `true` 但密码被拒 | 密码确实不对，或首尾带了复制粘贴来的空白 | 用 `kubectl` 读回核对（Secret 的 `data` 只是 base64，不是加密） |
+| `false` | 两个来源都没有，**或 env 那份短于 12 个字符** | 见下方「长度陷阱」；也可直接用 LB API Key 解锁，那条回落路径一直可用 |
+| `true` 但密码被拒 | 密码确实不对，或首尾带了复制粘贴来的空白 | 先看 `password_source`：`store` 就别去核对 Secret 了 |
 
 **长度陷阱：`kubectl describe secret` 报的是字节数，而网关判的是字符数。**
 13 字节的纯 ASCII 密码是 13 个字符、合格；而同样 13 字节的中文密码只有 4 个字符，
@@ -1050,11 +1058,16 @@ print('字符数:', len(pw), '(需 >= 12)  首尾空白:', pw != pw.strip())"
 **「尝试过于频繁」是退避，不是故障。** 连续 5 次失败后按来源指数退避（30s 起翻倍、
 有上限），**退避期内正确密码也会被拒**且与错误密码返回同一个 code —— 这是有意的，
 否则响应就成了一个旁路的密码预言机。等 `Retry-After` 秒数即可；退避**只计密码路径**，
-所以此时 `x-api-key` 仍然照常可用，脚本不受影响。
+所以此时 `x-api-key` 仍然照常可用，脚本不受影响。改密码时填错当前密码走的是**同一个**
+计数器，所以那边连试几次也会把这边锁住。
 
-**改完密码要重启才生效**：它是启动时读的 env，`kubectl patch` 改 Secret 不会让运行中的
-Pod 看到新值。另外**会话是进程内的**，所以任何重启都会让已解锁的浏览器需要重新解锁，
-多副本之间也不共享（换 Pod 要重新解锁，这不是故障）。
+**改 env 那份要重启才生效**：它是启动时读的，`kubectl patch` 改 Secret 不会让运行中的
+Pod 看到新值。**页内改密码不需要重启**（写的是存储覆盖值），但反过来有个边界：策略存储
+只在启动时加载，所以**多副本下其余副本在重启前仍然接受 env 里的旧密码** —— 页内改完请
+同步更新 Secret 再滚动重启。当前为单副本部署。
+
+**会话是进程内的**，所以任何重启都会让已解锁的浏览器需要重新解锁，多副本之间也不共享
+（换 Pod 要重新解锁，这不是故障）。改密码成功会**主动失效其他会话**，只留调用方自己那条。
 
 ---
 
@@ -1081,7 +1094,35 @@ Pod 看到新值。另外**会话是进程内的**，所以任何重启都会让
 
 ### 排查
 
-一条命令看全五层的生效结果（`effective_copilot_accounts` 由服务端按 `supports()` 算出，
+**先问一个模型的候选诊断** —— 它直接回答「是哪一层摘掉了哪个账户」，不必靠对照两个
+页面去推。Dashboard 上就是路由规则页的候选矩阵，命令行是同一个端点：
+
+```bash
+MODEL=gpt-5.4
+curl -s "https://lb.zeno.ink/admin/model-routing/$MODEL" -H "x-api-key: $KEY" \
+  | python3 -c "
+import json, sys
+b = json.load(sys.stdin)
+print(f\"{b['model']}  顺序={b['effective_openai_order']}  限定={b['copilot_accounts'] or '不限定'}\")
+print('生效候选:', b['effective_copilot_accounts'] or '（空 —— 请求会落到 Foundry）')
+for a in b['accounts']:
+    mark = '接流量' if a['serves_model'] else (a['reason'] or '?')
+    extra = '' if a['serves_model_ignoring_selection'] else '（选上也不会服务该模型）'
+    warn = '' if a['capability_known'] else '  [未发现能力 → 对所有模型通配]'
+    print(f\"  {a['account']:14s} 启用={str(a['enabled']):5s} 选中={str(a['selected']):5s} {mark}{extra}{warn}\")"
+```
+
+`reason` 是闭集，每个值对应一处修法 —— 对照表见
+[排除原因](CONFIGURATION.md#exclusion-reasons)。两组最容易混淆的要分清：
+`not_in_capability` 是上游事实（重新「刷新能力」），`excluded_by_allowed_models` 是运维
+意图（改账户页的勾选）；`account_disabled` 是有人关过，`account_never_enabled` 是从没
+开过 —— 后者去找一个自己从未拨过的开关会白费时间。
+
+**「账户开着却不接流量」单独有一列。** GHCP 账户页的「实际接流量」会把它报成
+「已启用但闲置」，成因通常就是某个 per-model 账户选择把它从每个模型上摘掉了。只看启用
+开关会读成「开着就是在用」。
+
+再看全局，一条命令过全五层（`effective_copilot_accounts` 由服务端按 `supports()` 算出，
 客户端算不出来）：
 
 ```bash

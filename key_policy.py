@@ -44,6 +44,23 @@ PROVIDER_IDS = ('databricks', 'copilot', 'azure_openai')
 PROVIDER_LABELS = {'databricks': 'ADB', 'copilot': 'GHCP', 'azure_openai': 'Foundry'}
 ALL_PROVIDERS = frozenset(PROVIDER_IDS)
 
+# Why an account is not a candidate, as a closed set rather than prose. The
+# Dashboard has to tell an operator *which layer* dropped an account, and a
+# free-text reason could neither be branched on nor tested. `main` adds the
+# reasons for the layers it owns (config-declared enablement and the configured
+# `models` list) and publishes the union.
+#
+# The distinction that matters most here is `not_in_capability` versus
+# `excluded_by_allowed_models`: the first is upstream fact and is fixed by
+# re-discovering, the second is operator intent and is fixed by a checkbox.
+# Collapsing them would send people to the wrong control.
+EXCLUSION_REASONS = frozenset({
+    'account_disabled',
+    'not_in_capability',
+    'excluded_by_allowed_models',
+    'not_selected_for_model',
+})
+
 MASK_MIN_LENGTH = 12
 
 # Distinguishes "caller omitted allowed_models" from "caller asked to clear it".
@@ -139,6 +156,8 @@ class KeyPolicyStore:
         self._accounts: dict = {}
         self._preferences: dict = {}
         self._model_accounts: dict = {}
+        # One-way verifier for the panel password, or None for "no overlay".
+        self._panel_password: Optional[str] = None
         self._state = 'unavailable'
         self._last_loaded_at: Optional[float] = None
         self._last_error_type: Optional[str] = None
@@ -173,6 +192,7 @@ class KeyPolicyStore:
                 accounts = await self._backend_load_accounts()
                 preferences = await self._backend_load_preferences()
                 model_accounts = await self._backend_load_model_accounts()
+                panel_password = await self._backend_load_panel_password()
         except Exception as exc:
             self._last_error_type = type(exc).__name__
             # Never loaded → no restriction; loaded before → keep enforcing it.
@@ -183,6 +203,7 @@ class KeyPolicyStore:
         self._accounts = accounts
         self._preferences = preferences
         self._model_accounts = model_accounts
+        self._panel_password = panel_password
         self._state = 'loaded'
         self._last_loaded_at = time.time()
         self._last_error_type = None
@@ -264,9 +285,18 @@ class KeyPolicyStore:
             return ()
         return tuple(self._model_accounts.get(model, ()))
 
-    def model_allows_account(self, model: str, account: str) -> bool:
+    def model_accounts_exclusion_reason(self, model: str, account: str) -> Optional[str]:
+        """Why this model's selection drops this account, or None if it does not."""
         chosen = self.model_accounts(model)
-        return not chosen or account in chosen
+        if not chosen or account in chosen:
+            return None
+        return 'not_selected_for_model'
+
+    def model_allows_account(self, model: str, account: str) -> bool:
+        # Derived from the reason, never computed beside it: the diagnostic and
+        # the decision have to be the same code or the diagnostic will drift and
+        # be believed anyway.
+        return self.model_accounts_exclusion_reason(model, account) is None
 
     def model_accounts_snapshot(self) -> dict:
         return {model: tuple(accounts) for model, accounts in self._model_accounts.items()}
@@ -328,27 +358,70 @@ class KeyPolicyStore:
             'configured': name in self._accounts,
         }
 
-    def account_allows(self, name: str, model: str) -> bool:
-        """有效集 = capability ∩ allowlist。只做减法。
+    def account_exclusion_reason(self, name: str, model: str) -> Optional[str]:
+        """哪一层把这个账户从该模型上摘掉，没摘掉则 None。
 
-        capability 本身就是外层边界：上游说这个账户没有该模型，把请求路由过去
-        没有意义。未发现过 capability（空）时不据此限制，避免「还没发现」被当成
-        「什么都没有」。无记录或存储未加载时一律放行。
+        有效集 = capability ∩ allowlist，只做减法。capability 本身就是外层边界：
+        上游说这个账户没有该模型，把请求路由过去没有意义。未发现过 capability
+        （空）时不据此限制，避免「还没发现」被当成「什么都没有」。无记录或存储
+        未加载时一律放行 —— 后者是全项目那条「回落配置基线」的实例。
+
+        顺序即诊断的优先级：停用压过一切，上游事实压过运维意图。两个账户侧的
+        reason 必须分开报，它们指向不同的修法（刷新能力 vs 改勾选）。
         """
         if self._state == 'unavailable':
-            return True
+            return None
         record = self._accounts.get(name)
         if not record:
-            return True
+            return None
         if not record.get('enabled', True):
-            return False
+            return 'account_disabled'
         capability = record.get('capability') or ()
         if capability and model not in capability:
-            return False
+            return 'not_in_capability'
         allowed = record.get('allowed_models')
-        if allowed is None:
-            return True
-        return model in allowed
+        if allowed is None or model in allowed:
+            return None
+        return 'excluded_by_allowed_models'
+
+    def account_allows(self, name: str, model: str) -> bool:
+        # Derived, not parallel — see model_allows_account for why.
+        return self.account_exclusion_reason(name, model) is None
+
+    # -- panel password overlay ------------------------------------------
+    #
+    # Stores a **verifier**, never the password and never recoverable
+    # ciphertext. Upstream credentials are sealed because they have to be
+    # replayed to the upstream; this one is only ever compared against, so a
+    # one-way hash is strictly stronger and needs no encryption key at all.
+    #
+    # Same degradation rule as every other layer: no row, or a store that never
+    # loaded, means "no overlay" and the caller falls back to its config
+    # baseline — which for this layer is the environment variable. The caller is
+    # responsible for the part that is not negotiable: when neither exists,
+    # panel login is *unavailable*, not open.
+
+    def panel_password_verifier(self) -> Optional[str]:
+        if self._state == 'unavailable':
+            return None
+        return self._panel_password
+
+    async def set_panel_password_verifier(self, verifier: str) -> None:
+        if not isinstance(verifier, str) or not verifier.strip():
+            raise ValueError('verifier must be a non-empty string')
+        async with self._lock:
+            async with asyncio.timeout(IO_TIMEOUT):
+                await self._backend_write_panel_password(verifier)
+            self._panel_password = verifier
+            if self._state == 'unavailable':
+                self._state = 'loaded'
+                self._last_loaded_at = time.time()
+
+    async def clear_panel_password_verifier(self) -> None:
+        async with self._lock:
+            async with asyncio.timeout(IO_TIMEOUT):
+                await self._backend_delete_panel_password()
+            self._panel_password = None
 
     def accounts_snapshot(self) -> dict:
         return {name: self.account_policy(name) for name in self._accounts}
@@ -560,6 +633,50 @@ class KeyPolicyStore:
     def _model_accounts_path(self):
         return self._path.parent / 'model_copilot_account.json'
 
+    async def _backend_load_panel_password(self) -> Optional[str]:
+        if self.backend == 'mysql':
+            await self._ensure_pool()
+            async with self._pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute('SELECT verifier FROM panel_password WHERE id = 1')
+                    row = await cur.fetchone()
+            return row[0] if row else None
+        if self.backend == 'json':
+            path = self._panel_password_path()
+            if not path.exists():
+                return None
+            raw = json.loads(path.read_text() or '{}')
+            verifier = raw.get('verifier')
+            return verifier if isinstance(verifier, str) and verifier else None
+        return self._panel_password
+
+    async def _backend_write_panel_password(self, verifier: str) -> None:
+        if self.backend == 'mysql':
+            await self._ensure_pool()
+            async with self._pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        'INSERT INTO panel_password (id, verifier) VALUES (1, %s) '
+                        'ON DUPLICATE KEY UPDATE verifier = VALUES(verifier)', (verifier,))
+            return
+        if self.backend == 'json':
+            self._atomic_write_json(self._panel_password_path(), {'verifier': verifier})
+
+    async def _backend_delete_panel_password(self) -> None:
+        if self.backend == 'mysql':
+            await self._ensure_pool()
+            async with self._pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute('DELETE FROM panel_password WHERE id = 1')
+            return
+        if self.backend == 'json':
+            path = self._panel_password_path()
+            if path.exists():
+                path.unlink()
+
+    def _panel_password_path(self):
+        return self._path.parent / 'panel_password.json'
+
     async def _backend_load_accounts(self) -> dict:
         if self.backend == 'mysql':
             await self._ensure_pool()
@@ -734,5 +851,17 @@ class KeyPolicyStore:
                         accounts TEXT NOT NULL,
                         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                         PRIMARY KEY (model)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                # 单行表（id 恒为 1）。存的是**单向验证器**，不是密码，也不是
+                # 可解开的密文 —— 面板密码只需要验证，所以哈希比封装严格更好：
+                # 即使 LB_CREDENTIAL_KEY 泄露也推不出密码。没有行就是没有
+                # overlay，于是回落到 env 基线。
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS panel_password (
+                        id TINYINT NOT NULL,
+                        verifier VARCHAR(255) NOT NULL,
+                        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        PRIMARY KEY (id)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)

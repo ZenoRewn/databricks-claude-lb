@@ -28,6 +28,69 @@ def endpoint(name, models, *, state='CLOSED', active=2, latency=2400):
                 deployments=list(models), models=list(models), session_token_expires_at=time.time() + 72_000)
 
 
+# ---- synthetic 「密钥与渠道」 fixtures ----------------------------------------
+# Identity-shaped only: masks, fingerprints and account names, exactly what the
+# real endpoints return. No plaintext key, token or password exists here, and
+# every write below is simulated — nothing is stored, forwarded or deleted.
+
+PREVIEW_ACCOUNTS = ['gh-biz-1', 'gh-biz-2', 'gh-ent-1', 'gh-fresh']
+PREVIEW_CAPABILITY = {
+    'gh-biz-1': ['gpt-4o', 'gpt-6-astra', 'kimi-k3'],
+    'gh-biz-2': ['gpt-4o', 'gpt-6-astra', 'kimi-k3'],
+    'gh-ent-1': ['gpt-4o', 'gpt-5.4', 'gpt-5.5'],
+    'gh-fresh': [],
+}
+
+
+def preview_keys():
+    return {
+        'keys': [
+            dict(tenant='default', masked='lb-p…9f2a', fingerprint='3b9ac2f10e45',
+                 providers=['databricks', 'copilot', 'azure_openai'], restricted=False,
+                 requests=418, last_used_at=time.time() - 240),
+            dict(tenant='team-research', masked='lb-r…1c77', fingerprint='c41d7e0ab332',
+                 providers=['copilot'], restricted=True, requests=57,
+                 last_used_at=time.time() - 9_000),
+            dict(tenant='team-batch', masked='', fingerprint='77aa10bd4e9c',
+                 providers=['databricks'], restricted=True, requests=0, last_used_at=None),
+        ],
+        'providers': ['databricks', 'copilot', 'azure_openai'],
+        'provider_labels': {'databricks': 'ADB', 'copilot': 'GHCP', 'azure_openai': 'Foundry'},
+        'policy': preview_policy(), 'counters_are_process_local': True,
+    }
+
+
+def preview_policy():
+    return dict(state='loaded', backend='mysql', tenants=2, accounts=4,
+                model_preferences=2, model_accounts=1, last_loaded_at=time.time() - 600,
+                last_error_type=None, unrestricted_when_unavailable=True)
+
+
+def preview_account(name, *, enabled, source='config', selection=None):
+    capability = PREVIEW_CAPABILITY[name]
+    # Idle-but-enabled is the state worth seeing in the preview: gh-biz-2 is on,
+    # yet a per-model selection keeps it out of every model.
+    serves = 0 if not enabled else len([m for m in capability
+                                        if not selection or name in selection.get(m, [name])])
+    return dict(account=name, enabled=enabled, enabled_in_config=name != 'gh-fresh',
+                enablement_source=source, configured_models=[], api_types=['responses', 'chat'],
+                capability=capability, capability_at=time.time() - 86_400 if capability else None,
+                allowed_models=None, token_source='file', requests=120 if enabled else 0,
+                circuit_open=False, serves_models=serves, receiving_traffic=serves > 0)
+
+
+def preview_reason(name, model_name, selection):
+    """Same closed set the gateway publishes, so the matrix renders for real."""
+    if name == 'gh-fresh':
+        return 'account_never_enabled'
+    chosen = selection.get(model_name)
+    if chosen and name not in chosen:
+        return 'not_selected_for_model'
+    if PREVIEW_CAPABILITY[name] and model_name not in PREVIEW_CAPABILITY[name]:
+        return 'not_in_capability'
+    return None
+
+
 def stats():
     summary = dict(total_requests=4280, total_input_tokens=11_520_000, total_output_tokens=2_220_000,
                    total_tokens=13_740_000, total_cache_creation_tokens=540_000, total_cache_read_tokens=5_880_000,
@@ -56,6 +119,12 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     scenario = {'name': 'normal'}
+    # Panel state lives here so the preview can be walked end to end: lock,
+    # unlock, edit a rule, change the password. All in memory, all synthetic.
+    panel = {'authenticated': False, 'password_source': 'env',
+             'selection': {'gpt-4o': ['gh-biz-1']},
+             'preferences': {'gpt-4o': ['copilot'], 'claude-opus-5.5': ['copilot']},
+             'enabled': {'gh-biz-1': True, 'gh-biz-2': True, 'gh-ent-1': True, 'gh-fresh': False}}
 
     class Handler(BaseHTTPRequestHandler):
         def reply(self, status, value, content_type='application/json'):
@@ -64,8 +133,102 @@ def main():
             self.send_header('Content-Length', str(len(body))); self.send_header('Cache-Control', 'no-store')
             self.end_headers(); self.wfile.write(body)
 
+        # ---- synthetic panel helpers ----
+        def routing_view(self, model_name):
+            order = panel['preferences'].get(model_name) or []
+            default = ['copilot', 'azure_openai']
+            effective = (order + [p for p in default if p not in order]) if order else default
+            selected = panel['selection'].get(model_name) or []
+            live = [name for name in PREVIEW_ACCOUNTS
+                    if panel['enabled'].get(name)
+                    and preview_reason(name, model_name, panel['selection']) is None]
+            return dict(model=model_name, providers=order, effective_openai_order=effective,
+                        copilot_accounts=selected, effective_copilot_accounts=live,
+                        copilot_candidates_empty=not live,
+                        opens_claude_on_openai_entry_points='claude' in model_name and bool(order))
+
+        def panel_guard(self):
+            if panel['authenticated']:
+                return True
+            self.reply(401, {'detail': {'error': {'code': 'unauthorized',
+                                                  'message': 'Unlock the panel first.'}}})
+            return False
+
         def do_GET(self):
             url = urlsplit(self.path); query = parse_qs(url.query)
+            if url.path == '/admin/session':
+                return self.reply(200, dict(
+                    authenticated=panel['authenticated'],
+                    expires_in=1800 if panel['authenticated'] else 0,
+                    password_configured=panel['password_source'] != 'none',
+                    password_source=panel['password_source'], session_ttl_seconds=1800,
+                    auth_methods=['panel_password', 'api_key']))
+            if url.path.startswith('/admin/'):
+                if not self.panel_guard():
+                    return None
+            if url.path == '/admin/api-keys':
+                return self.reply(200, preview_keys())
+            if url.path == '/admin/copilot/accounts':
+                if scenario['name'] == 'no-copilot':
+                    return self.reply(404, {'detail': {'error': {'message': 'not configured'}}})
+                return self.reply(200, dict(
+                    accounts=[preview_account(name, enabled=panel['enabled'][name],
+                                              source='operator' if name == 'gh-biz-1' else 'config',
+                                              selection=panel['selection'])
+                              for name in PREVIEW_ACCOUNTS],
+                    catalogue_models=9, policy=preview_policy(), counters_are_process_local=True))
+            if url.path == '/admin/model-routing':
+                return self.reply(200, dict(
+                    preferences=[self.routing_view(m) for m in
+                                 sorted(set(panel['preferences']) | set(panel['selection']))],
+                    providers=['databricks', 'copilot', 'azure_openai'],
+                    provider_labels={'databricks': 'ADB', 'copilot': 'GHCP',
+                                     'azure_openai': 'Foundry'},
+                    default_openai_order=['copilot', 'azure_openai'],
+                    known_models=['gpt-4o', 'gpt-5.4', 'gpt-5.5', 'gpt-6-astra', 'kimi-k3',
+                                  'claude-opus-5.5'],
+                    copilot_accounts_available=[dict(account=n, enabled=panel['enabled'][n])
+                                                for n in PREVIEW_ACCOUNTS],
+                    policy=preview_policy()))
+            if url.path.startswith('/admin/model-routing/'):
+                name = url.path.rsplit('/', 1)[-1]
+                from urllib.parse import unquote
+                name = unquote(name)
+                rows = []
+                for account in PREVIEW_ACCOUNTS:
+                    enabled = panel['enabled'][account]
+                    reason = (None if enabled else
+                              ('account_never_enabled' if account == 'gh-fresh' else 'account_disabled'))
+                    reason = reason or preview_reason(account, name, panel['selection'])
+                    ignoring = (None if enabled else reason)
+                    if enabled:
+                        ignoring = preview_reason(account, name, {})
+                    rows.append(dict(account=account, enabled=enabled,
+                                     enablement_source='operator' if account == 'gh-biz-1' else 'config',
+                                     selected=account in (panel['selection'].get(name) or []),
+                                     serves_model=reason is None, reason=reason,
+                                     serves_model_ignoring_selection=ignoring is None,
+                                     reason_ignoring_selection=ignoring,
+                                     capability_known=bool(PREVIEW_CAPABILITY[account]),
+                                     requests=120 if enabled else 0, circuit_open=False))
+                return self.reply(200, {**self.routing_view(name), 'accounts': rows,
+                                        'policy': preview_policy(),
+                                        'counters_are_process_local': True})
+            if url.path == '/admin/credentials':
+                if scenario['name'] == 'no-credential-store':
+                    return self.reply(503, {'detail': {'error': {
+                        'code': 'credential_store_unavailable',
+                        'message': 'Credential storage is not configured.'}}})
+                return self.reply(200, dict(
+                    store=dict(key='present', key_fingerprint='9d41ab20cc7e', unopenable=0),
+                    credentials=[dict(provider='copilot', account='gh-biz-1',
+                                      secret_fingerprint='4f1b90ce22ad', key_state='ok',
+                                      validation=dict(ok=True, model_count=38),
+                                      active=True),
+                                 dict(provider='azure_openai', account='foundry-west',
+                                      secret_fingerprint='bb27d5e1908f', key_state='ok',
+                                      validation=dict(ok=False, reason='invalid_deployment'),
+                                      active=False)]))
             if url.path in ('/', '/stats/dashboard'):
                 scenario['name'] = query.get('scenario', ['normal'])[0]
                 html = (root / 'dashboard.html').read_text()
@@ -112,8 +275,101 @@ def main():
                     pricing={'copilot': {'checked_on': '2026-10-01'}}))
             return self.reply(404, {})
 
+        def body(self):
+            length = int(self.headers.get('Content-Length') or 0)
+            if not length:
+                return {}
+            try:
+                return json.loads(self.rfile.read(length) or b'{}')
+            except Exception:
+                return {}
+
+        def do_POST(self):
+            # Simulation only: nothing is stored, forwarded or sent upstream.
+            url = urlsplit(self.path)
+            payload = self.body()
+            if url.path == '/admin/session':
+                supplied = payload.get('password')
+                if supplied is None and self.headers.get('x-api-key'):
+                    panel['authenticated'] = True
+                    return self.reply(200, {'authenticated': True, 'expires_in': 1800})
+                # Any 12+ character password opens the synthetic panel; a shorter
+                # one exercises the same refusal the gateway gives.
+                if isinstance(supplied, str) and len(supplied) >= 12:
+                    panel['authenticated'] = True
+                    return self.reply(200, {'authenticated': True, 'expires_in': 1800})
+                return self.reply(401, {'detail': {'error': {'code': 'invalid_panel_password',
+                                                             'message': 'Incorrect password.'}}})
+            if not self.panel_guard():
+                return None
+            if url.path.endswith('/discover'):
+                return self.reply(200, {'discovered': 38, 'policy': preview_policy(),
+                                        'account': preview_account(
+                                            url.path.split('/')[-2], enabled=True)})
+            if url.path == '/admin/api-keys/reload':
+                return self.reply(200, {'reloaded': True, 'keys': 3,
+                                        'tenants': ['default', 'team-batch', 'team-research'],
+                                        'env_interpolated': True})
+            return self.reply(200, {'ok': True})
+
+        def do_PUT(self):
+            url = urlsplit(self.path)
+            payload = self.body()
+            if not self.panel_guard():
+                return None
+            if url.path == '/admin/panel-password':
+                panel['password_source'] = 'store'
+                return self.reply(200, {'configured': True, 'password_source': 'store',
+                                        'other_sessions_invalidated': True})
+            if url.path.startswith('/admin/model-routing/'):
+                from urllib.parse import unquote
+                name = unquote(url.path.rsplit('/', 1)[-1])
+                if 'providers' in payload:
+                    panel['preferences'][name] = payload['providers']
+                if 'copilot_accounts' in payload:
+                    chosen = payload['copilot_accounts'] or []
+                    if chosen:
+                        panel['selection'][name] = chosen
+                    else:
+                        panel['selection'].pop(name, None)
+                return self.reply(200, {**self.routing_view(name), 'policy': preview_policy()})
+            if url.path.startswith('/admin/copilot/accounts/'):
+                name = url.path.rsplit('/', 1)[-1]
+                if name in panel['enabled'] and 'enabled' in payload:
+                    panel['enabled'][name] = bool(payload['enabled'])
+                return self.reply(200, {'account': preview_account(
+                    name, enabled=panel['enabled'].get(name, True), source='operator',
+                    selection=panel['selection']), 'policy': preview_policy()})
+            if url.path.startswith('/admin/api-keys/'):
+                return self.reply(200, {'tenant': url.path.split('/')[3],
+                                        'providers': payload.get('providers', []),
+                                        'policy': preview_policy()})
+            return self.reply(200, {'ok': True})
+
         def do_DELETE(self):
             # Simulation only: no fixture, disk, database or application data is deleted.
+            url = urlsplit(self.path)
+            if url.path == '/admin/session':
+                panel['authenticated'] = False
+                return self.reply(200, {'authenticated': False})
+            if url.path.startswith('/admin/'):
+                if not self.panel_guard():
+                    return None
+                if url.path == '/admin/panel-password':
+                    panel['password_source'] = 'env'
+                    return self.reply(200, {'configured': True, 'password_source': 'env',
+                                            'other_sessions_invalidated': True})
+                if url.path.startswith('/admin/model-routing/'):
+                    from urllib.parse import unquote
+                    name = unquote(url.path.rsplit('/', 1)[-1])
+                    panel['preferences'].pop(name, None)
+                    panel['selection'].pop(name, None)
+                    return self.reply(200, {**self.routing_view(name), 'policy': preview_policy()})
+                if url.path.startswith('/admin/api-keys/'):
+                    return self.reply(200, {'tenant': url.path.split('/')[3],
+                                            'providers': ['databricks', 'copilot', 'azure_openai'],
+                                            'policy': preview_policy()})
+                return self.reply(200, {'ok': True})
             if self.headers.get('x-api-key') != 'synthetic-preview-key':
                 return self.reply(401, {'detail': 'Synthetic key required'})
             return self.reply(200, {'deleted': 3})
