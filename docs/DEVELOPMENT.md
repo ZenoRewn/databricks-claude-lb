@@ -30,6 +30,9 @@ python -m pip install -r requirements-test.lock
 python -m pytest tests/ -q --tb=short
 node tests/test_copilot_pricing_ui.cjs
 node tests/test_dashboard_ui.cjs
+node tests/test_dashboard_routing_ui.cjs
+node tests/test_dashboard_panels_ui.cjs
+node tests/test_dashboard_session_ui.cjs
 ```
 
 改策略或面板时，这几个文件是对应的回归入口：
@@ -51,6 +54,9 @@ node tests/test_dashboard_ui.cjs
 | 事件自带 `event_time` | `tests/test_operational_evidence.py::EventTimeTests` |
 | 图片判定与 `Copilot-Vision-Request` 门控 | `tests/test_vision_header_detection.py` |
 | Dashboard 行为 | `tests/test_dashboard_ui.cjs`（按 `// ---------- X` 注释切片取 JS，改动要保留这些标记） |
+| Dashboard 路由草稿、诊断竞态、写入与读回状态 | `tests/test_dashboard_routing_ui.cjs` |
+| 客户端密钥与账户详情、账户模型范围、Provider 动态字段 | `tests/test_dashboard_panels_ui.cjs` |
+| Dashboard 会话 epoch、锁定清理与迟到响应隔离 | `tests/test_dashboard_session_ui.cjs` |
 
 MySQL 的 opt-in 测试必须使用一次性隔离实例，不指向生产。发布工具的 Kind/中断/接管场景有独立环境与证据要求，见 [发布测试说明](../tests/release/README.md)。不为通过 CI 削弱协议、账本或退出码断言。
 

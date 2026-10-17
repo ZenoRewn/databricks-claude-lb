@@ -189,6 +189,90 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
 .preview-line { margin-top: 16px; padding: 12px 16px; border-radius: 10px; background: var(--background-secondary); font-size: 11px; line-height: 1.8; color: var(--text-secondary); }
 .preview-line[data-state=warn] { color: var(--warn); background: var(--warn-soft); }
 .preview-line b { color: var(--text-primary); }
+/* Model-scoped routing workbench, sharing the Dashboard theme tokens. */
+#panelBody .subtab-bar { gap:24px; padding:0; border:0; border-radius:0; border-bottom:1px solid var(--separator-border); background:transparent; }
+#panelBody .subtab-btn { padding:11px 0 13px; border-radius:0; border-bottom:2px solid transparent; }
+#panelBody .subtab-btn.active { background:transparent; border-bottom-color:var(--accent); box-shadow:none; }
+#keysPolicyState .info-box[data-state=ok] { padding:9px 14px; margin-bottom:16px; font-size:11px; }
+.routing-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:14px; margin-bottom:18px; }
+.routing-heading h3 { font-size:18px; margin-bottom:5px; letter-spacing:-.02em; }
+.routing-heading .scope-note { margin:0; font-size:12px; }
+.routing-layout { display:grid; grid-template-columns:230px minmax(0,1fr); gap:20px; align-items:start; }
+.routing-catalogue { min-width:0; border:1px solid var(--separator-border); border-radius:12px; background:var(--background-primary); overflow:hidden; }
+.routing-search { padding:14px; border-bottom:1px solid var(--separator-border); }
+.routing-search input { width:100%; }
+.route-model { display:block; width:100%; text-align:left; padding:14px; background:transparent; border:0; border-left:3px solid transparent; border-bottom:1px solid var(--separator-border); color:var(--text-primary); }
+.route-model.selected { background:var(--accent-soft); border-left-color:var(--accent); }
+.route-model:hover { background:var(--background-secondary); }
+.route-model strong { display:block; font-size:12px; font-weight:550; overflow-wrap:anywhere; }
+.route-model span,.route-model small { display:block; font-size:11px; color:var(--text-tertiary); margin-top:5px; overflow-wrap:anywhere; }
+.route-defaults summary,.route-list-note { padding:12px 14px; margin:0; font-size:11px; color:var(--text-tertiary); }
+.route-defaults .route-model { padding-left:18px; }
+.route-detail { min-width:0; margin:0; padding:0; border-radius:12px; overflow:hidden; }
+.route-detail-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:17px 20px; border-bottom:1px solid var(--separator-border); }
+.route-detail-heading h4 { margin:0 0 5px; font-size:15px; overflow-wrap:anywhere; }
+.route-detail-heading .scope-note { margin:0; }
+.route-fields { min-width:0; padding:0 20px; margin:0; border:0; }
+.route-fields .rule-step { padding:18px 0; }
+.route-fields .rule-step h4 { font-size:13px; margin:0 0 10px; }
+.route-fields .routing-heading { margin:0; }
+.route-fields .field select { width:100%; }
+.route-fields select,.ops-form-grid select { color:var(--text-primary); background:var(--background-primary); border:1px solid var(--border-button-default); padding:9px 11px; border-radius:8px; font:inherit; }
+.route-fields .scope-note { margin:10px 0 0; font-size:11px; line-height:1.8; }
+.route-fields .table-wrap { margin:14px 0 0; border-radius:8px; }
+.route-fields table { white-space:normal; }
+.route-fields td,.route-fields th { padding:11px 10px; }
+.route-fields .verdict-why { font-size:11px; }
+.route-option { display:flex; align-items:center; gap:8px; font-size:12px; margin:9px 0; }
+.route-option input { accent-color:var(--accent); }
+.route-link { padding:4px 0; color:var(--accent); border:0; background:transparent; }
+.route-actions { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; padding:16px 20px; background:var(--background-secondary); border-top:1px solid var(--separator-border); }
+.route-actions .scope-note { margin:0; }
+.route-actions .rule-row { gap:8px; }
+.route-review { margin:20px; padding:18px; border:1px solid var(--accent); border-radius:10px; }
+.route-review h4 { margin:0 0 8px; }
+.route-review table { white-space:normal; }
+.route-review td { overflow-wrap:anywhere; }
+.route-review-actions { justify-content:flex-end; margin-top:18px; }
+.route-warning { background:var(--warn-soft); color:var(--warn); padding:11px 13px; border-radius:8px; font-size:12px; line-height:1.8; }
+.route-editor-empty { min-height:300px; display:grid; align-content:center; justify-items:center; gap:12px; padding:25px; text-align:center; }
+.route-help { margin-top:20px; }
+.order-chain { align-items:stretch; }
+.order-chip { flex:1; min-width:120px; border-radius:8px; padding:10px 12px; display:flex; flex-direction:column; align-items:start; }
+.order-chip.lead { border-color:var(--separator-border); color:var(--text-primary); background:var(--background-secondary); }
+.order-chip small { font-size:11px; }
+.order-arrow { align-self:center; }
+@media(max-width:1100px) { .routing-layout { grid-template-columns:185px minmax(0,1fr); gap:14px; } .route-fields { padding:0 14px; } .route-detail-heading,.route-actions { padding:14px; } }
+@media(max-width:850px) { .routing-layout { grid-template-columns:1fr; } #panelBody .subtab-bar { gap:12px 22px; } .route-model { padding:12px 14px; } .route-editor-empty { min-height:180px; } }
+/* Operations panels share list-first overviews and opt-in detail editors. */
+.ops-section-head { display:flex; align-items:start; justify-content:space-between; gap:18px; margin-bottom:20px; }
+.ops-section-head h3 { font-size:18px; letter-spacing:-.02em; margin:0 0 6px; }
+.ops-section-head p { margin:0; color:var(--text-secondary); font-size:12px; line-height:1.7; }
+.ops-identity { display:block; margin-top:5px; color:var(--text-tertiary); font-size:10px; line-height:1.7; }
+.ops-tags { display:flex; flex-wrap:wrap; gap:6px; }
+.ops-caption { padding:12px 16px; border-top:1px solid var(--separator-border); color:var(--text-tertiary); font-size:11px; line-height:1.7; }
+.ops-detail { padding:22px; border:1px solid var(--separator-border); border-radius:16px; background:var(--background-primary); margin:20px 0; }
+.ops-detail:empty { display:none; }
+.ops-detail-head { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:20px; }
+.ops-detail-head h4 { font-size:14px; margin:0 0 5px; overflow-wrap:anywhere; }
+.ops-detail .field { font-size:12px; }
+.ops-detail .ops-choice { display:flex; align-items:center; gap:8px; margin:10px 0; font-size:12px; }
+.ops-detail .ops-models { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:2px 18px; padding:12px 0; }
+.ops-detail .ops-models .ops-choice { min-width:0; overflow-wrap:anywhere; }
+.ops-detail-actions { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:12px; padding-top:18px; margin-top:16px; border-top:1px solid var(--separator-border); }
+.ops-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; }
+.ops-form-grid .field-key { max-width:none; min-width:0; }
+.ops-form-grid input,.ops-form-grid select { width:100%; }
+.ops-password { max-width:580px; }
+.ops-password .cleanup-form { display:grid; gap:18px; align-items:stretch; }
+.ops-password .field-key { max-width:none; }
+.ops-help { border-top:1px solid var(--separator-border); padding-top:16px; margin-top:22px; font-size:12px; line-height:1.8; color:var(--text-secondary); }
+.ops-help summary { cursor:pointer; color:var(--text-primary); font-weight:550; }
+.ops-danger { margin-top:28px; border-color:color-mix(in srgb,var(--err) 30%,var(--separator-border)); }
+.ops-danger summary { color:var(--err); }
+.ops-credential-add[open] > summary { margin-bottom:20px; }
+.ops-device { margin-top:22px; padding-top:18px; border-top:1px solid var(--separator-border); }
+@media (max-width:900px) { .ops-form-grid { grid-template-columns:1fr; } }
 @media (max-width:1100px) { .sidebar { padding-left: 10px; padding-right: 10px; } .app-shell { grid-template-columns: 188px minmax(0,1fr); } main { padding: 24px; } .topbar { padding: 0 24px; } .grid-2 { grid-template-columns: 1fr 1fr; } .page-heading { align-items: start; } }
 @media (max-width:800px) { .app-shell { grid-template-columns: 1fr; } .sidebar { position: static; height: auto; padding: 16px; border-right: 0; border-bottom: 1px solid var(--separator-border); } .brand { padding-bottom: 12px; } .nav-label,.sidebar-bottom,.nav-divider { display:none; } .tab-bar { flex-direction: row; overflow: auto; } .tab-btn { min-width: max-content; width: auto; } .topbar { padding: 0 16px; } main { padding: 24px 16px; } .page-heading { flex-direction: column; align-items: stretch; } .refresh-controls { justify-content: start; } .refresh-meta { text-align: left; } .grid-2 { grid-template-columns: 1fr; } .release-card { width: min(352px,calc(100vw - 32px)); } }
 @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
@@ -254,6 +338,7 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
               <button class="btn btn-primary" id="unlockPanels" type="submit">解锁</button>
             </form>
             <p class="feedback" id="panelLockFeedback" role="status" hidden></p>
+            <button class="btn" id="retryLockPanels" type="button" hidden>重试锁定</button>
             <details id="panelKeyFallback">
               <summary>改用 LB API Key 解锁</summary>
               <p class="scope-note">忘记面板密码时走这条：有效的 LB API Key 始终可以换会话（持有它的人本来就能调用每个 admin 端点），解锁后可在「面板密码」里重设。</p>
@@ -278,16 +363,11 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
           </div>
 
           <section class="subtab-panel active" id="sub-clientkeys" role="tabpanel" aria-labelledby="sub-nav-clientkeys">
-            <h3>客户端密钥 · 身份与渠道限制</h3>
-            <div class="capability-note">
-              <span><b>这一页能做：</b>查看密钥身份（前缀掩码 + sha256 前缀）、按密钥限制可用渠道、把某个租户重置回配置基线、在源头轮换后让网关重读。</span>
-              <span><b>这一页做不到：</b>显示明文，或在网关里重置／轮换密钥。网关<b>不生成也不存储</b>客户端密钥明文 —— 它只持有校验所需的内容，密钥本身是身份与计量句柄。所以轮换只能在源头做，步骤见下面的折叠块。</span>
-            </div>
-            <p class="scope-note">请求数与最后使用时间是<strong>本进程</strong>计数，重启归零，不代表密钥未被使用。渠道限制只做减法，不会让某渠道服务它本来不支持的模型；「重置」把该租户清回配置基线（保存不接受空集，所以这是唯一的反向操作）。</p>
+            <div class="ops-section-head"><div><h3>客户端密钥</h3><p>核对身份并限制可用渠道；密钥在源头轮换。</p></div><button class="btn" id="refreshKeysPanel" type="button">重新读取</button></div>
             <div id="keysContent"></div>
             <p class="feedback" id="clientkeysFeedback" role="status" hidden></p>
-            <details class="maintenance-panel"><summary>怎么轮换一把客户端密钥</summary>
-              <p>网关这一侧没有「重置」按钮，因为它不签发密钥。三步，顺序不能换：</p>
+            <details class="ops-help"><summary>源头轮换与重读</summary>
+              <p>网关<strong>不生成也不存储</strong>客户端密钥明文，不提供明文查看或密钥重置。轮换请按以下顺序操作：</p>
               <p>1. 在源头改：K8s Secret 或 <code>config.yaml</code> 的 <code>auth.api_keys</code>。<br>
                  2. 回到这里点「源头已轮换，重读」—— 网关重读 <code>CONFIG_PATH</code> 的 auth 段，不重启、不影响在途请求。<br>
                  3. 值写成 <code>${ENV}</code> 形式的取自进程环境，<strong>改文件不会改变它们</strong>，那种情况仍需一次滚动重启。</p>
@@ -297,89 +377,84 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
           </section>
 
           <section class="subtab-panel" id="sub-routing" role="tabpanel" aria-labelledby="sub-nav-routing">
-            <h3>路由规则：模型 → Provider → GHCP 账户</h3>
-            <p class="scope-note"><strong>没有列出的模型维持原本的规则。</strong> 下面的编辑器会在保存前把生效结果算给你看。<strong>给 claude-* 指向 GHCP/Foundry 会在 OpenAI 风格入口放行该模型</strong>（逐模型 opt-in，不是整族开闸）；<code>/v1/messages</code> <strong>仍然只走 ADB</strong>。计价按渠道分开：<code>databricks-claude-*</code> 用公开 API 价，裸 <code>claude-*</code> 用 GHCP 分档价。</p>
-            <div class="rule-editor">
-              <div class="rule-step">
-                <h4><span class="step-no" aria-hidden="true">1</span>选择模型</h4>
-                <div class="rule-row">
-                  <label class="field" for="ruleModel">目录里的模型<select id="ruleModel"></select></label>
-                  <label class="field" for="ruleModelCustom">或手输模型名<input id="ruleModelCustom" type="text" maxlength="190" placeholder="目录里还没有的新模型"></label>
-                </div>
-              </div>
-              <div class="rule-step">
-                <h4><span class="step-no" aria-hidden="true">2</span>Provider 顺序 <small>只重排，不筛除 —— 没被提前的那个仍然保留为 fallback</small></h4>
-                <div class="rule-row">
-                  <label class="field" for="ruleProvider">把谁排在前面<select id="ruleProvider"><option value="">不改顺序（用默认）</option><option value="copilot">GHCP</option><option value="azure_openai">Foundry</option></select></label>
-                </div>
-                <div class="order-chain" id="ruleOrderPreview"></div>
-              </div>
-              <div class="rule-step">
-                <h4><span class="step-no" aria-hidden="true">3</span>GHCP 账户 <small>不勾任何一个 = 不限定，全部启用账户都可用</small></h4>
-                <div id="ruleAccounts"></div>
-              </div>
-              <div class="preview-line" id="rulePreview">先选一个模型。</div>
-              <div class="history-toolbar" style="margin:18px 0 0"><button class="btn btn-primary" id="saveRule" type="button">保存规则</button><button class="btn" id="resetRuleForm" type="button">清空表单</button></div>
-            </div>
+            <div class="routing-heading"><div><h3>路由规则</h3><p class="scope-note">先看已保存规则，再调整单个模型。未配置的模型沿用默认行为。</p></div><button class="btn btn-primary" id="addRule" type="button">＋ 添加规则</button></div>
             <p class="feedback" id="routingFeedback" role="status" hidden></p>
-            <div id="routingContent"></div>
+            <div id="routeAddPanel" class="rule-editor" hidden>
+              <h4>添加模型规则</h4><div class="rule-row">
+                <label class="field" for="ruleModel">从模型目录选择<select id="ruleModel"></select></label>
+                <label class="field" for="ruleModelCustom">或输入完整模型名<input id="ruleModelCustom" type="text" maxlength="190" placeholder="目录里还没有的新模型"></label>
+                <button class="btn btn-primary" id="startRule" type="button">继续配置</button><button class="btn" id="cancelAddRule" type="button">取消</button>
+              </div><p class="scope-note">手输名称不证明上游支持；继续后读取该模型的配置候选。</p>
+            </div>
+            <div class="routing-layout" id="routingLayout">
+              <div class="routing-catalogue"><label class="field routing-search" for="routeSearch">已保存规则<input id="routeSearch" type="search" placeholder="搜索模型…" maxlength="190"></label><div id="routingContent"></div></div>
+              <div class="info-box route-editor-empty" id="routeEditorEmpty"><strong>选择一个模型查看规则</strong><span>在左侧查看已保存规则，或添加模型规则。配置诊断会在选中后读取。</span></div>
+              <section class="route-detail rule-editor" id="routeEditor" aria-label="单模型规则编辑" hidden>
+                <div class="route-detail-heading"><div><h4 id="routeEditorModel"></h4><p class="scope-note" id="routeEditorState" role="status"></p></div><div class="rule-row"><button class="btn" id="retryRoutingDiagnostic" type="button">重读诊断</button><button class="btn" id="closeRouteEditor" type="button">关闭编辑</button></div></div>
+                <fieldset id="routeEditorFields" class="route-fields" disabled>
+                  <div class="rule-step"><h4>渠道优先序 <small>仅此模型</small></h4><label class="field" for="ruleProvider">优先序设置<select id="ruleProvider"><option value="">保持当前顺序</option></select></label><div class="order-chain" id="ruleOrderPreview"></div><p class="scope-note">只调整 GHCP / Foundry 顺序，不停用渠道；后续候选不代表失败后一定切换。</p></div>
+                  <div class="rule-step"><div class="routing-heading"><h4>GHCP 账户范围</h4><button class="btn route-link" id="routeManageAccounts" type="button">管理全局账户 ↗</button></div>
+                    <input id="ruleAccountMode" type="hidden" value="all">
+                    <label class="route-option"><input type="radio" name="routeAccountScope" value="all" checked>使用全部符合条件的账户</label>
+                    <label class="route-option"><input type="radio" name="routeAccountScope" value="selected">仅使用指定账户</label>
+                    <div id="ruleAccounts"></div><div class="preview-line" id="rulePreview" role="status">先选择一个模型。</div>
+                    <p class="scope-note">配置候选是时点判断，不代表实时流量或推理成功。全局账户状态在账户页修改。</p>
+                  </div>
+                  <div class="rule-step"><h4>入口与影响范围</h4><p class="scope-note" id="routeEntryImpact"></p><p class="scope-note">客户端密钥仍限制可用渠道；账户选择是集合，不改变会话亲和。<code>/v1/messages</code> 仍只走 ADB。</p></div>
+                </fieldset>
+                <div class="route-actions"><span class="scope-note" id="routeDirtyState"></span><div class="rule-row"><button class="btn" id="restoreRoute" type="button">恢复整条默认</button><button class="btn" id="resetRuleForm" type="button">放弃修改</button><button class="btn btn-primary" id="saveRule" type="button" disabled>检查并保存</button></div></div>
+                <div class="route-review" id="routeReview" role="region" aria-label="路由变更确认" hidden></div>
+              </section>
+            </div>
+            <details class="maintenance-panel route-help"><summary>路由范围、计价与诊断说明</summary><p>优先序只重排，不绕过客户端密钥限制。账户候选来自已读取的配置与能力快照，未按具体密钥、API 入口或会话模拟请求。给具体 <code>claude-*</code> 显式配置 GHCP/Foundry 偏好，才会开放其 Responses / Chat 入口；清除整条规则会撤销此放行。<code>databricks-claude-*</code> 用公开 API 参考价，裸 <code>claude-*</code> 用 GHCP 分档参考价。</p></details>
           </section>
 
           <section class="subtab-panel" id="sub-accounts" role="tabpanel" aria-labelledby="sub-nav-accounts">
-            <h3>GHCP 账户与可用模型</h3>
-            <div class="capability-note">
-              <span><b>这一页管的是账户侧：</b>这个账户<b>能服务哪些模型</b>（启用态 + 允许模型）。改动<b>对所有模型生效</b>。</span>
-              <span><b>模型侧在「路由规则」：</b>某个模型<b>用哪些账户</b>。两侧取交集，任一侧都能把一个账户从一个模型上摘掉 —— 所以某账户不接流量时两处都要看，或者直接用路由规则里的候选矩阵，它会指出是哪一层。</span>
-            </div>
-            <p class="scope-note">账户凭据来自挂载的 device-flow 缓存，网关只读不生成。<strong>capability 是向上游的时点发现，不是能力认证</strong>；勾选只能在 capability 范围内，有效集 = capability ∩ 勾选。停用账户请用启用开关，不要清空勾选。「实际接流量」是独立状态：账户可以开着却一个模型都服务不了。实测当前 4 个 business 账户的模型集合完全相同，差异在 SKU 层，所以逐账户勾选在同 SKU 之间暂无区分意义。</p>
+            <div class="ops-section-head"><div><h3>GHCP 账户</h3><p>启用状态与允许模型影响所有模型规则；单个模型的账户选择在「路由规则」设置。</p></div><button class="btn" id="refreshAccountsPanel" type="button">重新读取</button></div>
             <div id="accountsContent"></div>
             <p class="feedback" id="accountsFeedback" role="status" hidden></p>
+            <details class="ops-help"><summary>为什么启用账户后仍没有候选模型？</summary><p>模型侧的指定账户、账户允许模型和上游能力快照共同筛选，任一层都可能排除账户。到「路由规则」选择模型，可查看首个排除原因。候选覆盖只按已知模型计算，不代表实时流量。</p><p><strong>capability 是向上游的时点发现，不是能力认证。</strong>允许模型只能缩小范围，有效集 = capability ∩ 允许模型。停用账户请使用启用开关，不要清空勾选。凭据来源与发现时间可在账户详情中查看。</p></details>
           </section>
 
           <section class="subtab-panel" id="sub-credentials" role="tabpanel" aria-labelledby="sub-nav-credentials">
-            <h3>上游凭据录入</h3>
-            <p class="scope-note">凭据以 AES-256-GCM <strong>封装后</strong>存入用量库，密钥取自 <code>LB_CREDENTIAL_KEY</code>（留在 K8s Secret、不入库）；未配密钥时录入整体不可用，<strong>不会退化为存明文</strong>。录入时先向上游校验，不通过不入库。<strong>页面只显示指纹与校验结果，不显示也不返回明文。</strong> 封装没有消除风险：运行进程内存里有明文，密钥丢失则凭据不可恢复。<strong>录入后需一次滚动重启才生效</strong> —— 端点在启动时统一构建。</p>
+            <div class="ops-section-head"><div><h3>上游凭据</h3><p>先向上游校验，再封装存储。校验通过与运行加载是两个独立状态。</p></div><div class="ops-tags"><button class="btn" id="refreshCredentialsPanel" type="button">重新读取</button><button class="btn btn-primary" id="addCredential" type="button">新增凭据</button></div></div>
             <div id="credentialsContent"></div>
             <p class="feedback" id="credentialsFeedback" role="status" hidden></p>
-            <details class="maintenance-panel"><summary>录入新凭据</summary>
-              <form class="cleanup-form" id="credentialForm">
+            <details class="ops-detail ops-credential-add" id="credentialEntry"><summary>录入新凭据</summary>
+              <form class="ops-form-grid" id="credentialForm">
                 <label class="field" for="credProvider">Provider<select id="credProvider"><option value="databricks">ADB (databricks)</option><option value="azure_openai">Foundry (azure_openai)</option><option value="copilot">GHCP (copilot)</option></select></label>
                 <label class="field" for="credAccount">账户名<input id="credAccount" type="text" maxlength="190" placeholder="与配置中已有端点不可同名" required></label>
                 <label class="field field-key" for="credSecret">凭据<input id="credSecret" type="password" autocomplete="off" maxlength="4096" placeholder="token / api key" required></label>
-                <label class="field" for="credApiBase">api_base<input id="credApiBase" type="text" maxlength="400" placeholder="ADB/Foundry 必填；GHCP 留空"></label>
-                <label class="field" for="credDeployments">deployments<input id="credDeployments" type="text" maxlength="400" placeholder="Foundry 用，逗号分隔"></label>
-                <button class="btn" id="credentialSubmit" type="submit">校验并录入</button>
+                <label class="field" id="credApiBaseField" for="credApiBase">API Base<input id="credApiBase" type="url" maxlength="400" placeholder="https://…" required></label>
+                <label class="field" id="credDeploymentsField" for="credDeployments" hidden>Deployments<input id="credDeployments" type="text" maxlength="400" placeholder="Foundry 部署名，逗号分隔"></label>
+                <div class="ops-detail-actions" style="grid-column:1/-1"><span class="scope-note">校验通过后入库；需滚动重启才加载到运行端点。</span><button class="btn btn-primary" id="credentialSubmit" type="submit">校验并录入</button></div>
               </form>
-              <p class="scope-note">GHCP 也可以用下面的 device flow，无需手工粘贴 token。</p>
+              <div class="ops-device" id="credentialDeviceFlow" hidden><h4>通过 GitHub 授权录入</h4><p class="scope-note">填写账户名 → 开始授权 → 在 GitHub 完成 → 返回检查一次。无需手工粘贴 token。</p>
               <div class="history-toolbar"><label class="field" for="deviceAccount">GHCP 账户名<input id="deviceAccount" type="text" maxlength="190" placeholder="如 gh-account-5"></label><button class="btn" id="deviceStart" type="button">开始 device flow</button><button class="btn" id="devicePoll" type="button">我已授权，检查一次</button></div>
               <div class="feedback" id="deviceStatus" role="status"></div>
+              </div>
             </details>
+            <details class="ops-help"><summary>凭据保护与生效方式</summary><p>凭据以 AES-256-GCM <strong>封装后</strong>存入用量库，密钥来自 <code>LB_CREDENTIAL_KEY</code>（不入库）；未配密钥时录入不可用，<strong>不会退化为存明文</strong>。<strong>页面只显示指纹与校验结果，不显示也不返回明文。</strong>运行进程内存仍有明文，封装密钥丢失则凭据不可恢复。录入与删除的运行效果都需下一次滚动重启。</p></details>
           </section>
 
           <section class="subtab-panel" id="sub-panel" role="tabpanel" aria-labelledby="sub-nav-panel">
-            <h3>面板密码</h3>
-            <div class="capability-note">
-              <span><b>存的是单向验证器，不是密码。</b>上游凭据必须可重放给上游所以用 AES 封装；面板密码只需要验证，所以存 PBKDF2-SHA256 哈希 —— 即使 <code>LB_CREDENTIAL_KEY</code> 泄露也推不出密码，这条路径也不依赖那把密钥。</span>
-              <span><b>忘记即不可恢复。</b>回头路是用一把有效的 LB API Key 解锁后在这里重设。</span>
-            </div>
-            <p class="scope-note" id="panelPasswordSource"></p>
-            <div class="rule-editor">
+            <div class="ops-section-head"><div><h3>面板密码</h3><p>更改登录密码。忘记后可用有效的 LB API Key 解锁并重设。</p></div><button class="btn" id="refreshPasswordPanel" type="button">重新读取来源</button></div>
+            <div class="info-box ops-password" id="panelPasswordSource"></div>
+            <div class="ops-detail ops-password">
               <form class="cleanup-form" id="panelPasswordForm" style="margin-top:0">
-                <label class="field field-key" for="pwCurrent">当前密码<input id="pwCurrent" type="password" autocomplete="current-password" maxlength="1024" placeholder="会话不够 —— 它可能是用 API Key 换来的"></label>
+                <label class="field field-key" for="pwCurrent">当前密码<input id="pwCurrent" type="password" autocomplete="current-password" maxlength="1024" placeholder="输入当前面板密码"></label>
                 <label class="field field-key" for="pwNew">新密码<input id="pwNew" type="password" autocomplete="new-password" maxlength="1024" placeholder="至少 12 个字符"></label>
                 <label class="field field-key" for="pwRepeat">再输一次<input id="pwRepeat" type="password" autocomplete="new-password" maxlength="1024"></label>
                 <button class="btn btn-primary" id="panelPasswordSubmit" type="submit">更改密码</button>
               </form>
-              <p class="scope-note" style="margin-top:14px">下限是 12 个<strong>字符</strong>而不是字节 —— <code>kubectl describe secret</code> 报的是字节数，多字节密码会在那边看着够长却被判为不合格。错误的当前密码走登录那同一套退避，退避期内正确密码也会被拒。更改成功后<strong>其他会话立即失效</strong>，你自己这条保留。</p>
+              <p class="scope-note" style="margin-top:14px">至少 12 个字符。更改成功后<strong>其他会话立即失效</strong>，当前会话保留。</p>
             </div>
             <p class="feedback" id="panelFeedback" role="status" hidden></p>
-            <details class="maintenance-panel"><summary>清除存储的密码，回落环境变量</summary>
-              <p>与「重置渠道限制」同形：存储是 overlay，只能显式删除，删掉就回落 <code>LB_DASHBOARD_PASSWORD</code>。<strong>环境变量也没配时，面板登录随之整体不可用</strong> —— 那是正确结果，不是故障。</p>
+            <details class="ops-help ops-password"><summary>密码保护、登录退避与多副本边界</summary><p>存的是 PBKDF2-SHA256 单向验证器，不是密码，不依赖上游凭据的 AES 封装密钥。忘记即不可恢复，可用有效的 LB API Key 解锁后重设。长度按字符计算；错误当前密码会触发登录退避，退避期间正确密码也会被拒绝。</p><p>页内修改只对当前副本立即生效；其他副本在重新加载前可能仍接受旧密码。请同步 Secret 并安排滚动重启。</p></details>
+            <details class="ops-detail ops-danger ops-password"><summary>危险操作：清除存储的密码</summary>
+              <p class="scope-note">删除存储覆盖值后回到 <code>LB_DASHBOARD_PASSWORD</code>。<strong>环境变量也没配时，密码登录整体不可用</strong>，只能用 LB API Key 解锁。</p>
               <div class="history-toolbar"><label class="field field-key" for="pwClearCurrent">当前密码<input id="pwClearCurrent" type="password" autocomplete="off" maxlength="1024"></label><button class="btn btn-danger" id="clearPanelPassword" type="button">清除存储的密码</button></div>
             </details>
-            <div class="capability-note" style="border-left-color:var(--warn)">
-              <span><b>多副本边界：</b>策略存储<b>只在启动时加载</b>，所以页内改密码只对<b>当前副本</b>立即生效；其余副本在重启前仍然接受环境变量里的旧密码。改完请同步 Secret 再滚动重启。当前为单副本部署。</span>
-            </div>
           </section>
         </div>
       </section>
@@ -473,10 +548,11 @@ const TAB_INFO = {
   azure: ['Azure OpenAI','Azure 渠道的请求分布与端点表现。此页为当前进程累计，不等同于资源配额或历史账单。'],
   copilot: ['GitHub Copilot','Copilot 渠道的请求、账户端点与费用估算。此页为当前进程累计，未知价格不会按零费用处理。'],
   history: ['历史用量','查看已持久化的每日请求和模型用量，跨进程保留；未落盘的内存事件不在历史记录中。'],
-  keys: ['密钥与渠道','运维面：客户端密钥身份与渠道限制、模型→Provider→GHCP 账户的路由规则、GHCP 账户启用与能力、上游凭据录入、面板密码。解锁后分五个子页，每页只做一件事。']
+  keys: ['密钥与渠道','管理访问边界、模型路由与上游账户。解锁后按任务查看五个子页。']
 };
 function switchTab(tab) {
   if (!TAB_INFO[tab]) return;
+  if (tab !== activeTab && activeTab === 'keys' && !guardRouteNavigation()) return;
   activeTab = tab;
   document.getElementById('refreshControls').hidden = tab === 'history' || tab === 'keys';
   document.querySelectorAll('.tab-btn').forEach(button => {
@@ -1005,6 +1081,9 @@ async function cleanupHistory() {
 // invalidated by the lock button, gone after a restart. A page reload keeps it,
 // which is the point — reloading used to mean retyping.
 let keysInFlight = false;
+let panelEpoch = 0;
+let panelLockInFlight = false;
+function panelRequestCurrent(epoch) { return epoch === panelEpoch && panelSession.authenticated; }
 let keyProviders = [];
 let keyProviderLabels = {};
 let routingAccounts = [];
@@ -1048,6 +1127,7 @@ let activeSubtab = 'clientkeys';
 
 function switchSubtab(name) {
   if (!SUBTABS.includes(name)) return;
+  if (name !== activeSubtab && activeSubtab === 'routing' && !guardRouteNavigation()) return;
   activeSubtab = name;
   document.querySelectorAll('.subtab-btn').forEach(button => {
     const selected = button.dataset.subtab === name;
@@ -1073,7 +1153,7 @@ function wireSubtabs() {
       if (target == null) return;
       event.preventDefault();
       switchSubtab(buttons[target].dataset.subtab);
-      buttons[target].focus();
+      buttons.find(item => item.dataset.subtab === activeSubtab)?.focus();
     });
   });
 }
@@ -1091,10 +1171,13 @@ function renderSessionBar() {
   const body = document.getElementById('panelBody');
   lock.hidden = panelSession.authenticated;
   body.hidden = !panelSession.authenticated;
+  document.getElementById('unlockPanels').disabled = panelLockInFlight;
+  document.getElementById('unlockWithKey').disabled = panelLockInFlight;
+  document.getElementById('retryLockPanels').disabled = panelLockInFlight;
   if (panelSession.authenticated) {
     const left = Math.max(0, Math.round((panelSession.expiresAt - Date.now()) / 60000));
     bar.dataset.state = 'success';
-    bar.textContent = '已解锁 · 约 ' + left + ' 分钟后因闲置失效（任何操作都会续期）';
+    bar.textContent = '已解锁 · 闲置有效期约剩余 ' + left + ' 分钟（以服务端会话为准）';
     renderPasswordSource();
     return;
   }
@@ -1135,8 +1218,11 @@ function renderPasswordSource() {
 // request, which is why GET /admin/session takes no credential: requiring one
 // to ask "must I log in?" would be circular.
 async function refreshPanelSession() {
+  const epoch = panelEpoch;
   try {
     const body = await fetchJSON('/admin/session');
+    if (epoch !== panelEpoch) return false;
+    if (!body.authenticated) clearPanelContents();
     panelSession = {
       authenticated: !!body.authenticated,
       expiresAt: Date.now() + (body.expires_in || 0) * 1000,
@@ -1144,6 +1230,8 @@ async function refreshPanelSession() {
       passwordSource: body.password_source || 'none',
     };
   } catch (error) {
+    if (epoch !== panelEpoch) return false;
+    clearPanelContents();
     panelSession = {authenticated: false, expiresAt: 0, passwordConfigured: false,
                     passwordSource: 'none'};
   }
@@ -1163,8 +1251,9 @@ function panelReady(section) {
 }
 
 function clearPanelContents() {
-  routingAccounts = [];
-  routingDiagnostic = null;
+  panelEpoch++;
+  resetRoutingState();
+  clearPanelEditors();
   for (const panel of PANELS) {
     document.getElementById(panel.container).innerHTML = '';
   }
@@ -1173,29 +1262,64 @@ function clearPanelContents() {
   document.getElementById('ruleModel').innerHTML = '';
   document.getElementById('ruleOrderPreview').innerHTML = '';
   document.getElementById('rulePreview').textContent = '先选一个模型。';
+  for (const id of ['panelPassword', 'keysAdminKey', 'pwCurrent', 'pwNew', 'pwRepeat',
+    'pwClearCurrent', 'credSecret', 'credAccount', 'credApiBase', 'credDeployments',
+    'deviceAccount', 'ruleModelCustom', 'ruleModel', 'ruleProvider', 'routeSearch']) {
+    document.getElementById(id).value = '';
+  }
+  document.getElementById('ruleAccountMode').value = 'all';
+  document.getElementById('panelPasswordSource').textContent = '';
+  document.getElementById('deviceStatus').textContent = '';
   for (const section of SUBTABS) {
     const node = feedback(section);
     if (node) { node.hidden = true; node.textContent = ''; }
   }
 }
 
-async function lockPanels(message) {
+function expirePanelSession() {
   clearPanelContents();
   panelSession = {...panelSession, authenticated: false, expiresAt: 0};
+  renderSessionBar();
+  const node = document.getElementById('panelLockFeedback');
+  node.hidden = false; node.dataset.state = 'warn'; node.textContent = '会话无效或已过期，请重新解锁。';
+}
+
+async function lockPanels(message) {
+  if (panelLockInFlight) return;
+  panelLockInFlight = true;
+  clearPanelContents();
+  panelSession = {...panelSession, authenticated: false, expiresAt: 0};
+  renderSessionBar();
+  const epoch = panelEpoch;
+  let acknowledged = false;
+  document.getElementById('retryLockPanels').hidden = true;
   try {
     // Server-side invalidation is the part that matters: clearing only the
     // browser copy would leave a usable session behind.
     await fetchJSON('/admin/session', {method: 'DELETE'});
+    acknowledged = true;
   } catch (error) { /* locked locally either way */ }
-  await refreshPanelSession();
+  finally {
+    panelLockInFlight = false;
+    if (epoch === panelEpoch) renderSessionBar();
+  }
+  if (epoch !== panelEpoch) return;
   const node = document.getElementById('panelLockFeedback');
   node.hidden = false;
-  node.dataset.state = message ? 'warn' : 'success';
-  node.textContent = message || '已锁定，会话已在服务端失效。';
+  node.dataset.state = message || !acknowledged ? 'warn' : 'success';
+  node.textContent = (message ? message + ' ' : '') + (acknowledged
+    ? '已锁定，会话已在服务端失效。' : '本页已锁定；服务端失效未能确认，请重试锁定。');
+  document.getElementById('retryLockPanels').hidden = acknowledged;
 }
 
 async function loadAllPanels() {
+  if (!panelSession.authenticated) return [];
+  const epoch = panelEpoch;
   const results = await Promise.allSettled(PANELS.map(panel => fetchJSON(panel.url)));
+  if (!panelRequestCurrent(epoch)) return [];
+  if (results.some(result => result.status === 'rejected' && result.reason?.status === 401)) {
+    expirePanelSession(); return [];
+  }
   const failed = [];
   results.forEach((result, index) => {
     const panel = PANELS[index];
@@ -1224,6 +1348,11 @@ async function loadAllPanels() {
 }
 
 async function unlockPanels(useKey) {
+  if (panelLockInFlight) {
+    document.getElementById('panelPassword').value = '';
+    document.getElementById('keysAdminKey').value = '';
+    return;
+  }
   if (keysInFlight) return;
   const node = document.getElementById('panelLockFeedback');
   const pwField = document.getElementById('panelPassword');
@@ -1237,6 +1366,8 @@ async function unlockPanels(useKey) {
     (panelSession.passwordConfigured && !useKey ? pwField : keyField).focus?.();
     return;
   }
+  clearPanelContents();
+  const epoch = panelEpoch;
   keysInFlight = true;
   node.hidden = false; node.dataset.state = 'pending'; node.textContent = '正在解锁…';
   try {
@@ -1248,17 +1379,21 @@ async function unlockPanels(useKey) {
                              password ? {} : {'x-api-key': key}),
       body: JSON.stringify(password ? {password} : {}),
     });
+    if (epoch !== panelEpoch) return;
     await refreshPanelSession();
+    if (!panelRequestCurrent(epoch)) return;
     node.hidden = true;
     await loadAllPanels();
   } catch (error) {
+    if (epoch !== panelEpoch) return;
     node.dataset.state = 'error';
     node.textContent = error.status === 401 ? (password ? '密码不正确。' : 'API Key 无效。')
       : error.status === 429 ? '尝试过于频繁，已临时锁定，请稍后再试。'
       : error.status === 503 ? '未配置面板密码，请改用 LB API Key 解锁。'
       : error.status === 400 ? '请输入面板密码，或一个有效的 LB API Key。'
       : '未能解锁：' + error.message;
-    await refreshPanelSession();
+    panelSession = {...panelSession, authenticated: false, expiresAt: 0};
+    renderSessionBar();
   } finally {
     // Neither field keeps its value past this one request.
     pwField.value = ''; keyField.value = ''; keysInFlight = false;
@@ -1270,11 +1405,16 @@ async function unlockPanels(useKey) {
 async function reloadPanel(url) {
   const panel = PANELS.find(item => item.url === url);
   if (!panel || !panelSession.authenticated) return;
+  const epoch = panelEpoch;
   try {
-    panel.render(await fetchJSON(panel.url));
+    const payload = await fetchJSON(panel.url);
+    if (!panelRequestCurrent(epoch)) return;
+    panel.render(payload);
   } catch (error) {
+    if (!panelRequestCurrent(epoch)) return;
+    if (error.status === 401) { expirePanelSession(); return; }
     document.getElementById(panel.container).innerHTML =
-      '<div class="info-box" data-state="warn">写入已生效，但重新读取失败：'
+      '<div class="info-box" data-state="warn">重新读取失败，当前状态未确认：'
       + escapeHtml(error.message) + '</div>';
   }
 }
@@ -1301,58 +1441,97 @@ function renderPolicyState(policy) {
     + ' · ' + counts + '</span></div>';
 }
 
+let panelKeysSnapshot = [];
+let panelAccountsSnapshot = [];
+let selectedKeyTenant = null;
+let selectedAccountName = null;
+
+function clearPanelEditors() {
+  panelKeysSnapshot = [];
+  panelAccountsSnapshot = [];
+  keyProviders = [];
+  keyProviderLabels = {};
+  selectedKeyTenant = null;
+  selectedAccountName = null;
+  for (const id of ['keyDetail', 'accountDetail']) {
+    const node = document.getElementById(id);
+    if (node) node.innerHTML = '';
+  }
+  const entry = document.getElementById('credentialEntry');
+  if (entry) entry.open = false;
+  deviceHandle = null;
+}
+
 function renderKeys(payload) {
   keyProviders = Array.isArray(payload.providers) ? payload.providers : [];
   keyProviderLabels = payload.provider_labels || {};
+  panelKeysSnapshot = payload.keys || [];
   renderPolicyState(payload.policy);
-  const rows = (payload.keys || []).map(item => {
-    const boxes = keyProviders.map(pid => {
-      const on = (item.providers || []).includes(pid);
-      const label = keyProviderLabels[pid] || pid;
-      return '<label class="field"><input type="checkbox" data-tenant="' + escapeHtml(item.tenant)
-        + '" data-provider="' + escapeHtml(pid) + '"' + (on ? ' checked' : '') + '> '
-        + escapeHtml(label) + '</label>';
-    }).join(' ');
+  const rows = panelKeysSnapshot.map(item => {
+    const channels = (item.providers || []).map(pid => '<span class="badge">'
+      + escapeHtml(keyProviderLabels[pid] || pid) + '</span>').join(' ');
     const used = item.last_used_at ? new Date(item.last_used_at * 1000).toLocaleString() : '本进程内未使用';
-    return '<tr><td>' + escapeHtml(item.tenant) + '</td>'
-      + '<td><code>' + escapeHtml(item.masked || '（过短，不展示掩码）') + '</code></td>'
-      + '<td><code>' + escapeHtml(item.fingerprint) + '</code></td>'
-      + '<td>' + boxes + '</td>'
+    return '<tr><td><strong>' + escapeHtml(item.tenant) + '</strong><span class="ops-identity"><code>'
+      + escapeHtml(item.masked || '（过短，不展示掩码）') + '</code> · sha256 前缀 '
+      + '<code>' + escapeHtml(item.fingerprint) + '</code></span></td>'
+      + '<td><div class="ops-tags">' + channels + '</div><span class="ops-identity">'
+      + (item.restricted ? '已设置渠道限制' : '跟随配置基线') + '</span></td>'
       + '<td>' + escapeHtml(String(item.requests ?? 0)) + '</td>'
       + '<td>' + escapeHtml(used) + '</td>'
-      + '<td><button class="btn" type="button" data-save="' + escapeHtml(item.tenant) + '">保存</button>'
-      // Reset is the only way back to the config baseline: saving refuses an
-      // empty allow-list, so a tenant restricted by mistake had no undo.
-      + (item.restricted
-        ? ' <button class="btn" type="button" data-reset="' + escapeHtml(item.tenant) + '">重置</button>'
-        : ' <span class="scope-note">未限制</span>')
-      + '</td></tr>';
+      + '<td><button class="btn" type="button" data-edit-key="' + escapeHtml(item.tenant) + '">编辑渠道</button></td></tr>';
   }).join('');
   document.getElementById('keysContent').innerHTML = rows
-    ? '<div class="table-wrap"><div class="table-scroll"><table id="keysTable"><thead><tr><th>租户</th>'
-      + '<th title="密钥的首尾各四个字符。中间永远不显示，露出大半个秘密和交出它没有区别">前缀掩码</th>'
-      + '<th title="sha256 前缀，用来在日志和账本里对账。它不是密钥，也推不出密钥">sha256 前缀</th>'
-      + '<th>允许渠道<span class="scope-tag local">只做减法</span></th>'
-      + '<th>本进程请求</th><th>最后使用</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>'
+    ? '<div class="table-wrap"><div class="table-scroll"><table id="keysTable"><thead><tr><th>租户 / 密钥身份</th>'
+      + '<th>允许渠道</th><th>本进程请求</th><th>最后使用</th><th></th></tr></thead><tbody>' + rows
+      + '</tbody></table></div><div class="ops-caption">不显示或返回密钥明文。请求数与最后使用是本进程计数，重启归零，不代表从未使用。</div></div><div class="ops-detail" id="keyDetail"></div>'
     : '<div class="info-box">没有已注册的 API Key。</div>';
-  document.querySelectorAll('#keysTable [data-save]').forEach(button => {
+  document.querySelectorAll('#keysTable [data-edit-key]').forEach(button => {
+    button.addEventListener('click', () => openKeyDetail(button.dataset.editKey));
+  });
+  if (selectedKeyTenant && panelKeysSnapshot.some(item => item.tenant === selectedKeyTenant)) openKeyDetail(selectedKeyTenant);
+  else selectedKeyTenant = null;
+}
+
+function openKeyDetail(tenant) {
+  const item = panelKeysSnapshot.find(key => key.tenant === tenant);
+  if (!item) return;
+  selectedKeyTenant = tenant;
+  const boxes = keyProviders.map(pid => '<label class="ops-choice"><input type="checkbox" data-tenant="'
+    + escapeHtml(tenant) + '" data-provider="' + escapeHtml(pid) + '"'
+    + ((item.providers || []).includes(pid) ? ' checked' : '') + '> '
+    + escapeHtml(keyProviderLabels[pid] || pid) + '</label>').join('');
+  document.getElementById('keyDetail').innerHTML = '<div class="ops-detail-head"><div><h4>' + escapeHtml(tenant)
+    + ' · 允许渠道</h4><span class="scope-note" id="keyDraftStatus">当前已保存设置</span></div><button class="btn" type="button" id="closeKeyDetail">关闭</button></div>'
+    + '<p class="scope-note">渠道限制只做减法，不会让渠道服务它本来不支持的模型。至少保留一个渠道。</p><div class="ops-tags">'
+    + boxes + '</div><div class="ops-detail-actions"><span class="scope-note">仅影响这个租户；保存后立即生效。</span><div class="ops-tags">'
+    + (item.restricted ? '<button class="btn" type="button" data-reset="' + escapeHtml(tenant) + '">恢复配置渠道</button>' : '')
+    + '<button class="btn btn-primary" type="button" data-save="' + escapeHtml(tenant) + '">保存渠道限制</button></div></div>';
+  document.getElementById('closeKeyDetail').addEventListener('click', () => {
+    selectedKeyTenant = null; document.getElementById('keyDetail').innerHTML = '';
+  });
+  document.querySelectorAll('#keyDetail [data-tenant]').forEach(box => {
+    box.addEventListener('change', () => { document.getElementById('keyDraftStatus').textContent = '有未保存修改'; });
+  });
+  document.querySelectorAll('#keyDetail [data-save]').forEach(button => {
     button.addEventListener('click', () => saveTenantProviders(button.dataset.save));
   });
-  document.querySelectorAll('#keysTable [data-reset]').forEach(button => {
+  document.querySelectorAll('#keyDetail [data-reset]').forEach(button => {
     button.addEventListener('click', () => resetTenantProviders(button.dataset.reset));
   });
 }
 
 async function saveTenantProviders(tenant) {
   if (keysInFlight) return;
-  const providers = Array.from(document.querySelectorAll('#keysTable [data-tenant="' + tenant + '"]'))
+  const providers = Array.from(document.querySelectorAll('#keyDetail [data-tenant]'))
+    .filter(box => box.dataset.tenant === tenant)
     .filter(box => box.checked).map(box => box.dataset.provider);
   if (!providers.length) {
     say('clientkeys', 'error',
-        '至少要允许一个渠道，否则该租户将无法发起任何请求。要取消限制请点「重置」。');
+        '至少要允许一个渠道，否则该租户将无法发起任何请求。要取消限制请点「恢复配置渠道」。');
     return;
   }
   if (!panelReady('clientkeys')) return;
+  const epoch = panelEpoch;
   if (!confirm('将限制租户 ' + tenant + ' 只能使用：' + providers.join('、') + '。立即生效。确认继续？')) return;
   keysInFlight = true;
   say('clientkeys', 'pending', '正在保存渠道限制…');
@@ -1360,51 +1539,62 @@ async function saveTenantProviders(tenant) {
     const result = await fetchJSON('/admin/api-keys/' + encodeURIComponent(tenant) + '/providers',
       {method: 'PUT', headers: {'content-type': 'application/json'},
        body: JSON.stringify({providers})});
+    if (!panelRequestCurrent(epoch)) return;
     say('clientkeys', 'success',
         '租户 ' + tenant + ' 现在允许：' + (result.providers || []).join('、') + '。');
     renderPolicyState(result.policy);
     await reloadPanel('/admin/api-keys');
   } catch (error) {
+    if (!panelRequestCurrent(epoch)) return;
+    if (error.status === 401) { expirePanelSession(); return; }
     say('clientkeys', 'error', error.status === 401 ? '会话无效，请重新解锁。'
-      : '未能保存，执行中的策略保持不变：' + error.message);
+      : '未能确认保存结果，请重新读取渠道设置：' + error.message);
   } finally { keysInFlight = false; }
 }
 
 async function resetTenantProviders(tenant) {
   if (keysInFlight) return;
   if (!panelReady('clientkeys')) return;
+  const epoch = panelEpoch;
   if (!confirm('清除租户 ' + tenant + ' 的渠道限制，回到配置基线（config 里声明的全部渠道）。立即生效。确认继续？')) return;
   keysInFlight = true;
   say('clientkeys', 'pending', '正在重置渠道限制…');
   try {
     const result = await fetchJSON('/admin/api-keys/' + encodeURIComponent(tenant) + '/providers',
       {method: 'DELETE'});
+    if (!panelRequestCurrent(epoch)) return;
     say('clientkeys', 'success',
         '租户 ' + tenant + ' 已回到配置基线：' + (result.providers || []).join('、') + '。');
     renderPolicyState(result.policy);
     await reloadPanel('/admin/api-keys');
   } catch (error) {
+    if (!panelRequestCurrent(epoch)) return;
+    if (error.status === 401) { expirePanelSession(); return; }
     say('clientkeys', 'error', error.status === 401 ? '会话无效，请重新解锁。'
-      : '未能重置，原有限制仍然生效：' + error.message);
+      : '未能确认恢复结果，请重新读取渠道设置：' + error.message);
   } finally { keysInFlight = false; }
 }
 
 async function reloadKeysFromSource() {
   if (keysInFlight) return;
   if (!panelReady('clientkeys')) return;
+  const epoch = panelEpoch;
   if (!confirm('将从配置源重读客户端密钥。请先在源头（K8s Secret / env / 文件）完成轮换 —— 网关不会生成密钥。重读后旧密钥可能立即失效，包括你正在用来解锁本页的这一把。确认继续？')) return;
   keysInFlight = true;
   say('clientkeys', 'pending', '正在从源重读…');
   try {
     const result = await fetchJSON('/admin/api-keys/reload', {method: 'POST'});
+    if (!panelRequestCurrent(epoch)) return;
     let text = '已重读 ' + result.keys + ' 个密钥，租户：' + (result.tenants || []).join('、') + '。';
     if (result.env_interpolated) text += ' 注意：有 ${ENV} 形式的值取自进程环境，文件更新不改变它们，仍需滚动重启。';
     // The key behind this session may well have just been rotated out, so the
     // honest move is to lock rather than keep using something that may be dead.
     await lockPanels(text + ' 已自动锁定 —— 这次轮换可能作废了会话背后的那把 key，请重新解锁。');
   } catch (error) {
+    if (!panelRequestCurrent(epoch)) return;
+    if (error.status === 401) { expirePanelSession(); return; }
     say('clientkeys', 'error', error.status === 401 ? '会话无效，请重新解锁。'
-      : '重读未生效，原有密钥仍然有效：' + error.message);
+      : '未能确认重读结果，请重新核对源头与密钥身份：' + error.message);
   } finally { keysInFlight = false; }
 }
 
@@ -1414,66 +1604,84 @@ async function reloadKeysFromSource() {
 // The routing panel above holds the model-side view, and the two intersect.
 function renderAccounts(payload) {
   renderPolicyState(payload.policy);
-  const rows = (payload.accounts || []).map(a => {
+  panelAccountsSnapshot = payload.accounts || [];
+  const rows = panelAccountsSnapshot.map(a => {
     const capability = a.capability || [];
-    const allowed = a.allowed_models;
-    const boxes = capability.length
-      ? capability.map(m => {
-          const on = !allowed || allowed.includes(m);
-          return '<label class="field"><input type="checkbox" data-account="' + escapeHtml(a.account)
-            + '" data-model="' + escapeHtml(m) + '"' + (on ? ' checked' : '') + '> ' + escapeHtml(m) + '</label>';
-        }).join(' ')
-      : '<span class="scope-note">尚未发现能力，先点「刷新能力」</span>';
     const at = a.capability_at ? new Date(a.capability_at * 1000).toLocaleString() : '未发现';
-    // 三态：已启用 / 已停用（运维明确关过）/ 未启用（配置声明 inert，还没人决定过）。
-    // 后两者都不接流量，但区分它们才能看出「是我关的」还是「从没开过」。
     const label = a.enabled ? '已启用'
       : (a.enablement_source === 'config' && a.enabled_in_config === false
         ? '未启用 · 配置声明不投入服务' : '已停用');
-    // 与服务端 capability_unknown 同一个条件：配置声明 inert、没有 configured
-    // models、也没发现过能力 —— 这三者同时成立时启用就等于通配。配置里写了
-    // models 的账户不受影响，它已经有边界了。
-    const needsDiscovery = a.enabled_in_config === false
-      && !(a.configured_models || []).length && !capability.length;
-    // 「已启用」与「真的在接流量」分两列。开着却服务不了任何模型是**独立状态**，
-    // 成因在另一层（路由页的 per-model 账户选择），所以不能靠启用列去推断。
-    const traffic = !a.enabled
-      ? '<span class="badge open">不接流量</span><span class="verdict-why">账户未启用</span>'
-      : a.receiving_traffic
-        ? '<span class="badge ok">接流量</span><span class="verdict-why">'
-          + escapeHtml(String(a.serves_models ?? 0)) + ' 个模型的候选</span>'
-        : '<span class="badge trial">已启用但闲置</span>'
-          + '<span class="verdict-why">没有任何已知模型会落到它 —— 多半是被「路由规则」里的账户选择摘掉了</span>';
-    return '<tr><td>' + escapeHtml(a.account) + '</td>'
-      + '<td><label class="field"><input type="checkbox" data-enable="' + escapeHtml(a.account) + '"'
-      + (needsDiscovery ? ' data-needs-capability="1"' : '')
-      + (a.enabled ? ' checked' : '') + '> ' + escapeHtml(label) + '</label>'
-      + (needsDiscovery ? '<br><span class="scope-note">启用前先「刷新能力」，否则它会成为所有模型的候选</span>' : '')
-      + '</td>'
-      + '<td>' + traffic + '</td>'
-      + '<td>' + escapeHtml(String(a.token_source || '未知')) + '</td>'
-      + '<td>' + escapeHtml(String(capability.length)) + ' 个<br><span class="scope-note">'
-      + escapeHtml(at) + '</span></td>'
-      + '<td>' + escapeHtml(String(a.requests ?? 0)) + '</td>'
-      + '<td>' + boxes + '</td>'
-      + '<td><button class="btn" type="button" data-save-account="' + escapeHtml(a.account) + '">保存</button>'
-      + ' <button class="btn" type="button" data-discover="' + escapeHtml(a.account) + '">刷新能力</button></td></tr>';
+    const count = a.serves_models;
+    const coverage = count == null ? '未知' : String(count) + ' 个已知模型';
+    const noCandidates = a.enabled && count === 0;
+    return '<tr><td><strong class="mono">' + escapeHtml(a.account) + '</strong><span class="ops-identity">本进程 '
+      + escapeHtml(String(a.requests ?? 0)) + ' 请求</span></td>'
+      + '<td><span class="badge ' + (a.enabled ? 'ok' : 'open') + '">' + escapeHtml(label) + '</span></td>'
+      + '<td><span class="badge ' + (noCandidates ? 'trial' : '') + '">' + escapeHtml(coverage) + '</span>'
+      + (noCandidates ? '<span class="ops-identity">已启用但无候选，检查模型侧选择与账户限制</span>' : '') + '</td>'
+      + '<td>' + escapeHtml(String(capability.length)) + ' 个模型<span class="ops-identity">' + escapeHtml(at) + '</span></td>'
+      + '<td><button class="btn" type="button" data-edit-account="' + escapeHtml(a.account) + '">账户详情</button></td></tr>';
   }).join('');
   document.getElementById('accountsContent').innerHTML = rows
     ? '<div class="table-wrap"><div class="table-scroll"><table id="accountsTable"><thead><tr><th>账户</th>'
-      + '<th>启用<span class="scope-tag global">对所有模型</span></th>'
-      + '<th title="账户开着不等于在服务：另一层可能把它从每个模型上摘掉了">实际接流量</th>'
-      + '<th>凭据来源</th><th>已发现能力</th><th>本进程请求</th>'
-      + '<th>允许模型<span class="scope-tag global">对所有模型</span></th><th></th></tr></thead><tbody>'
-      + rows + '</tbody></table></div></div>'
-      + '<p class="scope-note">「实际接流量」按'
-      + escapeHtml(String(payload.catalogue_models ?? 0))
-      + ' 个已知模型（时点目录 ∪ 已发现能力）数出来的，不是「世上所有模型」。</p>'
+      + '<th>全局启用</th><th>配置候选覆盖</th><th>能力快照</th><th></th></tr></thead><tbody>'
+      + rows + '</tbody></table></div><div class="ops-caption">候选覆盖按 ' + escapeHtml(String(payload.catalogue_models ?? 0))
+      + ' 个已知模型计算，不代表实时流量；能力快照不等于能力认证。</div></div><div class="ops-detail" id="accountDetail"></div>'
     : '<div class="info-box">没有已配置的 GHCP 账户。</div>';
-  document.querySelectorAll('#accountsTable [data-save-account]').forEach(b => {
+  document.querySelectorAll('#accountsTable [data-edit-account]').forEach(b => {
+    b.addEventListener('click', () => openAccountDetail(b.dataset.editAccount));
+  });
+  if (selectedAccountName && panelAccountsSnapshot.some(a => a.account === selectedAccountName)) openAccountDetail(selectedAccountName);
+  else selectedAccountName = null;
+}
+
+function openAccountDetail(account) {
+  const a = panelAccountsSnapshot.find(item => item.account === account);
+  if (!a) return;
+  selectedAccountName = account;
+  const capability = a.capability || [];
+  // null follows capability; an explicit array remains selected even when empty.
+  const restricted = Array.isArray(a.allowed_models);
+  const needsDiscovery = a.enabled_in_config === false && !(a.configured_models || []).length && !capability.length;
+  const boxes = capability.map(model => '<label class="ops-choice"><input type="checkbox" data-account="'
+    + escapeHtml(account) + '" data-model="' + escapeHtml(model) + '"'
+    + (!restricted || a.allowed_models.includes(model) ? ' checked' : '') + (!restricted ? ' disabled' : '')
+    + '> ' + escapeHtml(model) + '</label>').join('');
+  document.getElementById('accountDetail').innerHTML = '<div class="ops-detail-head"><div><h4>' + escapeHtml(account)
+    + '</h4><span class="scope-note" id="accountDraftStatus">当前已保存设置 · 凭据来源：' + escapeHtml(a.token_source || '未知')
+    + '</span></div><span class="scope-tag global">影响所有模型</span></div>'
+    + '<label class="ops-choice"><input type="checkbox" data-enable="' + escapeHtml(account) + '"'
+    + (needsDiscovery ? ' data-needs-capability="1"' : '') + (a.enabled ? ' checked' : '') + '>全局启用此账户</label>'
+    + (needsDiscovery ? '<div class="info-box" data-state="warn">尚未发现能力。启用前请先「刷新能力」，避免成为未知范围的候选。</div>' : '')
+    + '<h4>允许模型</h4><label class="ops-choice"><input type="radio" name="accountAllowedMode" data-account-mode="all"'
+    + (!restricted ? ' checked' : '') + '>跟随能力快照（不额外限制）</label>'
+    + '<label class="ops-choice"><input type="radio" name="accountAllowedMode" data-account-mode="selected"'
+    + (restricted ? ' checked' : '') + '>仅允许指定模型</label><div class="ops-models">'
+    + (boxes || '<span class="scope-note">没有已发现模型，先刷新能力。</span>') + '</div>'
+    + '<p class="scope-note">只允许能力快照范围内的模型；停用账户请使用启用开关。配置候选还会受模型侧选择影响。</p>'
+    + '<div class="ops-detail-actions"><button class="btn" type="button" data-discover="' + escapeHtml(account)
+    + '">刷新能力</button><div class="ops-tags"><button class="btn" type="button" id="closeAccountDetail">取消</button>'
+    + '<button class="btn btn-primary" type="button" data-save-account="' + escapeHtml(account) + '">确认全局设置</button></div></div>';
+  document.getElementById('closeAccountDetail').addEventListener('click', () => {
+    selectedAccountName = null; document.getElementById('accountDetail').innerHTML = '';
+  });
+  document.querySelectorAll('#accountDetail [data-account-mode]').forEach(box => {
+    box.addEventListener('change', () => {
+      const selected = box.dataset.accountMode === 'selected';
+      document.querySelectorAll('#accountDetail [data-account]').forEach(model => {
+        model.disabled = !selected;
+        if (!selected) model.checked = true;
+      });
+      document.getElementById('accountDraftStatus').textContent = '有未保存修改 · 影响所有模型';
+    });
+  });
+  document.querySelectorAll('#accountDetail [data-enable], #accountDetail [data-account]').forEach(box => {
+    box.addEventListener('change', () => { document.getElementById('accountDraftStatus').textContent = '有未保存修改 · 影响所有模型'; });
+  });
+  document.querySelectorAll('#accountDetail [data-save-account]').forEach(b => {
     b.addEventListener('click', () => saveAccount(b.dataset.saveAccount));
   });
-  document.querySelectorAll('#accountsTable [data-discover]').forEach(b => {
+  document.querySelectorAll('#accountDetail [data-discover]').forEach(b => {
     b.addEventListener('click', () => discoverAccount(b.dataset.discover));
   });
 }
@@ -1491,12 +1699,14 @@ async function writeAccountEnablement(account, enabled) {
 
 async function saveAccount(account) {
   if (keysInFlight) return;
-  const enableBox = document.querySelectorAll('#accountsTable [data-enable="' + account + '"]')[0];
+  const enableBox = Array.from(document.querySelectorAll('#accountDetail [data-enable]')).find(box => box.dataset.enable === account);
   const enabled = enableBox ? !!enableBox.checked : true;
-  const boxes = Array.from(document.querySelectorAll('#accountsTable [data-account="' + account + '"]'));
+  const boxes = Array.from(document.querySelectorAll('#accountDetail [data-account]')).filter(box => box.dataset.account === account);
+  const mode = Array.from(document.querySelectorAll('#accountDetail [data-account-mode]')).find(box => box.checked);
+  const selectedMode = mode ? mode.dataset.accountMode === 'selected' : true;
   const chosen = boxes.filter(b => b.checked).map(b => b.dataset.model);
-  if (enabled && boxes.length && !chosen.length) {
-    say('accounts', 'error', '至少要勾选一个模型；要停用该账户请取消「启用」而不是清空勾选。');
+  if (selectedMode && !chosen.length) {
+    say('accounts', 'error', '至少要勾选一个模型，或切换为「跟随能力快照」；再取消「启用」可停用账户。空的指定模型集合不能保存。');
     return;
   }
   // 没有已发现能力就启用 = 通配，该账户会成为每个模型的候选，包括它席位没有的。
@@ -1506,8 +1716,9 @@ async function saveAccount(account) {
     return;
   }
   if (!panelReady('accounts')) return;
+  const epoch = panelEpoch;
   const body = {enabled};
-  if (boxes.length) body.allowed_models = chosen.length === boxes.length ? null : chosen;
+  if (mode || boxes.length) body.allowed_models = selectedMode ? chosen : null;
   if (!confirm('账户 ' + account + '：' + (enabled ? '启用' : '停用')
       + (body.allowed_models ? '，仅允许 ' + body.allowed_models.length + ' 个模型' : '，允许全部已发现模型')
       + '。\n\n这是账户侧设置，对**所有模型**生效。立即生效。确认继续？')) return;
@@ -1517,431 +1728,488 @@ async function saveAccount(account) {
     const result = await fetchJSON('/admin/copilot/accounts/' + encodeURIComponent(account),
       {method: 'PUT', headers: {'content-type': 'application/json'},
        body: JSON.stringify(body)});
+    if (!panelRequestCurrent(epoch)) return;
     const a = result.account || {};
     say('accounts', 'success', '账户 ' + account + ' 已更新：' + (a.enabled ? '启用' : '停用')
       + '，允许 ' + (a.allowed_models ? a.allowed_models.length : (a.capability || []).length) + ' 个模型。');
     renderPolicyState(result.policy);
     // 账户策略变了，路由规则那边的「生效候选」也跟着变 —— 两块一起重读。
     await reloadPanel('/admin/copilot/accounts');
+    if (!panelRequestCurrent(epoch)) return;
     await reloadPanel('/admin/model-routing');
+    if (!panelRequestCurrent(epoch)) return;
     await refreshRoutingDiagnostic(true);
   } catch (error) {
+    if (!panelRequestCurrent(epoch)) return;
+    if (error.status === 401) { expirePanelSession(); return; }
     say('accounts', 'error', error.status === 401 ? '会话无效，请重新解锁。'
-      : '未能保存，执行中的策略保持不变：' + error.message);
+      : '未能确认保存结果，请重新读取账户策略：' + error.message);
   } finally { keysInFlight = false; }
 }
 
 async function discoverAccount(account) {
   if (keysInFlight) return;
   if (!panelReady('accounts')) return;
+  const epoch = panelEpoch;
   keysInFlight = true;
   say('accounts', 'pending', '正在向上游发现 ' + account + ' 的模型能力…');
   try {
     const result = await fetchJSON('/admin/copilot/accounts/' + encodeURIComponent(account) + '/discover',
       {method: 'POST'});
+    if (!panelRequestCurrent(epoch)) return;
     say('accounts', 'success',
         account + ' 发现 ' + result.discovered + ' 个模型（时点快照，非能力认证）。');
     renderPolicyState(result.policy);
     await reloadPanel('/admin/copilot/accounts');
+    if (!panelRequestCurrent(epoch)) return;
     await reloadPanel('/admin/model-routing');
+    if (!panelRequestCurrent(epoch)) return;
     await refreshRoutingDiagnostic(true);
   } catch (error) {
+    if (!panelRequestCurrent(epoch)) return;
+    if (error.status === 401) { expirePanelSession(); return; }
     say('accounts', 'error', error.status === 401 ? '会话无效，请重新解锁。'
-      : '发现失败，已有快照保持不变：' + error.message);
+      : '未能确认能力发现结果，请重新读取快照：' + error.message);
   } finally { keysInFlight = false; }
 }
 
 // ---------- Routing rules: model → provider → GHCP account ----------
-// A table of rules plus an editor, which is the mainstream shape in this
-// category (LiteLLM's Routing Groups is table-plus-form; Cloudflare AI Gateway
-// uses a node graph and Portkey hand-written JSON — both heavier than two
-// providers and a handful of accounts warrant). Clicking a row loads it, so
-// changing one rule no longer means retyping it.
-//
-// A model with no rule keeps the default behaviour; this is a list of the ones
-// somebody decided something about, never a list of all models.
+// Author: Zeno Ren. A model-scoped draft never changes global account policy.
 let defaultOrder = [];
 let providerLabels = {};
-// The per-model diagnostic for whichever model is in the editor: one row per
-// account with the layer that decided. Null until a model is chosen.
 let routingDiagnostic = null;
+let routingLast = null;
+const routeEditorState = {model: '', baseline: null, draft: null, dirty: false,
+  diagnosticState: 'idle', diagnostic: null, requestSequence: 0, review: null,
+  writeState: 'idle'};
 
-function currentRuleModel() {
-  const custom = (document.getElementById('ruleModelCustom').value || '').trim();
-  return custom || (document.getElementById('ruleModel').value || '').trim();
+function currentRuleModel() { return routeEditorState.model; }
+function providerLabel(id) { return providerLabels[id] || id; }
+function routeCopy(value) { return JSON.parse(JSON.stringify(value)); }
+function routeBaseline(model) {
+  return ((routingLast && routingLast.preferences) || []).find(p => p.model === model)
+    || {model, providers: [], copilot_accounts: [], effective_openai_order: defaultOrder.slice(),
+        effective_copilot_accounts: [], opens_claude_on_openai_entry_points: false};
 }
-
-function providerLabel(id) {
-  return providerLabels[id] || id;
+function routeDraftFrom(snapshot) {
+  return {providerChoice: '', accountMode: (snapshot.copilot_accounts || []).length ? 'selected' : 'all',
+    accounts: (snapshot.copilot_accounts || []).slice()};
 }
-
-// The resulting order, with both providers always visible and the trailing one
-// labelled as kept. "A preference reorders and never filters" then becomes
-// something the control shows rather than something the prose asserts — the
-// same idea Vercel AI Gateway encodes by naming `order` and `only` separately.
+function routeSameSet(a, b) { return JSON.stringify([...a].sort()) === JSON.stringify([...b].sort()); }
+function routeOrder() {
+  const choice = routeEditorState.draft?.providerChoice || '';
+  return choice ? [choice, ...defaultOrder.filter(p => p !== choice)]
+    : (routeEditorState.baseline?.effective_openai_order || defaultOrder).slice();
+}
+function routePayload() {
+  const draft = routeEditorState.draft;
+  if (!draft) return null;
+  return Object.assign({copilot_accounts: draft.accountMode === 'all' ? [] : draft.accounts.slice()},
+    draft.providerChoice ? {providers: [draft.providerChoice]} : {});
+}
+function routeDiagnosticReady() {
+  return routeEditorState.diagnosticState === 'ready'
+    && routeEditorState.diagnostic?.model === routeEditorState.model;
+}
+function routeCandidates() {
+  if (!routeDiagnosticReady()) return null;
+  const draft = routeEditorState.draft;
+  if (draft.accountMode === 'selected' && !draft.accounts.length) return [];
+  return (routeEditorState.diagnostic.accounts || [])
+    .filter(a => a.serves_model_ignoring_selection === true
+      && (draft.accountMode === 'all' || draft.accounts.includes(a.account)))
+    .map(a => a.account);
+}
+function routeCanSave() {
+  const draft = routeEditorState.draft;
+  return !!draft && routeDiagnosticReady() && routeEditorState.dirty && !keysInFlight
+    && (draft.accountMode === 'all' || draft.accounts.length > 0)
+    && (!draft.providerChoice || defaultOrder.includes(draft.providerChoice));
+}
 function renderOrderPreview() {
-  const lead = (document.getElementById('ruleProvider').value || '').trim();
-  const order = lead
-    ? [lead, ...defaultOrder.filter(p => p !== lead)]
-    : defaultOrder.slice();
-  const node = document.getElementById('ruleOrderPreview');
-  if (!order.length) { node.innerHTML = ''; return; }
-  node.innerHTML = '<span class="scope-note" style="margin:0">生效顺序</span>'
-    + order.map((p, index) =>
-        (index ? '<span class="order-arrow" aria-hidden="true">→</span>' : '')
-        + '<span class="order-chip' + (index === 0 ? ' lead' : '') + '">'
-        + escapeHtml(providerLabel(p))
-        + (index === 0 ? '<small>先试</small>' : '<small>fallback · 保留</small>')
-        + '</span>').join('')
-    + (lead ? '<span class="scope-note" style="margin:0">没被提前的那个仍在候选里，只是靠后</span>' : '');
+  const order = routeOrder();
+  document.getElementById('ruleOrderPreview').innerHTML = order.map((p, index) =>
+    (index ? '<span class="order-arrow" aria-hidden="true">→</span>' : '')
+    + '<span class="order-chip' + (index ? '' : ' lead') + '"><strong>'
+    + escapeHtml(providerLabel(p)) + '</strong><small>'
+    + (index ? '保留为后续候选' : '优先候选渠道') + '</small></span>').join('');
 }
-
-// Reading the diagnostic is what makes the matrix possible: the client cannot
-// work out "could this account serve this model" on its own without
-// reimplementing capability ∩ allowed_models ∩ enablement.
-// `quiet` when this runs as a follow-up to a write: the write's own result is
-// the more important message, and a secondary "could not re-read" would
-// overwrite it — including the one case that matters most, a save that applied
-// only its first half.
-async function refreshRoutingDiagnostic(quiet) {
-  const model = currentRuleModel();
-  if (!model || !panelSession.authenticated) {
-    routingDiagnostic = null;
-    renderRuleAccounts();
-    return;
-  }
-  try {
-    routingDiagnostic = await fetchJSON('/admin/model-routing/' + encodeURIComponent(model));
-  } catch (error) {
-    routingDiagnostic = null;
-    if (!quiet && error.status !== 404) {
-      say('routing', 'warn', '未能读取候选诊断：' + error.message + '（仍可保存规则）');
-    }
-  }
-  renderRuleAccounts();
-}
-
-// Why each account is or is not a candidate, named by layer and pointing at
-// whichever surface owns it. Modelled on GCP's Policy Troubleshooter (a verdict
-// per layer beside the roll-up) and on ALB's `unused` (configured-but-idle is
-// its own state). The anti-pattern avoided is one-api's: an empty candidate set
-// reported as an undifferentiated error that names only the model.
 const REASON_TEXT = {
-  account_disabled: ['运维已停用', '去「GHCP 账户」开启'],
-  account_never_enabled: ['从未启用', '配置声明不投入服务，去「GHCP 账户」启用'],
-  not_selected_for_model: ['本模型没选它', '就在下面这一列勾上'],
-  excluded_by_allowed_models: ['账户侧「允许模型」摘掉了它', '去「GHCP 账户」改勾选'],
-  not_in_capability: ['上游没有这个模型', '只读事实；可「刷新能力」重新发现'],
-  not_in_configured_models: ['config 的 models 限定', '要改配置并滚动重启'],
-  api_type_unsupported: ['不支持该入口形状', '账户的 api_types 限制'],
+  account_disabled: ['运维已停用（全局）', '到 GHCP 账户页开启'],
+  account_never_enabled: ['从未启用', '先发现能力，再到 GHCP 账户页启用'],
+  not_selected_for_model: ['本模型未选择', '调整本页账户范围'],
+  excluded_by_allowed_models: ['账户允许模型未包含', '到 GHCP 账户页调整'],
+  not_in_capability: ['能力快照未包含', '可在 GHCP 账户页重新发现'],
+  not_in_configured_models: ['配置 models 未包含', '需修改配置并重启'],
+  api_type_unsupported: ['入口形状不支持', '查看账户 api_types 配置'],
 };
 
+function syncRouteFields() {
+  const draft = routeEditorState.draft;
+  if (!draft) return;
+  document.getElementById('ruleProvider').value = draft.providerChoice;
+  document.getElementById('ruleAccountMode').value = draft.accountMode;
+  document.querySelectorAll('[name="routeAccountScope"]').forEach(input => {
+    input.checked = input.value === draft.accountMode;
+  });
+}
 function renderRuleAccounts() {
   const node = document.getElementById('ruleAccounts');
-  const model = currentRuleModel();
-  if (!routingAccounts.length) {
-    node.innerHTML = '<p class="scope-note">没有已配置的 GHCP 账户，这一段无从选择。</p>';
-    renderRulePreview();
-    return;
+  const state = routeEditorState;
+  if (!state.model) { node.innerHTML = ''; renderRulePreview(false); return; }
+  if (!routeDiagnosticReady()) {
+    node.innerHTML = '<div class="info-box">' + (state.diagnosticState === 'loading'
+      ? '正在读取此模型的配置诊断…' : '配置诊断尚未确认，请重试读取后再保存。') + '</div>';
+    renderRulePreview(false); return;
   }
-  if (!model) {
-    node.innerHTML = '<p class="scope-note">先在第 1 步选一个模型，这里会列出每个账户当前是否接它的流量、以及是哪一层决定的。</p>';
-    renderRulePreview();
-    return;
-  }
-  const byName = {};
-  for (const row of (routingDiagnostic && routingDiagnostic.accounts) || []) byName[row.account] = row;
-  const rows = routingAccounts.map(a => {
-    const info = byName[a.account] || {};
-    const reason = info.reason || null;
-    const wording = REASON_TEXT[reason] || (reason ? [reason, ''] : null);
-    const verdict = info.serves_model
-      ? '<span class="badge ok">接流量</span>'
-      : '<span class="badge open">不接</span>'
-        + (wording ? '<span class="verdict-why">' + escapeHtml(wording[0])
-                     + (wording[1] ? ' · ' + escapeHtml(wording[1]) : '') + '</span>' : '');
-    // "Would it serve if selected" is the honest label for a checkbox that
-    // cannot help: ticking an account with no capability for this model changes
-    // nothing, and saying so here beats discovering it after the save.
-    const futile = info.serves_model_ignoring_selection === false
-      && reason !== 'not_selected_for_model';
-    return '<tr><td>' + escapeHtml(a.account)
-      + (info.capability_known === false
-        ? '<span class="verdict-why">尚未发现能力 —— 它目前对所有模型通配</span>' : '')
-      + '</td>'
-      + '<td><label class="field"><input type="checkbox" data-global-enable="' + escapeHtml(a.account) + '"'
-      + (info.enabled ? ' checked' : '') + '> ' + (info.enabled ? '已启用' : '未启用') + '</label></td>'
-      + '<td><label class="field"><input type="checkbox" data-rule-account="' + escapeHtml(a.account) + '"'
-      + (info.selected ? ' checked' : '') + (futile ? ' data-futile="1"' : '') + '> 选中</label>'
-      + (futile ? '<span class="verdict-why">勾了也不会服务该模型</span>' : '') + '</td>'
-      + '<td>' + verdict + '</td></tr>';
+  const rows = (state.diagnostic.accounts || []).map(info => {
+    const chosen = state.draft.accountMode === 'all'
+      ? info.serves_model_ignoring_selection === true : state.draft.accounts.includes(info.account);
+    const reason = state.draft.accountMode === 'selected' && !chosen
+      && info.reason_ignoring_selection !== 'account_disabled'
+      && info.reason_ignoring_selection !== 'account_never_enabled'
+      ? 'not_selected_for_model' : info.reason_ignoring_selection;
+    const words = REASON_TEXT[reason] || (reason ? [reason, ''] : ['符合配置条件', '']);
+    const disabled = state.draft.accountMode === 'all';
+    const globalState = info.enabled ? '已启用'
+      : info.reason_ignoring_selection === 'account_never_enabled' ? '未启用' : '已停用';
+    return '<tr><td><label class="field"><input type="checkbox" data-rule-account="'
+      + escapeHtml(info.account) + '" aria-label="将 ' + escapeHtml(info.account) + ' 用于 '
+      + escapeHtml(state.model) + '"' + (chosen ? ' checked' : '') + (disabled ? ' disabled' : '')
+      + '><span class="mono">' + escapeHtml(info.account) + '</span></label>'
+      + (info.capability_known === false ? '<span class="verdict-why">能力未知 · 尚未发现，配置判断通配</span>' : '')
+      + '</td><td><span class="badge ' + (info.enabled ? 'ok' : 'trial') + '">'
+      + globalState + '</span></td><td><span class="verdict">' + escapeHtml(words[0])
+      + '</span>' + (words[1] ? '<span class="verdict-why">' + escapeHtml(words[1]) + '</span>' : '')
+      + '</td></tr>';
   }).join('');
-  node.innerHTML =
-    '<div class="table-wrap"><div class="table-scroll"><table id="ruleMatrix"><thead><tr><th>账户</th>'
-    + '<th>账户启用<span class="scope-tag global">对所有模型</span></th>'
-    + '<th>本模型选中<span class="scope-tag local">仅 ' + escapeHtml(model) + '</span></th>'
-    + '<th>当前结果</th></tr></thead><tbody>' + rows + '</tbody></table></div></div>'
-    + '<p class="scope-note">两列写的是<strong>两张不同的表</strong>：左边那列是账户侧设置，改了<strong>影响所有模型</strong>；'
-    + '右边那列只影响 ' + escapeHtml(model) + '。一个都不勾 = 不限定。保存时会分两步写，并各自回报。</p>';
+  node.innerHTML = rows ? '<div class="table-wrap"><div class="table-scroll"><table id="ruleMatrix">'
+    + '<thead><tr><th>账户选择</th><th>全局状态 · 只读</th><th>首个判断结果</th></tr></thead><tbody>'
+    + rows + '</tbody></table></div></div>'
+    : '<div class="info-box">未配置 GHCP 账户；该模型仍受 Foundry 部署、权限与运行状态约束。</div>';
   document.querySelectorAll('#ruleMatrix [data-rule-account]').forEach(box => {
     box.addEventListener('change', renderRulePreview);
   });
-  document.querySelectorAll('#ruleMatrix [data-global-enable]').forEach(box => {
-    box.addEventListener('change', renderRulePreview);
-  });
-  renderRulePreview();
+  renderRulePreview(false);
 }
-
 function matrixSelection() {
   return Array.from(document.querySelectorAll('#ruleMatrix [data-rule-account]'))
     .filter(box => box.checked).map(box => box.dataset.ruleAccount);
 }
-
-// Which global toggles the operator moved away from the server's value.
-function matrixEnablementChanges() {
-  const byName = {};
-  for (const row of (routingDiagnostic && routingDiagnostic.accounts) || []) byName[row.account] = row;
-  return Array.from(document.querySelectorAll('#ruleMatrix [data-global-enable]'))
-    .map(box => ({account: box.dataset.globalEnable, enabled: !!box.checked}))
-    .filter(change => {
-      const known = byName[change.account];
-      return known && !!known.enabled !== change.enabled;
-    });
-}
-
-// The effective set, computed before saving rather than reported after it. The
-// server supplied "could serve"; this only intersects it with the checkboxes,
-// so no policy logic is duplicated here.
-function renderRulePreview() {
+function renderRulePreview(sync = true) {
+  const state = routeEditorState;
   const node = document.getElementById('rulePreview');
-  const model = currentRuleModel();
-  if (!model) { node.dataset.state = ''; node.textContent = '先选一个模型。'; return; }
-  if (!routingDiagnostic) {
-    node.dataset.state = '';
-    node.textContent = model + '：保存后会算出生效候选。';
+  if (!state.model || !state.draft) { node.textContent = '先选择一个模型。'; return; }
+  if (sync !== false) {
+    const focusedAccount = sync && sync.target && sync.target.dataset && sync.target.dataset.ruleAccount;
+    state.draft.providerChoice = document.getElementById('ruleProvider').value || '';
+    state.draft.accountMode = document.getElementById('ruleAccountMode').value || 'all';
+    state.draft.accounts = state.draft.accountMode === 'selected' ? matrixSelection() : [];
+    cancelRouteReview();
+    renderRuleAccounts();
+    if (focusedAccount) Array.from(document.querySelectorAll('#ruleMatrix [data-rule-account]'))
+      .find(box => box.dataset.ruleAccount === focusedAccount)?.focus?.();
     return;
   }
-  const rows = routingDiagnostic.accounts || [];
-  const changes = matrixEnablementChanges();
-  const pending = {};
-  for (const change of changes) pending[change.account] = change.enabled;
-  // `account_disabled` / `account_never_enabled` are the two verdicts an enable
-  // would lift. The server stops at the first blocker, so once enablement was
-  // the blocker we cannot know whether capability would also exclude it —
-  // hence `approximate` below rather than a confident claim.
-  const ENABLEMENT_BLOCKERS = ['account_disabled', 'account_never_enabled'];
-  let approximate = false;
-  const capable = rows.filter(row => {
-    if (pending[row.account] === false) return false;
-    const blocker = row.reason_ignoring_selection;
-    if (pending[row.account] === true && ENABLEMENT_BLOCKERS.includes(blocker)) {
-      approximate = true;
-      return true;
-    }
-    return row.serves_model_ignoring_selection;
-  }).map(row => row.account);
-  const chosen = matrixSelection();
-  const effective = chosen.length ? chosen.filter(a => capable.includes(a)) : capable;
-  let text = model + ' · GHCP 生效候选：' + (effective.length ? effective.join('、') : '无');
-  if (chosen.length) text += '（选中 ' + chosen.length + ' 个 ∩ 能服务 ' + capable.length + ' 个）';
-  else text += '（不限定，即全部能服务该模型的启用账户）';
-  if (changes.length) {
-    text += ' · 待写入的全局改动：' + changes.map(c =>
-      c.account + (c.enabled ? ' 启用' : ' 停用')).join('、') + '（影响所有模型）';
-  }
-  node.dataset.state = effective.length ? '' : 'warn';
-  if (!effective.length) {
-    text += ' —— 这条规则会让该模型在 GHCP 没有任何候选，请求将落到 '
-      + providerLabel(defaultOrder.find(p => p !== 'copilot') || 'azure_openai')
-      + '。若非本意，请检查所选账户是否具备该模型的能力。';
-  } else if (approximate) {
-    text += '。注意：待启用的账户此前因未启用而未被逐层判定，它能否服务该模型以保存后的结果为准。';
-  }
-  node.textContent = text;
-}
-
-function loadRuleIntoEditor(model) {
-  document.getElementById('ruleModelCustom').value = '';
-  const select = document.getElementById('ruleModel');
-  const known = Array.from(select.options).some(option => option.value === model);
-  if (known) select.value = model;
-  else document.getElementById('ruleModelCustom').value = model;
-  const entry = ((routingLast && routingLast.preferences) || []).find(p => p.model === model);
-  const providers = (entry && entry.providers) || [];
-  document.getElementById('ruleProvider').value = providers.length ? providers[0] : '';
+  const base = state.baseline || routeBaseline(state.model);
+  const payload = routePayload();
+  state.dirty = !routeSameSet(payload.copilot_accounts, base.copilot_accounts || [])
+    || (state.draft.accountMode === 'selected' && !state.draft.accounts.length)
+    || (payload.providers !== undefined && JSON.stringify(payload.providers) !== JSON.stringify(base.providers || []));
+  const candidates = routeCandidates();
+  const invalid = state.draft.accountMode === 'selected' && !state.draft.accounts.length;
+  node.dataset.state = invalid || candidates?.length === 0 || candidates === null ? 'warn' : '';
+  node.textContent = invalid ? '请至少选择一个账户，或切换到「全部符合条件」。指定账户草稿无效。'
+    : candidates === null ? (state.diagnosticState === 'loading' ? '正在读取配置诊断，暂不能保存。' : '诊断读取未确认，请重试读取；暂不能保存。')
+    : (state.dirty ? '草稿估算候选' : '当前配置候选') + ' · ' + candidates.length + ' 个'
+      + (candidates.length ? '：' + candidates.join('、')
+        : ' · GHCP 无候选。Foundry 是否可用仍需检查部署、密钥权限与运行状态。');
+  document.getElementById('routeEditorState').textContent = state.diagnosticState === 'loading' ? '正在读取配置诊断…'
+    : state.diagnosticState === 'error' ? '读取失败 · 请重试'
+    : state.dirty ? '有未保存修改 · 当前已保存配置未被本页草稿修改' : '已读取配置 · 时点诊断';
+  document.getElementById('routeDirtyState').textContent = state.dirty ? '保存前查看差异' : '只修改当前模型';
+  document.getElementById('routeEditorFields').disabled = !routeDiagnosticReady() || keysInFlight;
+  document.getElementById('saveRule').disabled = !routeCanSave();
+  document.getElementById('resetRuleForm').disabled = !state.dirty || keysInFlight;
+  document.getElementById('restoreRoute').disabled = !routeDiagnosticReady() || keysInFlight;
+  const explicit = state.draft.providerChoice ? ['copilot', 'azure_openai'].includes(state.draft.providerChoice)
+    : (base.providers || []).some(provider => ['copilot', 'azure_openai'].includes(provider));
+  document.getElementById('routeEntryImpact').textContent = /claude/i.test(state.model)
+    ? (explicit ? 'Responses / Chat：显式渠道偏好将开放此 Claude 模型。恢复整条默认会撤销放行。'
+      : 'Responses / Chat：未显式放行此 Claude 模型；仅改账户范围不会开放入口。')
+    : '此规则调整 OpenAI 风格入口的渠道顺序与 GHCP 账户范围。';
   renderOrderPreview();
-  switchSubtab('routing');
-  refreshRoutingDiagnostic();
 }
-
-let routingLast = null;
-
+function changeRouteAccountMode(mode) {
+  if (!routeEditorState.draft) return;
+  routeEditorState.draft.providerChoice = document.getElementById('ruleProvider').value || '';
+  routeEditorState.draft.accountMode = mode;
+  if (mode === 'selected' && !routeEditorState.draft.accounts.length) {
+    routeEditorState.draft.accounts = routeCandidates() || [];
+    if (!routeEditorState.draft.accounts.length) routeEditorState.draft.accounts =
+      (routeEditorState.diagnostic?.accounts || []).filter(a => a.serves_model_ignoring_selection).map(a => a.account);
+  }
+  if (mode === 'all') routeEditorState.draft.accounts = [];
+  cancelRouteReview(); syncRouteFields(); renderRuleAccounts();
+}
+function guardRouteNavigation() {
+  if (keysInFlight && routeEditorState.model) { say('routing', 'warn', '正在处理操作，请等待结果后再离开。'); return false; }
+  if (!routeEditorState.dirty) return true;
+  if (!confirm(routeEditorState.model + ' 有未保存的修改。放弃修改并离开？')) return false;
+  resetRuleForm(true); return true;
+}
+async function loadRuleIntoEditor(model) {
+  model = String(model || '').trim();
+  if (!model || model.length > 190 || !panelSession.authenticated || keysInFlight) return;
+  if (model !== routeEditorState.model && !guardRouteNavigation()) return;
+  if (model === routeEditorState.model && routeEditorState.dirty) return;
+  routeEditorState.model = model;
+  routeEditorState.baseline = routeCopy(routeBaseline(model));
+  routeEditorState.draft = routeDraftFrom(routeEditorState.baseline);
+  routeEditorState.dirty = false;
+  routeEditorState.review = null;
+  document.getElementById('routeAddPanel').hidden = true;
+  document.getElementById('routeEditor').hidden = false;
+  document.getElementById('routeEditorEmpty').hidden = true;
+  document.getElementById('routeEditorModel').textContent = model;
+  document.getElementById('ruleModelCustom').value = model;
+  document.getElementById('ruleModel').value = '';
+  syncRouteFields(); renderRoutingList();
+  switchSubtab('routing');
+  return refreshRoutingDiagnostic();
+}
+async function refreshRoutingDiagnostic(quiet) {
+  const model = currentRuleModel();
+  if (!model || !panelSession.authenticated) return null;
+  const epoch = panelEpoch;
+  const sequence = ++routeEditorState.requestSequence;
+  routeEditorState.diagnosticState = 'loading';
+  routeEditorState.diagnostic = routingDiagnostic = null;
+  cancelRouteReview(); renderRuleAccounts();
+  try {
+    let body;
+    try { body = await fetchJSON('/admin/model-routing/' + encodeURIComponent(model)); }
+    catch (error) {
+      if (error.status === 404 && !routingAccounts.length && routingLast) {
+        body = {...routeBaseline(model), accounts: [], no_copilot: true};
+      } else throw error;
+    }
+    if (!panelRequestCurrent(epoch) || sequence !== routeEditorState.requestSequence || model !== currentRuleModel()) return null;
+    if (body.model !== model || !Array.isArray(body.accounts)) throw new Error('诊断模型或账户数据不匹配。');
+    routeEditorState.diagnostic = routingDiagnostic = body;
+    routeEditorState.baseline = routeCopy(body);
+    routeEditorState.diagnosticState = 'ready';
+    if (!routeEditorState.dirty) routeEditorState.draft = routeDraftFrom(body);
+    renderRoutingForm(routingLast || {}); syncRouteFields(); renderRuleAccounts();
+    return body;
+  } catch (error) {
+    if (!panelRequestCurrent(epoch) || sequence !== routeEditorState.requestSequence || model !== currentRuleModel()) return null;
+    if (error.status === 401) { expirePanelSession(); return null; }
+    routeEditorState.diagnosticState = 'error';
+    routeEditorState.diagnostic = routingDiagnostic = null;
+    if (!quiet) say('routing', 'warn', '未能读取配置诊断：' + error.message + ' 请重试读取后再保存。');
+    renderRuleAccounts(); return null;
+  }
+}
+function resetRoutingState() {
+  routeEditorState.requestSequence++;
+  Object.assign(routeEditorState, {model: '', baseline: null, draft: null, dirty: false,
+    diagnosticState: 'idle', diagnostic: null, review: null, writeState: 'idle'});
+  routingDiagnostic = routingLast = null;
+  defaultOrder = []; providerLabels = {}; routingAccounts = [];
+  for (const id of ['routeReview', 'ruleAccounts', 'routeEditorModel', 'routeEntryImpact', 'routeEditorState', 'routeDirtyState']) {
+    const node = document.getElementById(id); node.innerHTML = ''; node.textContent = '';
+  }
+  document.getElementById('routeEditor').hidden = true;
+  document.getElementById('routeReview').hidden = true;
+  document.getElementById('routeAddPanel').hidden = true;
+  document.getElementById('routeEditorEmpty').hidden = false;
+}
+function resetRuleForm(silent) {
+  if (!routeEditorState.baseline) return;
+  routeEditorState.draft = routeDraftFrom(routeEditorState.baseline);
+  routeEditorState.dirty = false;
+  cancelRouteReview(); syncRouteFields(); renderRuleAccounts();
+  if (!silent) { const node = feedback('routing'); if (node) node.hidden = true; }
+}
 function renderRoutingForm(payload) {
   routingAccounts = payload.copilot_accounts_available || [];
   defaultOrder = payload.default_openai_order || [];
   providerLabels = payload.provider_labels || {};
-  const models = payload.known_models || [];
   const select = document.getElementById('ruleModel');
   const keep = select.value;
-  // The catalogue is a point-in-time view, so a brand-new model may be missing
-  // from it. The free-text field next to this select is the way out; without it
-  // the dropdown would be a hard limit on what can be configured.
-  select.innerHTML = '<option value="">（从目录选择）</option>'
-    + models.map(m => '<option value="' + escapeHtml(m) + '">' + escapeHtml(m) + '</option>').join('');
-  if (keep && models.includes(keep)) select.value = keep;
+  select.innerHTML = '<option value="">从模型目录选择</option>' + (payload.known_models || [])
+    .map(m => '<option value="' + escapeHtml(m) + '">' + escapeHtml(m) + '</option>').join('');
+  select.value = keep;
   const providerSelect = document.getElementById('ruleProvider');
-  const keepProvider = providerSelect.value;
-  providerSelect.innerHTML = '<option value="">不改顺序（用默认）</option>'
-    + defaultOrder.map(p => '<option value="' + escapeHtml(p) + '">' + escapeHtml(providerLabel(p))
-                            + '</option>').join('');
-  providerSelect.value = keepProvider;
-  renderOrderPreview();
-  renderRuleAccounts();
+  const baseline = routeEditorState.baseline;
+  providerSelect.innerHTML = '<option value="">保持当前顺序'
+    + (baseline ? '（' + escapeHtml((baseline.effective_openai_order || defaultOrder).map(providerLabel).join(' → ')) + '）' : '')
+    + '</option>' + defaultOrder.map(p => '<option value="' + escapeHtml(p) + '">'
+      + escapeHtml(providerLabel(p)) + ' 优先</option>').join('');
+  syncRouteFields(); renderOrderPreview();
 }
-
+function renderRoutingList() {
+  if (!routingLast) return;
+  const query = (document.getElementById('routeSearch').value || '').trim().toLowerCase();
+  const preferences = routingLast.preferences || [];
+  const configured = new Set(preferences.map(p => p.model));
+  const item = p => '<button type="button" class="route-model'
+    + (p.model === currentRuleModel() ? ' selected' : '') + '" data-edit-route="' + escapeHtml(p.model)
+    + '" aria-pressed="' + (p.model === currentRuleModel()) + '"><strong>' + escapeHtml(p.model)
+    + '</strong><span>' + (p.inherited ? '继承默认' : escapeHtml((p.effective_openai_order || []).map(providerLabel).join(' → ')))
+    + '</span><small>' + (p.inherited ? '未设模型规则' : p.copilot_candidates_empty ? 'GHCP 无配置候选'
+      : 'GHCP 配置候选 ' + (p.effective_copilot_accounts || []).length + ' 个') + '</small></button>';
+  const rows = preferences.filter(p => p.model.toLowerCase().includes(query));
+  const defaults = (routingLast.known_models || []).filter(m => !configured.has(m) && m.toLowerCase().includes(query));
+  document.getElementById('routingContent').innerHTML = '<div id="routingTable">'
+    + (rows.map(item).join('') || '<p class="route-list-note">' + (query ? '没有匹配的已保存规则。' : '尚无自定义规则。') + '</p>')
+    + (defaults.length ? '<details class="route-defaults"' + (!preferences.length || query ? ' open' : '')
+      + '><summary>目录模型 · 继承默认（' + defaults.length + '）</summary>'
+      + defaults.map(model => item({model, inherited: true})).join('') + '</details>' : '')
+    + '<p class="route-list-note">默认：' + escapeHtml(defaultOrder.map(providerLabel).join(' → ')) + '</p></div>';
+  document.querySelectorAll('#routingTable [data-edit-route]').forEach(button => {
+    button.addEventListener('click', () => loadRuleIntoEditor(button.dataset.editRoute));
+  });
+}
 function renderRouting(payload) {
   routingLast = payload;
   renderPolicyState(payload.policy);
-  renderRoutingForm(payload);
-  const rows = (payload.preferences || []).map(p => {
-    const accounts = p.copilot_accounts || [];
-    const effective = p.effective_copilot_accounts || [];
-    return '<tr><td>' + escapeHtml(p.model) + '</td>'
-      + '<td>' + escapeHtml((p.effective_openai_order || []).map(providerLabel).join(' → ')) + '</td>'
-      + '<td>' + (accounts.length ? escapeHtml(accounts.join('、')) : '<span class="scope-note">不限定</span>') + '</td>'
-      + '<td>' + (p.copilot_candidates_empty
-        ? '<span class="badge open">空 · GHCP 无候选</span>'
-        : escapeHtml(effective.join('、')) || '<span class="scope-note">—</span>') + '</td>'
-      + '<td>' + (p.opens_claude_on_openai_entry_points ? '已在 OpenAI 风格入口放行' : '—') + '</td>'
-      + '<td><button class="btn" type="button" data-edit-route="' + escapeHtml(p.model) + '">编辑</button>'
-      + ' <button class="btn" type="button" data-clear-route="' + escapeHtml(p.model) + '">清除</button></td></tr>';
-  }).join('');
-  const defaults = '<p class="scope-note">默认顺序：'
-    + escapeHtml((payload.default_openai_order || []).map(providerLabel).join(' → '))
-    + ' —— 没有规则的模型都按它走。</p>';
-  document.getElementById('routingContent').innerHTML = '<h3 style="margin-top:26px">已有规则</h3>' + defaults + (rows
-    ? '<div class="table-wrap"><div class="table-scroll"><table id="routingTable"><thead><tr><th>模型</th><th>生效顺序</th><th>限定账户</th><th>生效候选</th><th>claude 放行</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>'
-    : '<div class="info-box">没有任何规则，全部模型按默认顺序与全部启用账户。</div>');
-  document.querySelectorAll('#routingTable [data-clear-route]').forEach(b => {
-    b.addEventListener('click', () => clearRouting(b.dataset.clearRoute));
-  });
-  document.querySelectorAll('#routingTable [data-edit-route]').forEach(b => {
-    b.addEventListener('click', () => loadRuleIntoEditor(b.dataset.editRoute));
-  });
+  renderRoutingForm(payload); renderRoutingList();
 }
-
-// Two endpoints, so two writes, so no pretence of atomicity. The global one
-// goes first and a failure there stops the model-scoped one; if the first
-// succeeds and the second fails, the message says exactly that.
+function cancelRouteReview() {
+  routeEditorState.review = null;
+  const node = document.getElementById('routeReview'); node.hidden = true; node.innerHTML = '';
+}
+function renderRouteReview(type) {
+  const state = routeEditorState;
+  const base = state.baseline;
+  const resetting = type === 'reset';
+  const payload = resetting ? {copilot_accounts: [], providers: []} : routePayload();
+  const order = resetting ? defaultOrder : routeOrder();
+  const claude = /claude/i.test(state.model);
+  const opening = !resetting && claude && payload.providers?.some(provider => ['copilot', 'azure_openai'].includes(provider))
+    && !(base.providers || []).some(provider => ['copilot', 'azure_openai'].includes(provider));
+  const zero = !resetting && routeCandidates()?.length === 0;
+  const risk = resetting || opening || zero;
+  state.review = {type, model: state.model, payload: routeCopy(payload), risk,
+    epoch: panelEpoch, sequence: state.requestSequence};
+  const accountsText = accounts => accounts.length ? accounts.join('、') : '全部符合条件账户';
+  const node = document.getElementById('routeReview');
+  node.hidden = false;
+  node.innerHTML = '<h4>' + (resetting ? '恢复整条规则默认' : '确认本模型变更') + '</h4><p class="scope-note">'
+    + escapeHtml(state.model) + ' · 不修改任何账户的全局启用状态</p><div class="table-scroll"><table><thead><tr><th>设置</th>'
+    + '<th>当前已保存</th><th>拟提交</th></tr></thead><tbody><tr><td>渠道顺序</td><td>'
+    + escapeHtml((base.effective_openai_order || defaultOrder).map(providerLabel).join(' → ')) + '</td><td>'
+    + escapeHtml(order.map(providerLabel).join(' → ')) + (resetting ? '（默认）' : payload.providers ? '（显式）' : '（保持）')
+    + '</td></tr><tr><td>账户范围</td><td>' + escapeHtml(accountsText(base.copilot_accounts || []))
+    + '</td><td>' + escapeHtml(accountsText(payload.copilot_accounts)) + '</td></tr></tbody></table></div>'
+    + (resetting ? '<p class="route-warning">同时清除渠道偏好与账户限定。'
+      + (claude ? '该 Claude 模型的 Responses / Chat 入口将关闭。' : '这不是仅清除渠道偏好。') + '</p>' : '')
+    + (opening ? '<p class="route-warning">将显式开放此 Claude 模型的 Responses / Chat；Messages 仍只走 ADB。裸 claude-* 按 GHCP 分档参考价估算，与 ADB 的公开 API 参考计价不同。</p>' : '')
+    + (zero ? '<p class="route-warning">GHCP 配置候选为 0；Foundry 的部署、密钥权限与可用性未在此验证。</p>' : '')
+    + (risk ? '<label class="route-option"><input type="checkbox" id="routeRiskAck">我已了解上述影响</label>' : '')
+    + '<div class="rule-row route-review-actions"><button class="btn" id="cancelRouteReview" type="button">返回编辑</button>'
+    + '<button class="btn btn-primary" id="confirmRouteSave" type="button"' + (risk ? ' disabled' : '') + '>'
+    + (resetting ? '确认恢复整条默认' : '确认保存') + '</button></div>';
+  document.getElementById('cancelRouteReview').addEventListener('click', cancelRouteReview);
+  document.getElementById('confirmRouteSave').addEventListener('click', confirmRouteSave);
+  if (risk) document.getElementById('routeRiskAck').addEventListener('change', event => {
+    document.getElementById('confirmRouteSave').disabled = !event.target.checked;
+  });
+  node.scrollIntoView?.({block: 'nearest', behavior: 'smooth'});
+}
 async function saveRule() {
-  if (keysInFlight) return;
-  const model = currentRuleModel();
-  if (!model) {
-    say('routing', 'error', '请从目录选择一个模型，或手输模型名。');
+  renderRulePreview();
+  if (!panelReady('routing') || !routeCanSave()) {
+    if (!routeDiagnosticReady()) say('routing', 'warn', '请先读取并确认当前模型的诊断，再保存。');
     return;
   }
-  const provider = (document.getElementById('ruleProvider').value || '').trim();
-  const accounts = matrixSelection();
-  const enablement = matrixEnablementChanges();
-  if (!panelReady('routing')) return;
-  const lines = [];
-  if (enablement.length) {
-    lines.push('【全局 · 影响所有模型】');
-    for (const change of enablement) {
-      lines.push('  ' + change.account + '：' + (change.enabled ? '启用' : '停用'));
-    }
-    lines.push('');
-  }
-  lines.push('【仅 ' + model + '】');
-  lines.push('  Provider 顺序：' + (provider
-    ? providerLabel(provider) + ' 优先（另一个保留为 fallback）' : '不改顺序'));
-  lines.push('  GHCP 账户：' + (accounts.length ? accounts.join('、') : '不限定（全部启用账户）'));
-  if (/claude/i.test(model) && provider) {
-    lines.push('', '注意：这会让 ' + model + ' 在 OpenAI 风格入口被放行（默认是拒绝的），'
-      + '且该渠道按 GHCP 分档价计费。');
-  }
-  if (enablement.length) {
-    lines.push('', '两步写入，不是一个事务：先全局启用态，再模型规则。');
-  }
-  if (!confirm(lines.join('\n') + '\n\n立即生效。确认继续？')) return;
-  keysInFlight = true;
-  const applied = [];
-  try {
-    say('routing', 'pending', enablement.length ? '第 1 步：正在写入账户启用态…' : '正在保存规则…');
-    for (const change of enablement) {
-      await writeAccountEnablement(change.account, change.enabled);
-      applied.push(change.account + (change.enabled ? ' 启用' : ' 停用'));
-    }
-    if (enablement.length) say('routing', 'pending', '第 2 步：正在写入模型规则…');
-    // Always send the account segment: an empty array is how "no limit" is
-    // expressed, so omitting it would make unchecking everything a no-op.
-    const body = {copilot_accounts: accounts};
-    if (provider) body.providers = [provider];
-    const result = await fetchJSON('/admin/model-routing/' + encodeURIComponent(model),
-      {method: 'PUT', headers: {'content-type': 'application/json'},
-       body: JSON.stringify(body)});
-    const effective = result.effective_copilot_accounts || [];
-    let text = (applied.length ? '全局已写入：' + applied.join('、') + '。' : '')
-      + model + ' 生效顺序：' + (result.effective_openai_order || []).map(providerLabel).join(' → ')
-      + '；GHCP 生效候选：' + (effective.length ? effective.join('、') : '无');
-    let state = 'success';
-    if (result.copilot_candidates_empty) {
-      // Not a failure, but the operator almost certainly did not mean it.
-      state = 'warn';
-      text += '。这条规则让该模型在 GHCP 没有任何候选账户，请求会落到 Foundry'
-        + ' —— 若非本意，请检查所选账户是否具备该模型的能力。';
-    } else if (result.opens_claude_on_openai_entry_points) {
-      text += '（已在 OpenAI 风格入口放行）';
-    }
-    say('routing', state, text);
-    renderPolicyState(result.policy);
-    await reloadPanel('/admin/model-routing');
-    await reloadPanel('/admin/copilot/accounts');
-    await refreshRoutingDiagnostic(true);
-  } catch (error) {
-    const partial = applied.length
-      ? '账户启用态已生效（' + applied.join('、') + '），但模型规则未写入 —— 两者不是一个事务。'
-      : '';
-    say('routing', 'error', partial + (error.status === 401 ? '会话无效，请重新解锁。'
-      : error.status === 400 ? '未能保存，规则未生效：' + error.message
-      : '未能保存，执行中的规则保持不变：' + error.message));
-    if (applied.length) {
-      await reloadPanel('/admin/copilot/accounts');
-      await refreshRoutingDiagnostic(true);
-    }
-  } finally { keysInFlight = false; }
+  renderRouteReview('save');
 }
-
-function resetRuleForm() {
-  document.getElementById('ruleModel').value = '';
-  document.getElementById('ruleModelCustom').value = '';
-  document.getElementById('ruleProvider').value = '';
-  routingDiagnostic = null;
-  renderOrderPreview();
-  renderRuleAccounts();
-  const node = feedback('routing');
-  if (node) node.hidden = true;
-}
-
 async function clearRouting(model) {
-  if (keysInFlight) return;
-  if (!panelReady('routing')) return;
-  if (!confirm('清除 ' + model + ' 的整条规则：provider 回到默认顺序，GHCP 账户回到不限定。'
-      + (/claude/i.test(model) ? '该模型将重新被 OpenAI 风格入口拒绝。' : '') + ' 确认继续？')) return;
-  keysInFlight = true;
-  say('routing', 'pending', '正在清除规则…');
+  if (keysInFlight || !panelReady('routing')) return;
+  if (model !== currentRuleModel()) await loadRuleIntoEditor(model);
+  if (model !== currentRuleModel() || !routeDiagnosticReady()) return;
+  renderRouteReview('reset');
+}
+function routeMatchesSnapshot(snapshot, review, baseline) {
+  const providers = review.type === 'reset' ? [] : review.payload.providers || baseline.providers || [];
+  return JSON.stringify(snapshot.providers || []) === JSON.stringify(providers)
+    && routeSameSet(snapshot.copilot_accounts || [], review.payload.copilot_accounts);
+}
+async function confirmRouteSave() {
+  const state = routeEditorState;
+  const review = state.review;
+  if (!review || keysInFlight || !panelReady('routing') || review.model !== state.model
+      || review.epoch !== panelEpoch || review.sequence !== state.requestSequence
+      || !routeDiagnosticReady() || (review.risk && !document.getElementById('routeRiskAck').checked)) return;
+  if (review.type !== 'reset' && !routeCanSave()) return;
+  const epoch = panelEpoch;
+  const baseline = routeCopy(state.baseline);
+  const model = review.model;
+  const path = '/admin/model-routing/' + encodeURIComponent(model);
+  keysInFlight = true; state.writeState = 'pending';
+  document.getElementById('confirmRouteSave').disabled = true;
+  renderRulePreview(false);
+  say('routing', 'pending', '正在提交 ' + model + '，随后读回实际状态…');
+  let acknowledged = false;
+  let writeError = null;
   try {
-    const result = await fetchJSON('/admin/model-routing/' + encodeURIComponent(model),
-      {method: 'DELETE'});
-    say('routing', 'success', model + ' 已回到默认顺序：'
-      + (result.effective_openai_order || []).map(providerLabel).join(' → ') + '，账户不限定。');
-    renderPolicyState(result.policy);
-    await reloadPanel('/admin/model-routing');
-    await refreshRoutingDiagnostic(true);
-  } catch (error) {
-    say('routing', 'error', error.status === 401 ? '会话无效，请重新解锁。'
-      : '未能清除，规则保持不变：' + error.message);
-  } finally { keysInFlight = false; }
+    try {
+      await fetchJSON(path, review.type === 'reset' ? {method: 'DELETE'}
+        : {method: 'PUT', headers: {'content-type': 'application/json'}, body: JSON.stringify(review.payload)});
+      acknowledged = true;
+    } catch (error) { writeError = error; }
+    if (!panelRequestCurrent(epoch) || state.model !== model) return;
+    if (writeError?.status === 401) { expirePanelSession(); return; }
+    // One management mutation only. A missing ACK or a sequential storage failure
+    // is reconciled with read-only requests, never an automatic write replay.
+    let actual = null;
+    try {
+      const value = await fetchJSON(path);
+      if (value.model !== model || !Array.isArray(value.accounts)) throw new Error('读回数据不匹配');
+      actual = value;
+    } catch (error) {
+      if (!panelRequestCurrent(epoch)) return;
+      if (error.status === 401) { expirePanelSession(); return; }
+    }
+    if (!panelRequestCurrent(epoch) || state.model !== model) return;
+    cancelRouteReview();
+    if (actual) {
+      const matches = routeMatchesSnapshot(actual, review, baseline);
+      state.baseline = routeCopy(actual);
+      state.diagnostic = routingDiagnostic = actual;
+      state.diagnosticState = 'ready';
+      state.draft = routeDraftFrom(actual); state.dirty = false;
+      state.writeState = matches ? 'confirmed' : 'partial';
+      say('routing', matches && !actual.copilot_candidates_empty ? 'success' : 'warn', (acknowledged ? '服务已确认写入；' : '写入响应未确认；')
+        + (writeError?.status ? '服务返回 HTTP ' + writeError.status + (writeError.code ? '（' + writeError.code + '）' : '') + '；' : '')
+        + (matches ? '读回已核对 ' + model + (review.type === 'reset' ? ' 的整条默认规则。' : ' 的实际配置。')
+          : '读回实际状态与拟提交不一致，可能部分写入。请检查当前配置后再操作。')
+        + (actual.copilot_candidates_empty ? ' GHCP 无配置候选；Foundry 可用性仍需独立检查。' : ''));
+      renderPolicyState(actual.policy);
+      renderRoutingForm(routingLast || {}); syncRouteFields(); renderRuleAccounts();
+    } else {
+      state.diagnosticState = 'error'; state.diagnostic = routingDiagnostic = null;
+      state.writeState = 'unknown';
+      say('routing', 'warn', (acknowledged ? '服务已确认写入，但读回失败；' : '写入与读回均未确认；')
+        + (writeError?.status ? '服务返回 HTTP ' + writeError.status + (writeError.code ? '（' + writeError.code + '）' : '') + '；' : '')
+        + '结果未知，需确认实际状态。未自动重试写入，请先重试读取。');
+      renderRuleAccounts();
+    }
+    // Refresh the catalogue independently; it cannot turn an unknown model
+    // readback into a success, nor erase a partially applied result.
+    try {
+      const payload = await fetchJSON('/admin/model-routing');
+      if (panelRequestCurrent(epoch) && state.model === model) renderRouting(payload);
+    } catch (error) {
+      if (panelRequestCurrent(epoch) && error.status === 401) expirePanelSession();
+    }
+  } finally {
+    keysInFlight = false;
+    if (panelRequestCurrent(epoch)) renderRulePreview(false);
+  }
 }
 
 // ---------- Panel password ----------
@@ -1951,10 +2219,12 @@ async function clearRouting(model) {
 // stating out loud: forgetting it is unrecoverable, and the way back in is an
 // LB API Key.
 async function changePanelPassword() {
-  if (keysInFlight) return;
   const current = document.getElementById('pwCurrent');
   const next = document.getElementById('pwNew');
   const repeat = document.getElementById('pwRepeat');
+  const clearFields = () => { current.value = ''; next.value = ''; repeat.value = ''; };
+  if (keysInFlight) { clearFields(); return; }
+  if (!panelReady('panel')) { clearFields(); return; }
   if (!next.value) { say('panel', 'error', '请输入新密码。'); return; }
   if (next.value !== repeat.value) {
     say('panel', 'error', '两次输入的新密码不一致。');
@@ -1967,10 +2237,10 @@ async function changePanelPassword() {
     say('panel', 'error', '新密码至少 12 个字符（是字符数，不是字节数）。');
     return;
   }
-  if (!panelReady('panel')) return;
+  const epoch = panelEpoch;
   if (!confirm('更改面板密码。其他会话会立即失效，你自己这条保留。\n\n'
       + '存储的是单向验证器，忘记无法恢复（回头路是用 LB API Key 解锁后重设）。\n'
-      + '多副本下只对当前副本立即生效，其余副本重启前仍认环境变量里的旧密码。\n\n确认继续？')) return;
+      + '多副本下只对当前副本立即生效，其余副本重启前仍认环境变量里的旧密码。\n\n确认继续？')) { clearFields(); return; }
   keysInFlight = true;
   say('panel', 'pending', '正在更改…');
   try {
@@ -1979,17 +2249,21 @@ async function changePanelPassword() {
     const result = await fetchJSON('/admin/panel-password',
       {method: 'PUT', headers: {'content-type': 'application/json'},
        body: JSON.stringify(body)});
+    if (!panelRequestCurrent(epoch)) return;
     say('panel', 'success', '密码已更改，其他会话已失效。当前来源：'
       + (result.password_source === 'store' ? '存储的覆盖值' : result.password_source)
       + '。请同步更新 Secret，否则其他副本重启后会回到旧密码。');
     await refreshPanelSession();
   } catch (error) {
+    if (!panelRequestCurrent(epoch)) return;
+    if (error.status === 401 && error.code !== 'invalid_panel_password') { expirePanelSession(); return; }
     say('panel', 'error',
-      error.status === 401 ? '当前密码不正确。'
+      error.status === 401 && error.code === 'invalid_panel_password' ? '当前密码不正确。'
       : error.status === 429 ? '尝试过于频繁，已临时锁定 —— 退避期内正确密码也会被拒，请稍后再试。'
       : error.status === 400 ? '未能更改：' + error.message
-      : error.status === 503 ? '未配置策略存储，无法在页面上改密码；请改环境变量。'
-      : '未能更改，原密码仍然有效：' + error.message);
+      : error.status === 503 && error.code === 'policy_store_unavailable' ? '未配置策略存储，无法在页面上改密码；请改环境变量。'
+      : error.status === 503 && error.code === 'policy_write_failed' ? '策略存储写入失败，未能确认密码更改结果，请重新读取密码来源后核对。'
+      : '未能确认更改结果，请重新读取密码来源后核对：' + error.message);
   } finally {
     // None of the three fields keeps its value past this one request.
     current.value = ''; next.value = ''; repeat.value = ''; keysInFlight = false;
@@ -1997,11 +2271,12 @@ async function changePanelPassword() {
 }
 
 async function clearPanelPassword() {
-  if (keysInFlight) return;
   const current = document.getElementById('pwClearCurrent');
-  if (!panelReady('panel')) return;
+  if (keysInFlight) { current.value = ''; return; }
+  if (!panelReady('panel')) { current.value = ''; return; }
+  const epoch = panelEpoch;
   if (!confirm('清除存储的面板密码，回落到环境变量 LB_DASHBOARD_PASSWORD。\n\n'
-      + '环境变量也没配时，面板登录将整体不可用（届时只能用 LB API Key 解锁）。\n\n确认继续？')) return;
+      + '环境变量也没配时，面板登录将整体不可用（届时只能用 LB API Key 解锁）。\n\n确认继续？')) { current.value = ''; return; }
   keysInFlight = true;
   say('panel', 'pending', '正在清除…');
   try {
@@ -2009,17 +2284,22 @@ async function clearPanelPassword() {
     const result = await fetchJSON('/admin/panel-password',
       {method: 'DELETE', headers: {'content-type': 'application/json'},
        body: JSON.stringify(body)});
+    if (!panelRequestCurrent(epoch)) return;
     say('panel', result.configured ? 'success' : 'warn',
       result.configured
         ? '已清除存储的密码，现在用环境变量里的那一份。'
         : '已清除存储的密码，且环境变量未配置 —— 面板密码登录现在不可用，只能用 LB API Key 解锁。');
     await refreshPanelSession();
   } catch (error) {
+    if (!panelRequestCurrent(epoch)) return;
+    if (error.status === 401 && error.code !== 'invalid_panel_password') { expirePanelSession(); return; }
     say('panel', 'error',
-      error.status === 401 ? '当前密码不正确。'
+      error.status === 401 && error.code === 'invalid_panel_password' ? '当前密码不正确。'
       : error.status === 429 ? '尝试过于频繁，已临时锁定，请稍后再试。'
       : error.status === 400 ? '未能清除：' + error.message
-      : '未能清除，存储的密码仍然生效：' + error.message);
+      : error.status === 503 && error.code === 'policy_store_unavailable' ? '未配置策略存储，无法在页面上清除密码覆盖值；请核对环境变量配置。'
+      : error.status === 503 && error.code === 'policy_write_failed' ? '策略存储写入失败，未能确认密码清除结果，请重新读取密码来源后核对。'
+      : '未能确认清除结果，请重新读取密码来源后核对：' + error.message);
   } finally { current.value = ''; keysInFlight = false; }
 }
 
@@ -2027,6 +2307,18 @@ async function clearPanelPassword() {
 // The entered credential travels with one request and is cleared in finally,
 // exactly like the LB API Key fields. Nothing here ever renders plaintext.
 let deviceHandle = null;
+
+function syncCredentialFields() {
+  const provider = document.getElementById('credProvider').value;
+  const needsBase = provider !== 'copilot';
+  const usesDeployments = provider === 'azure_openai';
+  document.getElementById('credApiBaseField').hidden = !needsBase;
+  document.getElementById('credDeploymentsField').hidden = !usesDeployments;
+  document.getElementById('credApiBase').required = needsBase;
+  document.getElementById('credApiBase').disabled = !needsBase;
+  document.getElementById('credDeployments').disabled = !usesDeployments;
+  document.getElementById('credentialDeviceFlow').hidden = provider !== 'copilot';
+}
 
 function renderCredentials(payload) {
   const store = payload.store || {};
@@ -2041,19 +2333,20 @@ function renderCredentials(payload) {
     const state = {ok: '可用', no_key: '缺密钥', sealed_with_other_key: '由另一把密钥封装'}[c.key_state] || c.key_state;
     const v = c.validation || {};
     const count = v.model_count != null ? '（' + escapeHtml(String(v.model_count)) + ' 个模型）' : '';
-    const verdict = v.ok === true ? '通过' + count
-      : v.ok === false ? '失败 ' + escapeHtml(String(v.reason || v.status || ''))
-      : '未校验';
-    return '<tr><td>' + escapeHtml(c.provider) + '</td><td>' + escapeHtml(c.account) + '</td>'
-      + '<td><code>' + escapeHtml(String(c.secret_fingerprint || '')) + '</code></td>'
-      + '<td>' + escapeHtml(state) + '</td>'
+    const verdict = v.ok === true ? '<span class="badge ok">通过' + count + '</span>'
+      : v.ok === false ? '<span class="badge open">失败</span><span class="ops-identity">' + escapeHtml(String(v.reason || v.status || '')) + '</span>'
+      : '<span class="badge">未校验</span>';
+    const labels = {databricks: 'ADB', copilot: 'GHCP', azure_openai: 'Foundry'};
+    return '<tr><td><strong>' + escapeHtml(c.account) + '</strong><span class="ops-identity">指纹 <code>'
+      + escapeHtml(String(c.secret_fingerprint || '')) + '</code></span></td><td>' + escapeHtml(labels[c.provider] || c.provider) + '</td>'
       + '<td>' + verdict + '</td>'
-      + '<td>' + (c.active ? '已生效' : '待重启生效') + '</td>'
+      + '<td><span class="badge ' + (c.active ? 'ok' : 'trial') + '">' + (c.active ? '已生效' : '待重启生效')
+      + '</span><span class="ops-identity">封装密钥：' + escapeHtml(state) + '</span></td>'
       + '<td><button class="btn" type="button" data-revalidate="' + escapeHtml(c.provider + '/' + c.account) + '">重新校验</button>'
       + ' <button class="btn btn-danger" type="button" data-delcred="' + escapeHtml(c.provider + '/' + c.account) + '">删除</button></td></tr>';
   }).join('');
   document.getElementById('credentialsContent').innerHTML = keyBox + warn + (rows
-    ? '<div class="table-wrap"><div class="table-scroll"><table id="credentialsTable"><thead><tr><th>Provider</th><th>账户</th><th>凭据指纹</th><th>密钥状态</th><th>校验</th><th>生效</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>'
+    ? '<div class="table-wrap"><div class="table-scroll"><table id="credentialsTable"><thead><tr><th>账户 / 凭据指纹</th><th>Provider</th><th>校验结果</th><th>加载状态</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div><div class="ops-caption">页面不显示凭据明文。新增或删除的运行效果需要滚动重启；校验结果是时点结果。</div></div>'
     : '<div class="info-box">尚未录入任何上游凭据。</div>');
   document.querySelectorAll('#credentialsTable [data-revalidate]').forEach(b => {
     b.addEventListener('click', () => credentialAction(b.dataset.revalidate, 'validate'));
@@ -2064,15 +2357,16 @@ function renderCredentials(payload) {
 }
 
 async function submitCredential() {
-  if (keysInFlight) return;
-  const status = feedback('credentials');
   const secretField = document.getElementById('credSecret');
+  if (keysInFlight) { secretField.value = ''; return; }
+  if (!panelReady('credentials')) { secretField.value = ''; return; }
+  const status = feedback('credentials');
   const provider = document.getElementById('credProvider').value;
   const account = document.getElementById('credAccount').value.trim();
   const secret = secretField.value;
-  const apiBase = document.getElementById('credApiBase').value.trim();
-  const deployments = document.getElementById('credDeployments').value.split(',')
-    .map(s => s.trim()).filter(Boolean);
+  const apiBase = provider !== 'copilot' ? document.getElementById('credApiBase').value.trim() : '';
+  const deployments = provider === 'azure_openai' ? document.getElementById('credDeployments').value.split(',')
+    .map(s => s.trim()).filter(Boolean) : [];
   status.hidden = false;
   if (!account || !secret) {
     status.dataset.state = 'error'; status.textContent = '请填写账户名与凭据。'; return;
@@ -2080,7 +2374,7 @@ async function submitCredential() {
   if (provider !== 'copilot' && !apiBase) {
     status.dataset.state = 'error'; status.textContent = 'ADB 与 Foundry 需要填 api_base。'; return;
   }
-  if (!panelReady('credentials')) { secretField.value = ''; return; }
+  const epoch = panelEpoch;
   if (!confirm('录入 ' + provider + ' / ' + account + '。凭据会先向上游校验，通过后封装入库；生效需一次滚动重启。确认继续？')) {
     secretField.value = ''; return;
   }
@@ -2093,14 +2387,17 @@ async function submitCredential() {
     await fetchJSON('/admin/credentials/' + encodeURIComponent(provider) + '/' + encodeURIComponent(account),
       {method: 'PUT', headers: {'content-type': 'application/json'},
        body: JSON.stringify({secret, meta})});
+    if (!panelRequestCurrent(epoch)) return;
     status.dataset.state = 'success';
     status.textContent = '已录入 ' + provider + '/' + account + '，校验通过。生效需一次滚动重启。';
     await reloadPanel('/admin/credentials');
   } catch (error) {
+    if (!panelRequestCurrent(epoch)) return;
+    if (error.status === 401) { expirePanelSession(); return; }
     status.dataset.state = 'error';
     status.textContent = error.status === 401 ? '会话无效，请重新解锁。'
       : error.status === 409 ? '该账户名已在配置里声明，请改名或移除配置项，避免静默遮蔽。'
-      : '未录入（上游未接受或存储失败）：' + error.message;
+      : '未能确认录入结果，请重新读取凭据列表后核对：' + error.message;
   } finally {
     // The credential must not linger in the DOM after one submission — this one
     // is a *upstream* secret and keeps the one-request contract regardless of
@@ -2113,6 +2410,7 @@ async function credentialAction(id, action) {
   if (keysInFlight) return;
   const status = feedback('credentials');
   if (!panelReady('credentials')) return;
+  const epoch = panelEpoch;
   const [provider, account] = id.split('/');
   if (action === 'delete' && !confirm('删除 ' + id + ' 的凭据。已生效的端点要到下次重启才消失。确认继续？')) return;
   keysInFlight = true;
@@ -2122,14 +2420,17 @@ async function credentialAction(id, action) {
     + (action === 'validate' ? '/validate' : '');
   try {
     const result = await fetchJSON(path, {method: action === 'delete' ? 'DELETE' : 'POST'});
+    if (!panelRequestCurrent(epoch)) return;
     status.dataset.state = 'success';
     status.textContent = action === 'delete'
       ? (id + ' 已删除，端点到下次重启才消失。')
       : (id + ' 校验' + (result.validation && result.validation.ok ? '通过' : '失败') + '。');
     await reloadPanel('/admin/credentials');
   } catch (error) {
+    if (!panelRequestCurrent(epoch)) return;
+    if (error.status === 401) { expirePanelSession(); return; }
     status.dataset.state = 'error';
-    status.textContent = error.status === 401 ? '会话无效，请重新解锁。' : '操作未生效，凭据保持不变：' + error.message;
+    status.textContent = '未能确认操作结果，请重新读取凭据列表后核对：' + error.message;
   } finally { keysInFlight = false; }
 }
 
@@ -2140,16 +2441,20 @@ async function startDeviceFlow() {
   if (!panelReady('credentials')) {
     status.textContent = '请先解锁本页。'; return;
   }
+  const epoch = panelEpoch;
   keysInFlight = true;
   status.dataset.state = 'pending'; status.textContent = '正在向 GitHub 申请验证码…';
   try {
     const result = await fetchJSON('/admin/credentials/copilot/device/start',
       {method: 'POST'});
+    if (!panelRequestCurrent(epoch)) return;
     deviceHandle = result.handle;
     status.dataset.state = 'success';
     status.textContent = '请在浏览器打开 ' + result.verification_uri + ' 并输入验证码 '
       + result.user_code + '（' + result.expires_in + ' 秒内有效），授权后点「我已授权，检查一次」。';
   } catch (error) {
+    if (!panelRequestCurrent(epoch)) return;
+    if (error.status === 401) { expirePanelSession(); return; }
     status.dataset.state = 'error';
     status.textContent = error.status === 401 ? '会话无效，请重新解锁。' : '未能启动：' + error.message;
   } finally { keysInFlight = false; }
@@ -2165,12 +2470,14 @@ async function pollDeviceFlow() {
   if (!panelReady('credentials')) {
     status.textContent = '请先解锁本页。'; return;
   }
+  const epoch = panelEpoch;
   keysInFlight = true;
   status.dataset.state = 'pending'; status.textContent = '正在检查授权状态…';
   try {
     const result = await fetchJSON('/admin/credentials/copilot/device/poll',
       {method: 'POST', headers: {'content-type': 'application/json'},
        body: JSON.stringify({handle: deviceHandle, account})});
+    if (!panelRequestCurrent(epoch)) return;
     if (result.pending) {
       status.dataset.state = 'pending';
       status.textContent = '尚未授权完成，请在浏览器完成后再检查（建议间隔 ' + (result.interval || 5) + ' 秒）。';
@@ -2181,6 +2488,8 @@ async function pollDeviceFlow() {
       await reloadPanel('/admin/credentials');
     }
   } catch (error) {
+    if (!panelRequestCurrent(epoch)) return;
+    if (error.status === 401) { expirePanelSession(); return; }
     status.dataset.state = 'error';
     if (error.status === 410) { deviceHandle = null; status.textContent = '授权窗口已过期，请重新开始。'; }
     else status.textContent = error.status === 401 ? '会话无效，请重新解锁。' : '未完成：' + error.message;
@@ -2495,16 +2804,45 @@ document.getElementById('keysAdminKey').addEventListener('keydown', event => {
   if (event.key === 'Enter') { event.preventDefault(); unlockPanels(true); }
 });
 document.getElementById('lockPanels').addEventListener('click', () => lockPanels());
+document.getElementById('retryLockPanels').addEventListener('click', () => lockPanels());
 document.getElementById('reloadKeys').addEventListener('click', reloadKeysFromSource);
 document.getElementById('saveRule').addEventListener('click', saveRule);
 document.getElementById('resetRuleForm').addEventListener('click', resetRuleForm);
-// The matrix and the preview both depend on which model is in the editor, so
-// changing it re-reads the diagnostic rather than leaving stale verdicts up.
+document.getElementById('restoreRoute').addEventListener('click', () => clearRouting(currentRuleModel()));
+document.getElementById('retryRoutingDiagnostic').addEventListener('click', () => {
+  if (!keysInFlight) refreshRoutingDiagnostic();
+});
+document.getElementById('routeManageAccounts').addEventListener('click', () => switchSubtab('accounts'));
+document.getElementById('closeRouteEditor').addEventListener('click', () => {
+  if (!guardRouteNavigation()) return;
+  routeEditorState.requestSequence++;
+  Object.assign(routeEditorState, {model: '', baseline: null, draft: null, diagnostic: null, diagnosticState: 'idle', dirty: false});
+  routingDiagnostic = null; cancelRouteReview();
+  document.getElementById('routeEditor').hidden = true;
+  document.getElementById('routeEditorEmpty').hidden = false;
+  renderRoutingList();
+});
+document.getElementById('addRule').addEventListener('click', () => {
+  if (!guardRouteNavigation()) return;
+  document.getElementById('routeAddPanel').hidden = false;
+  document.getElementById('ruleModelCustom').value = '';
+  document.getElementById('ruleModel').value = '';
+  document.getElementById('ruleModel').focus();
+});
+document.getElementById('startRule').addEventListener('click', () => {
+  const model = (document.getElementById('ruleModelCustom').value || document.getElementById('ruleModel').value || '').trim();
+  if (!model || model.length > 190) { say('routing', 'error', '请选择模型或输入 1–190 个字符的完整模型名称。'); return; }
+  loadRuleIntoEditor(model);
+});
+document.getElementById('cancelAddRule').addEventListener('click', () => { document.getElementById('routeAddPanel').hidden = true; });
+document.getElementById('routeSearch').addEventListener('input', renderRoutingList);
+document.querySelectorAll('[name="routeAccountScope"]').forEach(input => input.addEventListener('change', () => changeRouteAccountMode(input.value)));
 document.getElementById('ruleModel').addEventListener('change', () => {
   document.getElementById('ruleModelCustom').value = '';
-  refreshRoutingDiagnostic();
 });
-document.getElementById('ruleModelCustom').addEventListener('change', refreshRoutingDiagnostic);
+document.getElementById('ruleModelCustom').addEventListener('keydown', event => {
+  if (event.key === 'Enter') { event.preventDefault(); document.getElementById('startRule').click(); }
+});
 document.getElementById('ruleProvider').addEventListener('change', () => {
   renderOrderPreview(); renderRulePreview();
 });
@@ -2513,6 +2851,26 @@ document.getElementById('panelPasswordForm').addEventListener('submit', event =>
 });
 document.getElementById('clearPanelPassword').addEventListener('click', clearPanelPassword);
 document.getElementById('credentialForm').addEventListener('submit', event => { event.preventDefault(); submitCredential(); });
+document.getElementById('credProvider').addEventListener('change', () => {
+  document.getElementById('credSecret').value = '';
+  syncCredentialFields();
+});
+document.getElementById('addCredential').addEventListener('click', () => {
+  document.getElementById('credentialEntry').open = true;
+  syncCredentialFields();
+  document.getElementById('credProvider').focus();
+});
+syncCredentialFields();
+for (const [id, url, section] of [['refreshKeysPanel', '/admin/api-keys', 'clientkeys'],
+    ['refreshAccountsPanel', '/admin/copilot/accounts', 'accounts'],
+    ['refreshCredentialsPanel', '/admin/credentials', 'credentials']]) {
+  document.getElementById(id).addEventListener('click', () => {
+    if (!keysInFlight && panelReady(section)) reloadPanel(url);
+  });
+}
+document.getElementById('refreshPasswordPanel').addEventListener('click', () => {
+  if (!keysInFlight && panelReady('panel')) refreshPanelSession();
+});
 document.getElementById('deviceStart').addEventListener('click', startDeviceFlow);
 document.getElementById('devicePoll').addEventListener('click', pollDeviceFlow);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && !refreshPaused) refresh(true); });

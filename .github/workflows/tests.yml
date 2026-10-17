@@ -49,10 +49,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build image
         run: python3 -m operations.build_identity --build-tag lb-smoke
-      - name: Copilot pricing UI invariants
+      - name: Copilot pricing and Dashboard UI invariants
         run: |
           node tests/test_copilot_pricing_ui.cjs
           node tests/test_dashboard_ui.cjs
+          node tests/test_dashboard_routing_ui.cjs
+          node tests/test_dashboard_panels_ui.cjs
+          node tests/test_dashboard_session_ui.cjs
       - name: Import smoke — module & runtime assets present
         run: |
           docker run --rm --entrypoint sh lb-smoke -c '
@@ -88,6 +91,9 @@ jobs:
           assert "setInterval(refresh" in h, "dashboard bootstrap missing"
           # 主题切换与 Chart.js 主题同步是核心交互，缺了说明内容不完整
           assert "applyChartTheme" in h, "dashboard theme sync missing"
+          # 新工作台也必须来自本轮镜像，不能只验证旧 Dashboard 不是空壳。
+          for marker in ("routingLayout", "routeEditor", "ruleAccountMode", "routeReview"):
+              assert f"id=\"{marker}\"" in h, f"dashboard routing workbench missing: {marker}"
           assert len(h) > 20000, f"dashboard suspiciously small: {len(h)} chars"
           print(f"dashboard OK: {len(h)} chars")
           PY
