@@ -21,6 +21,7 @@ Author: Zeno Ren
 | 在页面上改面板密码、以及多副本边界 | [改面板密码](CONFIGURATION.md#changing-the-panel-password) |
 | 五层策略怎么叠加、谁做减法、在哪收口 | [策略层总览](CONFIGURATION.md#policy-layers-overview) |
 | 配「模型 → Provider → GHCP 账户」规则 | [路由规则](CONFIGURATION.md#routing-rules) |
+| **Claude 的三条路径（ADB / GHCP / Foundry）各自状态** | [三路径实测](reviews/2026-10-17-claude-three-paths/EVIDENCE.md)、[接入回执](reviews/2026-10-17-claude-three-paths/REPORT.md) |
 | **某账户为何不接某模型的流量** | [排除原因闭集](CONFIGURATION.md#exclusion-reasons)、[候选矩阵](CONFIGURATION.md#candidate-matrix) |
 | 账户开着却不接流量 | [已启用 vs 实际接流量](CONFIGURATION.md#enabled-versus-receiving-traffic) |
 | 按密钥限渠道、以及怎么重置回基线 | [渠道限制](CONFIGURATION.md#per-key-provider-allowlist) |

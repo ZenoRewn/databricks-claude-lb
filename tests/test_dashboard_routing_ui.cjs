@@ -15,6 +15,18 @@ function diagnostic(model, overrides = {}) {
   return {model, providers: [], effective_openai_order: ['copilot', 'azure_openai'],
     copilot_accounts: [], effective_copilot_accounts: ['acct-a', 'acct-b'],
     copilot_candidates_empty: false, opens_claude_on_openai_entry_points: false,
+    effective_messages_order: ['databricks', 'copilot', 'azure_anthropic'],
+    messages_paths: [
+      {provider: 'databricks', label: 'ADB', configured: true,
+       forwarded_model: 'databricks-claude-opus-5-5', endpoints_total: 9,
+       endpoints_serving_model: 9, reason: null},
+      {provider: 'copilot', label: 'GHCP', configured: true,
+       forwarded_model: 'claude-opus-5.5', endpoints_total: 5,
+       endpoints_serving_model: 0, reason: 'no_endpoint_permits_model'},
+      {provider: 'azure_anthropic', label: 'Foundry Claude', configured: false,
+       forwarded_model: 'claude-opus-5-5', endpoints_total: 0,
+       endpoints_serving_model: 0, reason: 'provider_not_configured'},
+    ],
     accounts: [account('acct-a'), account('acct-b'), account('acct-off', {
       enabled: false, serves_model: false, reason: 'account_disabled',
       serves_model_ignoring_selection: false, reason_ignoring_selection: 'account_disabled'}),
@@ -565,6 +577,48 @@ test('locking fences a pending diagnostic and clears model-specific identities',
   assert.equal(h.element('ruleModelCustom').value, '');
   assert.ok(!h.editorState()?.model);
   assert.ok(!h.editorState()?.diagnostic);
+});
+
+test('the Anthropic Messages surface lists all three paths, including blocked ones', async () => {
+  const h = harness();
+  await h.select('claude-opus-5.5');
+  const chain = h.element('ruleMessagesPaths').innerHTML;
+  // ADB used to appear nowhere at all, so an operator could not tell whether
+  // that was deliberate or an oversight. Absence was the bug.
+  for (const label of ['ADB', 'GHCP', 'Foundry Claude']) {
+    assert.ok(chain.includes(label), `the messages surface must name ${label}`);
+  }
+  assert.match(chain, /data-state="blocked"/,
+    'a provider that cannot serve the model must be marked, not hidden');
+});
+
+test('each messages path shows the model name that provider actually receives', async () => {
+  const h = harness();
+  await h.select('claude-opus-5.5');
+  const chain = h.element('ruleMessagesPaths').innerHTML;
+  // One model, three spellings. Configuring Foundry deployments with GHCP's
+  // dotted spelling returns 404 DeploymentNotFound, so this must be visible.
+  assert.ok(chain.includes('databricks-claude-opus-5-5'));
+  assert.ok(chain.includes('claude-opus-5.5'));
+  assert.ok(chain.includes('claude-opus-5-5'));
+});
+
+test('the messages note names which paths are unusable and why', async () => {
+  const h = harness();
+  await h.select('claude-opus-5.5');
+  const note = h.element('ruleMessagesNote').textContent;
+  assert.match(note, /2 条不可用/);
+  assert.match(note, /GHCP/);
+  assert.match(note, /Foundry Claude/);
+  assert.match(note, /没有端点允许本模型|未配置该渠道/);
+});
+
+test('the OpenAI-style order is labelled as that surface, not as the only one', async () => {
+  // The old copy said "只调整 GHCP / Foundry 顺序" with no mention of a second
+  // surface, which is what made the omission of ADB unreadable.
+  assert.match(html, /OpenAI 风格入口/);
+  assert.match(html, /Anthropic Messages 面/);
+  assert.match(html, /v1\/messages/);
 });
 
 async function run() {

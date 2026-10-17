@@ -392,7 +392,10 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
               <section class="route-detail rule-editor" id="routeEditor" aria-label="单模型规则编辑" hidden>
                 <div class="route-detail-heading"><div><h4 id="routeEditorModel"></h4><p class="scope-note" id="routeEditorState" role="status"></p></div><div class="rule-row"><button class="btn" id="retryRoutingDiagnostic" type="button">重读诊断</button><button class="btn" id="closeRouteEditor" type="button">关闭编辑</button></div></div>
                 <fieldset id="routeEditorFields" class="route-fields" disabled>
-                  <div class="rule-step"><h4>渠道优先序 <small>仅此模型</small></h4><label class="field" for="ruleProvider">优先序设置<select id="ruleProvider"><option value="">保持当前顺序</option></select></label><div class="order-chain" id="ruleOrderPreview"></div><p class="scope-note">只调整 GHCP / Foundry 顺序，不停用渠道；后续候选不代表失败后一定切换。</p></div>
+                  <div class="rule-step"><h4>渠道优先序 <small>仅此模型</small></h4><label class="field" for="ruleProvider">优先序设置<select id="ruleProvider"><option value="">保持当前顺序</option></select></label><div class="order-chain" id="ruleOrderPreview"></div><p class="scope-note">这一段排的是 <strong>OpenAI 风格入口</strong>（<code>/v1/responses</code>、<code>/v1/chat/completions</code>）的顺序：只调整 GHCP / Foundry，不停用渠道；后续候选不代表失败后一定切换。</p>
+                    <h4 style="margin-top:14px">Anthropic Messages 面 <small><code>/v1/messages</code></small></h4>
+                    <div class="order-chain" id="ruleMessagesPaths"></div>
+                    <p class="scope-note" id="ruleMessagesNote">三条路径都说 Anthropic Messages 协议，所以可以互为回落。服务不了本模型的渠道也会列出并说明原因 —— 看不见不等于配漏了。</p></div>
                   <div class="rule-step"><div class="routing-heading"><h4>GHCP 账户范围</h4><button class="btn route-link" id="routeManageAccounts" type="button">管理全局账户 ↗</button></div>
                     <input id="ruleAccountMode" type="hidden" value="all">
                     <label class="route-option"><input type="radio" name="routeAccountScope" value="all" checked>使用全部符合条件的账户</label>
@@ -1261,6 +1264,7 @@ function clearPanelContents() {
   document.getElementById('ruleAccounts').innerHTML = '';
   document.getElementById('ruleModel').innerHTML = '';
   document.getElementById('ruleOrderPreview').innerHTML = '';
+  const mp = document.getElementById('ruleMessagesPaths'); if (mp) mp.innerHTML = '';
   document.getElementById('rulePreview').textContent = '先选一个模型。';
   for (const id of ['panelPassword', 'keysAdminKey', 'pwCurrent', 'pwNew', 'pwRepeat',
     'pwClearCurrent', 'credSecret', 'credAccount', 'credApiBase', 'credDeployments',
@@ -1834,6 +1838,38 @@ function renderOrderPreview() {
     + escapeHtml(providerLabel(p)) + '</strong><small>'
     + (index ? '保留为后续候选' : '优先候选渠道') + '</small></span>').join('');
 }
+const MESSAGES_PATH_REASON_TEXT = {
+  provider_not_configured: ['未配置该渠道', '需在 config 增加该 provider 的 endpoints 并重启'],
+  no_endpoint_permits_model: ['没有端点允许本模型', 'ADB/Foundry 看 models/deployments，GHCP 看账户启用态与能力快照'],
+};
+function renderMessagesPaths() {
+  const host = document.getElementById('ruleMessagesPaths');
+  if (!host) return;
+  const paths = (routeEditorState.baseline || {}).messages_paths || [];
+  if (!paths.length) { host.innerHTML = '<span class="order-chip"><strong>—</strong><small>保存后可见</small></span>'; return; }
+  host.innerHTML = paths.map((path, index) => {
+    const reason = MESSAGES_PATH_REASON_TEXT[path.reason];
+    const serving = !path.reason;
+    const note = serving
+      ? (path.endpoints_serving_model + '/' + path.endpoints_total + ' 个端点可服务')
+      : escapeHtml(reason ? reason[0] : String(path.reason));
+    return (index ? '<span class="order-arrow" aria-hidden="true">→</span>' : '')
+      + '<span class="order-chip' + (serving && !index ? ' lead' : '') + '"'
+      + (serving ? '' : ' data-state="blocked"')
+      + ' title="' + escapeHtml(path.forwarded_model) + '"><strong>'
+      + escapeHtml(path.label) + (serving ? '' : ' ✕') + '</strong><small>'
+      + note + '</small><small style="opacity:.7">' + escapeHtml(path.forwarded_model) + '</small></span>';
+  }).join('');
+  const blocked = paths.filter(p => p.reason);
+  const note = document.getElementById('ruleMessagesNote');
+  if (note) {
+    note.textContent = blocked.length
+      ? '三条路径都说 Anthropic Messages，可互为回落。当前有 ' + blocked.length
+        + ' 条不可用：' + blocked.map(p => p.label + '（' + ((MESSAGES_PATH_REASON_TEXT[p.reason] || [p.reason])[0]) + '）').join('、')
+        + '。同一模型在三家有三种拼法，芯片下方即该渠道实际收到的模型名。'
+      : '三条路径都说 Anthropic Messages，可互为回落。芯片下方是该渠道实际收到的模型名 —— 同一模型在三家拼法不同。';
+  }
+}
 const REASON_TEXT = {
   account_disabled: ['运维已停用（全局）', '到 GHCP 账户页开启'],
   account_never_enabled: ['从未启用', '先发现能力，再到 GHCP 账户页启用'],
@@ -1938,7 +1974,7 @@ function renderRulePreview(sync = true) {
     ? (explicit ? 'Responses / Chat：显式渠道偏好将开放此 Claude 模型。恢复整条默认会撤销放行。'
       : 'Responses / Chat：未显式放行此 Claude 模型；仅改账户范围不会开放入口。')
     : '此规则调整 OpenAI 风格入口的渠道顺序与 GHCP 账户范围。';
-  renderOrderPreview();
+  renderOrderPreview(); renderMessagesPaths();
 }
 function changeRouteAccountMode(mode) {
   if (!routeEditorState.draft) return;
@@ -2047,7 +2083,7 @@ function renderRoutingForm(payload) {
     + (baseline ? '（' + escapeHtml((baseline.effective_openai_order || defaultOrder).map(providerLabel).join(' → ')) + '）' : '')
     + '</option>' + defaultOrder.map(p => '<option value="' + escapeHtml(p) + '">'
       + escapeHtml(providerLabel(p)) + ' 优先</option>').join('');
-  syncRouteFields(); renderOrderPreview();
+  syncRouteFields(); renderOrderPreview(); renderMessagesPaths();
 }
 function renderRoutingList() {
   if (!routingLast) return;
@@ -2844,7 +2880,7 @@ document.getElementById('ruleModelCustom').addEventListener('keydown', event => 
   if (event.key === 'Enter') { event.preventDefault(); document.getElementById('startRule').click(); }
 });
 document.getElementById('ruleProvider').addEventListener('change', () => {
-  renderOrderPreview(); renderRulePreview();
+  renderOrderPreview(); renderMessagesPaths(); renderRulePreview();
 });
 document.getElementById('panelPasswordForm').addEventListener('submit', event => {
   event.preventDefault(); changePanelPassword();
