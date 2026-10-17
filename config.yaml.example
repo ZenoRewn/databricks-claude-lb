@@ -129,6 +129,35 @@ endpoints:
 #
 # Short-lived Copilot session token 自动从 long-lived token 交换并内存缓存，过期前 60s 自动刷新。
 #
+# Microsoft Foundry 的 Anthropic 面（可选）—— Claude 的第三条路径。
+# 与下面 azure_openai 是**同一个 Foundry 资源的两个面**：这里说 Anthropic Messages
+# （`{api_base}/anthropic/v1/messages`），azure_openai 说 Azure OpenAI 形状。
+# 两者分开成独立 provider，因为协议、鉴权头、模型 id 与计费单位都不同。
+#
+# azure_anthropic:
+#   load_balancer:                  # 可选，不填则继承全局 load_balancer
+#     circuit_breaker_threshold: 5
+#     circuit_breaker_timeout: 60
+#   endpoints:
+#     - name: eastus2-foundry
+#       api_base: ${CLAUDE_EASTUS2_FOUNDRY_MODEL_ENDPOINT}   # 资源根，不带路径
+#       api_key: ${CLAUDE_EASTUS2_FOUNDRY_MODEL_KEY}
+#       # deployments = 该资源上**实际存在**的 deployment 名，充当按模型选端点的门控。
+#       # Foundry 没有 Models API（`GET /anthropic/v1/models` 实测 401），所以可用模型
+#       # 只能这样由运维声明；写了不存在的名字会在请求时拿到 404 DeploymentNotFound。
+#       deployments: [claude-opus-5-5, claude-opus-5, claude-sonnet-5-5, claude-haiku-5-5]
+#       weight: 1
+#       # auth_style 默认 x-api-key。**不要用 api-key** —— 官方文档列了它，但实测回 401。
+#       # auth_style: x-api-key
+#       # anthropic_version: "2023-06-01"
+#
+#   模型 id 注意：Foundry 用**短横**（claude-opus-5-5），GHCP 用**点号**
+#   （claude-opus-5.5），ADB 带前缀（databricks-claude-opus-5-5）。跨路径回落时由
+#   claude_model_identity 自动改写，但这里的 deployments 必须写 Foundry 的拼法。
+#
+#   计价：Foundry 按 Azure Marketplace 的 CCU 计量，既不是 Anthropic 公开 API 价也不是
+#   GHCP 分档价。网关据此把它的费用报为**未知**而不是套用错表（见 CLAUDE.md 不变量）。
+
 # github_copilot:
 #   load_balancer:                    # 可选，不填则继承全局 load_balancer
 #     strategy: least_requests

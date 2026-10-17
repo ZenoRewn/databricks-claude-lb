@@ -2171,11 +2171,21 @@ class WorkspaceEndpoint:
     upstream_html_events_total: int = field(default=0, repr=False)
     # Append new configuration fields to preserve legacy positional callers.
     models: list = field(default_factory=list)
+    # Which provider this endpoint belongs to, and how it wants to be
+    # authenticated. Both Databricks and Microsoft Foundry serve Anthropic
+    # Messages at `{api_base}/anthropic/v1/messages`; the difference is the
+    # header. Foundry rejects `api-key` with 401 despite its documentation
+    # listing it — verified 2026-10-17 — so `x-api-key` is the one to send.
+    provider: str = 'databricks'
+    auth_style: str = 'bearer'
+    anthropic_version: Optional[str] = None
 
     def __post_init__(self):
         if not isinstance(self.models, list) or not all(isinstance(m, str) and m.strip() for m in self.models):
             raise ValueError('Databricks models must be a list of nonempty native model names')
         self.models = [m.strip().lower() for m in self.models]
+        if self.auth_style not in ('bearer', 'x-api-key'):
+            raise ValueError('Anthropic Messages endpoints authenticate with bearer or x-api-key')
 
 
 @dataclass
@@ -3460,9 +3470,22 @@ class LoadBalancer:
 # ==================== Claude Proxy (使用原生 Anthropic 端点) ====================
 
 class ClaudeProxy:
-    def __init__(self, load_balancer: LoadBalancer, api_key: str):
+    """An Anthropic Messages upstream pool.
+
+    Serves `/v1/messages` against endpoints that speak the Anthropic Messages
+    protocol at `{api_base}/anthropic/v1/messages`. Databricks and Microsoft
+    Foundry both do (verified 2026-10-17), so one class serves both — they
+    differ only in the auth header and in whether the Databricks-specific
+    payload normalisation applies.
+    """
+
+    def __init__(self, load_balancer: LoadBalancer, api_key: str, provider: str = "databricks"):
         self.load_balancer = load_balancer
         self.api_key = api_key
+        # Which provider this pool represents. Drives the payload normalisation
+        # and the pricing口径; never inferred from the model name, because the
+        # same canonical model exists on several providers at different prices.
+        self.provider = provider
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10.0, read=None, write=60.0, pool=30.0),
             limits=httpx.Limits(
@@ -3534,9 +3557,24 @@ class ClaudeProxy:
         # (which can happen when auth.api_key is unset and only auth.api_keys is used).
         return bool(key) and key == self.api_key
 
-    async def proxy_request(self, body: dict, stream: bool = False, request_id: Optional[str] = None):
-        """代理请求到 Databricks 原生 Anthropic 端点。P1.4: request_id 沿路传到
-        _stream_request/_normal_request，让 SSE error 与结构化日志能关联 X-Request-Id。"""
+    def _normalize_for_databricks(self, body: dict) -> None:
+        """移除这些 Anthropic Messages 上游不接受的字段，原地修改 body。
+
+        这套规整是对着 Databricks 写的（它只接受顶层 system、不认
+        `context_management` / `tool_reference`、tools 里不认 `defer_loading`）。
+
+        **我原先假设 Foundry 作为 Anthropic 原生面不需要这些，实测推翻了：**
+        2026-10-17 用真凭据直连，带 `context_management` 的请求被 Foundry 回
+        `400 invalid_request_error: context_management: Extra inputs are not
+        permitted`。所以 Foundry 至少共享其中一项拒绝，不是 Databricks 的超集。
+
+        由此采取保守做法：两个 provider 都施加同一套规整（`_NORMALISING_MESSAGES_PROVIDERS`）。
+        规整只做删减、不增不改，对不拒绝该字段的上游最多是少发一个字段；而漏删会
+        换来一个 400。要按 provider 放宽某一项，先对那个上游实测该字段被接受。
+
+        规整仍然**按 provider 施加在各自的 body 副本上**，不是在入口统一做掉 ——
+        这样将来逐项放宽时不必重构，且一个 provider 的删减不会影响另一个的判断。
+        """
 
         # 转换模型名称
         if "model" in body:
@@ -3649,6 +3687,15 @@ class ClaudeProxy:
                     body["thinking"]["budget_tokens"] = budget
                     logger.info(f"Added missing budget_tokens: {budget}")
         
+
+    async def proxy_request(self, body: dict, stream: bool = False, request_id: Optional[str] = None):
+        """代理请求到 Databricks 原生 Anthropic 端点。P1.4: request_id 沿路传到
+        _stream_request/_normal_request，让 SSE error 与结构化日志能关联 X-Request-Id。"""
+        # Harnesses build this proxy via object.__new__ and set attributes by
+        # hand, so a new field must degrade rather than crash there.
+        if getattr(self, "provider", "databricks") in _NORMALISING_MESSAGES_PROVIDERS:
+            self._normalize_for_databricks(body)
+
         max_retries = 3
         last_error = None
         model = body.get("model", "unknown")
@@ -3673,10 +3720,7 @@ class ClaudeProxy:
             logger.info(f"[{body.get('model')}] -> {endpoint.name} (attempt {attempt + 1})")
 
             try:
-                headers = {
-                    "Authorization": f"Bearer {endpoint.token}",
-                    "Content-Type": "application/json",
-                }
+                headers = _messages_auth_headers(endpoint)
 
                 if stream:
                     return await self._stream_request(endpoint, url, body, headers, model=model, start_time=start_time, attempt_lease=attempt_lease, request_id=request_id)
@@ -3857,10 +3901,7 @@ class ClaudeProxy:
                             if new_endpoint:
                                 current_endpoint = new_endpoint
                                 current_url = f"{current_endpoint.api_base}/anthropic/v1/messages"
-                                current_headers = {
-                                    "Authorization": f"Bearer {current_endpoint.token}",
-                                    "Content-Type": "application/json",
-                                }
+                                current_headers = _messages_auth_headers(current_endpoint)
                                 rejection = await start_current_request(current_endpoint)
                                 if rejection is not None:
                                     yield rejection
@@ -3929,10 +3970,7 @@ class ClaudeProxy:
                         if new_endpoint:
                             current_endpoint = new_endpoint
                             current_url = f"{current_endpoint.api_base}/anthropic/v1/messages"
-                            current_headers = {
-                                "Authorization": f"Bearer {current_endpoint.token}",
-                                "Content-Type": "application/json",
-                            }
+                            current_headers = _messages_auth_headers(current_endpoint)
                             rejection = await start_current_request(current_endpoint)
                             if rejection is not None:
                                 yield rejection
@@ -7400,7 +7438,36 @@ def load_config(config_path: str = "config.yaml") -> tuple:
         circuit_breaker_threshold=lb_config.get("circuit_breaker_threshold", 5),
         circuit_breaker_timeout=lb_config.get("circuit_breaker_timeout", 60),
     )
-    claude_proxy = ClaudeProxy(load_balancer, api_key)
+    claude_proxy = ClaudeProxy(load_balancer, api_key, provider="databricks")
+
+    # Microsoft Foundry 的 Anthropic 面（可选）。与 azure_openai 是同一资源的两个
+    # 面：这里说 Anthropic Messages，路径同样是 {api_base}/anthropic/v1/messages，
+    # 所以复用 ClaudeProxy 全套机制（熔断、用量、流语义），只换鉴权头与模型 id。
+    # `deployments` 映射到 WorkspaceEndpoint.models，直接复用既有的按模型选端点 ——
+    # Foundry 没有 Models API，可用模型只能这样由运维声明。
+    foundry_config = config.get("azure_anthropic")
+    foundry_endpoints = []
+    for ep in (foundry_config or {}).get("endpoints", []):
+        foundry_endpoints.append(WorkspaceEndpoint(
+            name=ep["name"],
+            api_base=str(ep["api_base"]).rstrip("/"),
+            token=expand_env_vars(ep["api_key"]),
+            weight=ep.get("weight", 1),
+            models=ep.get("deployments", []),
+            provider="azure_anthropic",
+            auth_style=ep.get("auth_style", "x-api-key"),
+            anthropic_version=ep.get("anthropic_version", "2023-06-01"),
+        ))
+        logger.info("Loaded Foundry Anthropic endpoint: %s (deployments: %s)",
+                    ep["name"], ep.get("deployments", []))
+    if foundry_endpoints:
+        foundry_lb_config = (foundry_config or {}).get("load_balancer", lb_config)
+        claude_proxy.foundry = ClaudeProxy(LoadBalancer(
+            endpoints=foundry_endpoints,
+            strategy=foundry_lb_config.get("strategy", "least_requests"),
+            circuit_breaker_threshold=foundry_lb_config.get("circuit_breaker_threshold", 5),
+            circuit_breaker_timeout=foundry_lb_config.get("circuit_breaker_timeout", 60),
+        ), api_key, provider="azure_anthropic")
 
     # Azure OpenAI 端点（可选）
     azure_proxy = None
@@ -7805,9 +7872,12 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
     request.state.tenant = _lookup_tenant(actual_key) or "default"
     _CURRENT_TENANT.set(request.state.tenant)
     _note_tenant_request(request.state.tenant)
-    # 这个入口只由 Databricks 服务；不允许该渠道的 key 在此明确被拒。
+    # 这个入口由说 Anthropic Messages 的那几个 provider 服务（ADB / GHCP / Foundry）。
+    # 只有当这个 key 一个都不允许时才拒 —— 以前这里硬判 'databricks'，那会在只放行
+    # Foundry 的 key 上错误地拒掉一个本可服务的请求。
     allowed_providers = _allowed_providers(request.state.tenant)
-    if 'databricks' not in allowed_providers:
+    messages_pools = _messages_pools(allowed_providers)
+    if not messages_pools:
         _reject_provider(allowed_providers)
     set_parameter_policy(request.headers.get('x-lb-strict-parameters'), image_trim=request.headers.get('x-lb-image-trim'))
 
@@ -7855,7 +7925,8 @@ async def messages(request: Request, x_api_key: Optional[str] = Header(None, ali
     stream = body.get("stream", False)
     log_event({'kind': 'lb_request_received', 'request_id': request_id, 'body_size_bytes': body_size, 'stream': stream})
 
-    return await proxy.proxy_request(body, stream=stream, request_id=request_id)
+    return await _serve_messages_across_providers(
+        body, messages_pools, stream=stream, request_id=request_id)
 
 
 @app.post("/v1/messages/count_tokens")
@@ -7996,6 +8067,114 @@ def _openai_provider_order(model: str) -> tuple:
     order = [p for p in preferred if p in OPENAI_STYLE_PROVIDERS]
     order += [p for p in OPENAI_STYLE_PROVIDERS if p not in order]
     return tuple(order)
+
+
+def _messages_pools(allowed_providers=None) -> dict:
+    """Configured Anthropic Messages pools, filtered by the per-key allowlist.
+
+    Keyed by provider id so `_messages_provider_order` can rank them. A
+    provider that is configured but not allowed for this tenant is absent
+    rather than demoted — the allowlist is a filter, the order is a preference,
+    and conflating them would let a preference resurrect a blocked provider.
+    """
+    pools = {}
+    if proxy is not None:
+        pools['databricks'] = proxy
+        foundry = getattr(proxy, 'foundry', None)
+        if foundry is not None:
+            pools['azure_anthropic'] = foundry
+    if copilot_proxy is not None and getattr(copilot_proxy, 'messages_pool', None) is not None:
+        pools['copilot'] = copilot_proxy.messages_pool
+    if allowed_providers is None:
+        return pools
+    return {name: pool for name, pool in pools.items() if name in allowed_providers}
+
+
+# Providers whose upstream rejects the extra fields `_normalize_for_databricks`
+# strips. Both members are verified: Databricks by its documented schema,
+# Foundry by a live 400 on `context_management` (2026-10-17).
+_NORMALISING_MESSAGES_PROVIDERS = frozenset({'databricks', 'azure_anthropic'})
+
+
+def _messages_auth_headers(endpoint) -> dict:
+    """Auth + content headers for one Anthropic Messages endpoint.
+
+    Databricks takes a bearer token. Foundry takes `x-api-key`: it answers the
+    `api-key` header with 401 despite its own documentation listing it, which
+    is why the style is an explicit endpoint attribute and not inferred.
+    `anthropic-version` is sent only where configured — Databricks does not
+    require it and has never been sent one.
+    """
+    headers = {"Content-Type": "application/json"}
+    if getattr(endpoint, "auth_style", "bearer") == "x-api-key":
+        headers["x-api-key"] = endpoint.token
+    else:
+        headers["Authorization"] = f"Bearer {endpoint.token}"
+    version = getattr(endpoint, "anthropic_version", None)
+    if version:
+        headers["anthropic-version"] = version
+    return headers
+
+
+# Codes that mean «this provider has nothing that could serve the request»,
+# as opposed to «the upstream answered». Only the former justifies handing the
+# request to another provider.
+_PROVIDER_WIDE_UNAVAILABLE = frozenset({'lb_unavailable', 'unsupported_model', 'no_candidate'})
+
+
+def _messages_failover_allowed(exc: HTTPException) -> bool:
+    """May this failure be handed to the next Anthropic Messages provider?
+
+    Yes only when the provider could not serve the request **at all**: every
+    endpoint circuit-open, none configured, or none permitting the model. A
+    4xx the upstream derived from the request is an answer — the next provider
+    would reject it identically, so retrying turns one honest error into
+    three. A 5xx from a reached upstream leaves execution state unknown, which
+    is precisely what the no-replay invariant protects.
+
+    Failures after a streaming response is handed downstream are not visible
+    here at all: the generator owns the request by then. That is deliberate —
+    there is no safe way to switch provider once bytes may have been emitted.
+    """
+    if exc.status_code not in (404, 503):
+        return False
+    detail = exc.detail if isinstance(exc.detail, dict) else {}
+    error = detail.get('error') if isinstance(detail.get('error'), dict) else {}
+    return str(error.get('code') or '') in _PROVIDER_WIDE_UNAVAILABLE
+
+
+async def _serve_messages_across_providers(body: dict, pools: dict, *, stream: bool,
+                                           request_id: Optional[str]):
+    """Try each Anthropic Messages provider in order until one serves it.
+
+    The model is respelled for every hop (`claude_model_identity.rewrite`),
+    because the same model is named three ways and asking Foundry for GHCP's
+    spelling returns 404 `DeploymentNotFound`.
+
+    Each provider gets its **own copy** of the payload. The Databricks pool
+    strips fields its upstream cannot accept; handing that reduced body to a
+    provider that does accept them would silently drop what the caller sent.
+    """
+    requested = body.get('model')
+    order = [p for p in _messages_provider_order(requested) if p in pools]
+    if not order:
+        order = [p for p in pools]
+    last = None
+    for index, provider in enumerate(order):
+        attempt = dict(body)
+        attempt['model'] = claude_identity.rewrite(requested, provider) if requested else requested
+        try:
+            return await pools[provider].proxy_request(attempt, stream=stream, request_id=request_id)
+        except HTTPException as exc:
+            last = exc
+            if index + 1 >= len(order) or not _messages_failover_allowed(exc):
+                raise
+            log_event({'kind': 'lb_messages_provider_failover', 'from_provider': provider,
+                       'to_provider': order[index + 1], 'upstream_status': exc.status_code,
+                       'forwarded_model': attempt['model']})
+    raise last if last is not None else HTTPException(
+        status_code=503, detail={'error': {'code': 'lb_unavailable',
+                                           'message': 'No Anthropic Messages provider is configured.'}})
 
 
 def _messages_provider_order(model: str) -> tuple:
