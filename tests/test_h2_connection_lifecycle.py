@@ -38,6 +38,7 @@ unavailable for NEW streams and let in-flight streams drain, which is exactly
 what a GOAWAY would have done for us. Closing sockets outright would abort
 other users' live responses.
 """
+import types
 import unittest
 from unittest.mock import patch
 
@@ -45,6 +46,23 @@ import httpx
 
 import main
 import safe_diagnostics
+
+
+def referenced_names(function):
+    """Every name a function references, including inside comprehensions.
+
+    Python 3.11 compiles a comprehension into its own code object while 3.12+
+    inlines it (PEP 709), so a flat `co_names` check silently means different
+    things per interpreter — CI caught exactly that on 3.11 while 3.12 and 3.13
+    passed. Walking nested code objects makes the assertion a statement about
+    the library instead of about the Python version.
+    """
+    names, stack = set(), [function.__code__]
+    while stack:
+        code = stack.pop()
+        names.update(code.co_names)
+        stack.extend(const for const in code.co_consts if isinstance(const, types.CodeType))
+    return names
 
 
 # --- stand-ins shaped like httpcore's pool -----------------------------------
@@ -120,6 +138,22 @@ def client_with(*connections):
     return FakeClient(*[FakeWrapper(c) for c in connections])
 
 
+class NameCollectionTests(unittest.TestCase):
+    """The contract tests below are only as good as this helper."""
+
+    def test_names_inside_a_nested_code_object_are_found(self):
+        def probe(items):
+            # A generator expression keeps its own code object even on 3.12+,
+            # which is the same layout 3.11 gives a list comprehension — the
+            # exact shape that made a flat `co_names` check pass on 3.12/3.13
+            # and fail on 3.11.
+            return any(item.is_available() for item in items)
+
+        self.assertNotIn('is_available', probe.__code__.co_names,
+                         'if this ever becomes flat, the helper is still correct but this test is moot')
+        self.assertIn('is_available', referenced_names(probe))
+
+
 class PoolContractTests(unittest.TestCase):
     """Pin the httpcore/h2 internals the retirement depends on.
 
@@ -133,13 +167,13 @@ class PoolContractTests(unittest.TestCase):
 
     def test_h2_reuse_is_gated_on_used_all_stream_ids(self):
         from httpcore._async.http2 import AsyncHTTP2Connection
-        names = AsyncHTTP2Connection.is_available.__code__.co_names
+        names = referenced_names(AsyncHTTP2Connection.is_available)
         self.assertIn('_used_all_stream_ids', names,
                       'httpcore no longer gates reuse on this flag; retirement needs a new lever')
 
     def test_h2_connection_initialises_the_attributes_retirement_writes(self):
         from httpcore._async.http2 import AsyncHTTP2Connection
-        initialised = AsyncHTTP2Connection.__init__.__code__.co_names
+        initialised = referenced_names(AsyncHTTP2Connection.__init__)
         for attribute in ('_used_all_stream_ids', '_h2_state', '_expire_at'):
             with self.subTest(attribute=attribute):
                 self.assertIn(attribute, initialised)
@@ -150,7 +184,7 @@ class PoolContractTests(unittest.TestCase):
 
     def test_the_lazy_wrapper_still_holds_the_real_connection(self):
         from httpcore._async.connection import AsyncHTTPConnection
-        self.assertIn('_connection', AsyncHTTPConnection.__init__.__code__.co_names)
+        self.assertIn('_connection', referenced_names(AsyncHTTPConnection.__init__))
 
     def test_an_unavailable_connection_is_not_closed_by_the_pool(self):
         """The whole graceful-drain design rests on this.
@@ -161,7 +195,7 @@ class PoolContractTests(unittest.TestCase):
         connection would start aborting live streams.
         """
         from httpcore._async.connection_pool import AsyncConnectionPool
-        names = AsyncConnectionPool._assign_requests_to_connections.__code__.co_names
+        names = referenced_names(AsyncConnectionPool._assign_requests_to_connections)
         self.assertIn('is_closed', names)
         self.assertIn('has_expired', names)
         self.assertIn('is_available', names)
