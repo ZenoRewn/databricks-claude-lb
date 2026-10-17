@@ -2670,6 +2670,109 @@ def _replay_safe_transport_failure(exc):
             and details.get('http2_error_code') == 7)
 
 
+def _protocol_evidence_retires_connection(exc) -> bool:
+    """Does this failure prove the **connection** will refuse further streams?
+
+    Only a remote REFUSED_STREAM does. RFC 7540 §8.1.4 makes it a statement
+    about the connection — the stream closed before any processing — whereas
+    CANCEL, INTERNAL_ERROR and the rest describe one stream's fate and say
+    nothing about the next one. A locally initiated reset proves nothing about
+    the peer, and a GOAWAY already retires the connection inside httpcore.
+
+    This shares its evidence with `_replay_safe_transport_failure` today but
+    answers a different question: that one decides whether replaying is safe,
+    this one whether replaying on the *same connection* is pointless. On
+    2026-10-17 both were true and only the first was acted on, so three
+    requests each retried onto the connection that had just refused them
+    (streams 685→689, 695→699, 697→701) and doubled the circuit's error count.
+    """
+    details = transport_details(exc)
+    return (details['protocol_error_kind'] == 'http2_stream_reset'
+            and details.get('http2_error_code') == 7)
+
+
+def _h2_pooled_connections(client):
+    """Pooled HTTP/2 connection objects behind an httpx client.
+
+    Private httpx/httpcore attributes by necessity: there is no public API for
+    "stop giving this connection new streams", and the only public alternative —
+    rebuilding the client — aborts unrelated live streams. The shape is pinned
+    by `tests/test_h2_connection_lifecycle.py::PoolContractTests` so a library
+    upgrade fails there rather than silently disabling retirement here.
+
+    Duck-typed rather than isinstance: an h2 connection is one carrying both the
+    reuse gate and the h2 state machine. HTTP/1.1 connections and not-yet-
+    connected lazy wrappers simply do not match.
+    """
+    transport = getattr(client, '_transport', None)
+    pool = getattr(transport, '_pool', None) if transport is not None else None
+    connections = []
+    for wrapper in list(getattr(pool, '_connections', None) or []):
+        inner = getattr(wrapper, '_connection', None)
+        if inner is not None and hasattr(inner, '_used_all_stream_ids') and hasattr(inner, '_h2_state'):
+            connections.append(inner)
+    return connections
+
+
+def _h2_stream_id_watermark(client):
+    """Highest outbound stream id across pooled h2 connections, else None.
+
+    The signal that was missing on 2026-10-17: failures began at stream 683 on a
+    connection nobody was watching. Exposed as a gauge so «this connection is
+    approaching the server's ceiling» is visible before it starts refusing.
+    """
+    try:
+        values = [getattr(conn._h2_state, 'highest_outbound_stream_id', None)
+                  for conn in _h2_pooled_connections(client)]
+        values = [value for value in values if isinstance(value, int)]
+        return max(values) if values else None
+    except Exception:  # noqa: BLE001 - introspection is diagnostic, never load-bearing
+        return None
+
+
+def _retire_h2_connections(client, *, reason, min_stream_id=None):
+    """Stop assigning NEW streams to pooled h2 connections; in-flight ones drain.
+
+    Deliberately graceful. Setting httpcore's reuse gate makes `is_available()`
+    false, which only removes the connection from request assignment — httpcore
+    closes a connection when it is closed, expired, or a surplus idle one, never
+    merely because it is unavailable. So a live response finishes on the retired
+    connection while every new request opens a fresh one. That is precisely the
+    GOAWAY the server never sent; rebuilding the client would instead abort
+    those live responses.
+
+    `min_stream_id` retires only connections at or past that outbound stream id,
+    for proactive rotation before the server's own undocumented ceiling.
+    """
+    result = {'retired': 0, 'stream_id_watermark': None, 'reason': reason, 'error': None}
+    try:
+        connections = _h2_pooled_connections(client)
+    except Exception as exc:  # noqa: BLE001
+        result['error'] = type(exc).__name__
+        return result
+    watermarks = []
+    for conn in connections:
+        try:
+            watermark = getattr(conn._h2_state, 'highest_outbound_stream_id', None)
+            if isinstance(watermark, int):
+                watermarks.append(watermark)
+            if conn._used_all_stream_ids:
+                continue
+            if min_stream_id is not None and not (isinstance(watermark, int) and watermark >= min_stream_id):
+                continue
+            conn._used_all_stream_ids = True
+            result['retired'] += 1
+            # Nothing is streaming on an idle connection, so there is no reason
+            # to keep it until keepalive expiry only to never use it again.
+            if conn.is_idle():
+                conn._expire_at = time.monotonic()
+        except Exception as exc:  # noqa: BLE001
+            result['error'] = type(exc).__name__
+    if watermarks:
+        result['stream_id_watermark'] = max(watermarks)
+    return result
+
+
 def _graceful_shutdown_failure(exc):
     """RFC 7540 §6.8: GOAWAY with NO_ERROR is an orderly shutdown, not a fault.
 
@@ -4603,6 +4706,12 @@ class CopilotProxy:
     # 次重试 (20s) ≈ 40s 出错，比之前 60s + 60s ≈ 120s+ 的体感好非常多；线上需要
     # 恢复旧行为设 `COPILOT_POOL_ACQUIRE_TIMEOUT=60` 即可。
     POOL_ACQUIRE_TIMEOUT = float(os.getenv("COPILOT_POOL_ACQUIRE_TIMEOUT", "20"))
+    # Retire a pooled h2 connection once its outbound stream id reaches this,
+    # so we rotate before GitHub's undocumented ceiling refuses us. 2026-10-17:
+    # refusals began somewhere below stream 683 on a connection that had served
+    # ~340 streams; 400 leaves a wide margin and still rotates rarely. Set 0 to
+    # disable proactive rotation (reactive retirement on REFUSED_STREAM stays).
+    H2_RETIRE_STREAM_ID = int(os.getenv("COPILOT_H2_RETIRE_STREAM_ID", "400"))
     # 上游 TCP 探针缓存：PoolTimeout 时 await 一次 DNS+TCP 探针到 Copilot
     # 上游，用来把"本地池满"和"上游握手挂"区分开。缓存 5s 以避免密集失败时探针风暴。
     UPSTREAM_PROBE_CACHE_TTL = float(os.getenv("COPILOT_UPSTREAM_PROBE_CACHE_TTL", "5"))
@@ -4658,6 +4767,10 @@ class CopilotProxy:
         self._stream_overload_since: dict[str, float] = {}
         self.stream_disconnects_detected_total = 0
         self.stream_forced_releases_total = 0
+        # Why each pooled h2 connection was taken out of service, by reason.
+        # Keyed rather than a single counter so «the server refused us» and «we
+        # rotated before it could» stay distinguishable in the metric.
+        self.h2_connections_retired_total: dict[str, int] = {}
         # Streams that received upstream headers but produced no content within
         # COPILOT_STREAM_PREFIRST_CONTENT_WARN_SECONDS. Observation only: it makes
         # the ~120s upstream cancellation visible while still in progress instead
@@ -4819,6 +4932,58 @@ class CopilotProxy:
                    "threshold_seconds": threshold},
         )
         return 1
+
+    def _retire_h2_connection(self, reason: str, *, min_stream_id=None) -> int:
+        """Take pooled h2 connections out of service and record why.
+
+        Returns how many were retired, so callers can tell «we rotated» from
+        «there was nothing to rotate» instead of assuming.
+        """
+        counts = getattr(self, 'h2_connections_retired_total', None)
+        if counts is None:
+            # Several harnesses build this proxy via object.__new__ and set
+            # attributes by hand; a new counter must not become a crash there.
+            counts = self.h2_connections_retired_total = {}
+        result = _retire_h2_connections(self.client, reason=reason, min_stream_id=min_stream_id)
+        if result['error']:
+            logger.warning(
+                "[Copilot] h2 connection retirement could not inspect the pool (%s); "
+                "see tests/test_h2_connection_lifecycle.py::PoolContractTests",
+                result['error'],
+            )
+        if not result['retired']:
+            return 0
+        counts[reason] = counts.get(reason, 0) + 1
+        logger.warning(
+            "[Copilot] retired %d pooled HTTP/2 connection(s) (%s); in-flight streams drain, "
+            "new streams open a fresh connection",
+            result['retired'], reason,
+            extra={"kind": "copilot_h2_connection_retired",
+                   "retirement_reason": reason,
+                   "retired_connections": result['retired'],
+                   "h2_stream_id_watermark": result['stream_id_watermark']},
+        )
+        return result['retired']
+
+    def _rotate_h2_connections(self, *, stalled: int = 0) -> int:
+        """Periodic rotation: retire connections the evidence disqualifies.
+
+        Two independent triggers, both cheap and both graceful:
+
+        * a stream silent for the stall threshold after upstream headers. The
+          stream is left alone — upstream cancelled it at 120.0s anyway — but a
+          connection behaving like that should not receive new streams.
+        * an outbound stream id past `H2_RETIRE_STREAM_ID`. GitHub's own ceiling
+          is undocumented; production met it somewhere below 683. Rotating on
+          our own schedule means never discovering it the hard way.
+        """
+        retired = 0
+        if stalled:
+            retired += self._retire_h2_connection('prefirst_content_stall')
+        if self.H2_RETIRE_STREAM_ID:
+            retired += self._retire_h2_connection('stream_id_cap',
+                                                  min_stream_id=self.H2_RETIRE_STREAM_ID)
+        return retired
 
     def _unregister_stream(self, connection_id: Optional[str]):
         if connection_id:
@@ -5115,10 +5280,11 @@ class CopilotProxy:
                         self._stream_overload_since.pop("shared_pool", None)
 
                     stall_threshold = LB_SETTINGS.copilot_stream_prefirst_content_warn_seconds
+                    stalled_this_tick = 0
                     for connection_id, item in list(self._stream_connections.items()):
                         # Pure observation, evaluated regardless of pool pressure: a
                         # stream silent after headers is interesting on an idle pod too.
-                        self._note_prefirst_content_stall(connection_id, stall_threshold)
+                        stalled_this_tick += self._note_prefirst_content_stall(connection_id, stall_threshold)
                         overload_since = self._stream_overload_since.get("shared_pool")
                         if overload_since is None or now - overload_since < overload_grace:
                             item["disconnected_since"] = None
@@ -5153,6 +5319,12 @@ class CopilotProxy:
                         if task is not None and not task.done():
                             task.cancel()
                         await item["release"]()
+
+                    # Connection hygiene, once per tick rather than per stream:
+                    # a stalled stream and an ageing stream id are both reasons
+                    # to stop putting NEW streams on that connection. Graceful,
+                    # so anything still streaming on it is untouched.
+                    self._rotate_h2_connections(stalled=stalled_this_tick)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -6868,6 +7040,12 @@ class CopilotProxy:
                             "upstream_probe": probe_snapshot,
                         },
                     )
+                    # 先退休连接，再决定是否重试：REFUSED_STREAM 是**连接**层面的
+                    # 声明，在同一条连接上重试必然再被拒。2026-10-17 实测
+                    # 685→689 / 695→699 / 697→701 三对，就是这么来的。
+                    if _protocol_evidence_retires_connection(e):
+                        proxy_self._retire_h2_connection('refused_stream')
+
                     await end_current_request(success=False,
                                               is_client_error=_graceful_shutdown_failure(e),
                                               failure_scope=_copilot_failure_scope(exception=e))
@@ -8954,6 +9132,29 @@ async def metrics(schema: str = 'lb-metrics-v2'):
              "Times the pump task hit a full internal queue before put; useful for tuning maxsize.",
              "counter",
              [f"copilot_stream_pump_queue_full_events_total {copilot_proxy.stream_pump_queue_full_events_total}"])
+        # Connection lifecycle. 2026-10-17: one pooled h2 connection served ~340
+        # streams, then refused every new one for nine minutes while httpcore
+        # happily kept reusing it — GitHub sent no GOAWAY, so nothing in the
+        # stack had a reason to retire it. These two make that state legible:
+        # the watermark rises toward the ceiling, then retirements fire.
+        emit("copilot_h2_connections_retired_total",
+             "Pooled HTTP/2 connections taken out of service, by reason. "
+             "refused_stream = the server refused a new stream on it (RFC 7540 code 7); "
+             "prefirst_content_stall = it accepted a stream then went silent; "
+             "stream_id_cap = proactive rotation before the server's own ceiling. "
+             "Retirement is graceful: in-flight streams drain, new ones get a fresh connection.",
+             "counter",
+             [f'copilot_h2_connections_retired_total{{reason={json.dumps(reason, ensure_ascii=True)}}} {count}'
+              for reason, count in sorted(getattr(copilot_proxy, 'h2_connections_retired_total', {}).items())])
+        # No sample when there is no pooled h2 connection to measure: emitting 0
+        # would make "no connection" and "a brand new connection" the same point.
+        h2_watermark = _h2_stream_id_watermark(copilot_proxy.client)
+        emit("copilot_h2_stream_id_watermark",
+             "Highest outbound HTTP/2 stream id on any pooled Copilot connection. "
+             "Climbs by 2 per request on a reused connection; production met the "
+             "server's refusal ceiling below 683. Drops when a connection is retired.",
+             "gauge",
+             [] if h2_watermark is None else [f"copilot_h2_stream_id_watermark {h2_watermark}"])
         # HTTP/2 三态状态：requested / enabled / negotiated
         emit("copilot_http2_requested",
              "1 if COPILOT_HTTP2=true was set at startup",

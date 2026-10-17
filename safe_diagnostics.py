@@ -24,6 +24,10 @@ IDENTIFIERS.update(('protocol_error_kind', 'protocol_scope', 'circuit_scope', 'c
 # (`started_at_unix`, below). Dating events by request start is what forced four
 # retractions in the 2026-10-16 GHCP review.
 IDENTIFIERS.update(('event_time', 'startup_budget_source', 'inconclusive_kind', 'last_trial_outcome'))
+# Why a pooled HTTP/2 connection was taken out of service. A silent
+# REFUSED_STREAM leaves httpcore's reuse gate untouched, so without this the
+# 2026-10-17 cascade is indistinguishable from "upstream is flaky".
+IDENTIFIERS.add('retirement_reason')
 NUMBERS = set('schema_version upstream_status upstream_http_status http_status duration_seconds attempt admissions '
               'upstream_sends input_bytes body_size_bytes input_tokens output_tokens cache_read_tokens chunks '
               'chunks_yielded decoded_bytes decoded_deliveries frames pending_eof_bytes peak_pending_bytes '
@@ -37,6 +41,9 @@ NUMBERS.update(('http2_error_code', 'http2_stream_id', 'http2_last_stream_id', '
 NUMBERS.update(('event_monotonic', 'preference_window_remaining', 'contributing_requests',
                 'contributing_attempts', 'cooldown_elapsed_seconds', 'seconds_since_last_trial',
                 'last_trial_age_seconds', 'trial_in_flight_age_seconds', 'remaining_budget_seconds'))
+# How close a pooled h2 connection is to the server's undocumented stream
+# ceiling, and how many connections a retirement actually took out.
+NUMBERS.update(('h2_stream_id_watermark', 'retired_connections'))
 BOOLEANS = set('retry retry_allowed retryable retry_after_present downstream_headers_sent downstream_content_started '
                'downstream_body_completed draining_at_finish saw_completion terminal_seen terminal_valid has_image '
                'sent_any_chunk account_neutral read_timeout probe_ok httpx_pool_observed_full upstream_headers_received '

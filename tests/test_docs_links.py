@@ -150,13 +150,17 @@ class DocumentationLinkTests(unittest.TestCase):
         `docs/reviews/README.md` is what `docs/AKS.md` and `README.md` now name
         as the single place release history is maintained, so its coverage has
         to be enforced rather than remembered.
+
+        Scoped to tracked files, like the rest of this module: an untracked
+        receipt directory is work in progress, and demanding that the published
+        index cite it would be demanding that drafts be published.
         """
         index = ROOT / 'docs' / 'reviews' / 'README.md'
         body = index.read_text()
-        directories = sorted(p.name for p in index.parent.iterdir()
-                             if p.is_dir() and not p.name.startswith('.'))
-        self.assertGreater(len(directories), 20, 'receipt tree unexpectedly small')
-        unreferenced = [name for name in directories if name not in body]
+        tracked = {path.parts[2] for path in self.files
+                   if len(path.parts) > 3 and path.parts[:2] == ('docs', 'reviews')}
+        self.assertGreater(len(tracked), 20, 'receipt tree unexpectedly small')
+        unreferenced = sorted(name for name in tracked if name not in body)
         self.assertEqual(unreferenced, [],
                          'these receipts exist but the review index links none of them')
 
