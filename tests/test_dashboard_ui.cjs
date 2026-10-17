@@ -12,7 +12,9 @@ function clearElements(ids) { for (const id of ids) element(id).innerHTML = ''; 
 function element(id) {
   if (!elements.has(id)) elements.set(id, {textContent: '', innerHTML: '', value: '', hidden: false,
     dataset: {}, classList: {add() {}, remove() {}, toggle() {}}, setAttribute(k, v) {this[k] = v;},
-    removeAttribute(k) {delete this[k];}});
+    removeAttribute(k) {delete this[k];}, addEventListener() {}, focus() {}, scrollIntoView() {},
+    querySelector() {return null;}, querySelectorAll() {return [];},
+    get options() {return [...this.innerHTML.matchAll(/<option[^>]*value="([^"]*)"/g)].map(m => ({value: m[1]}));}});
   return elements.get(id);
 }
 const context = {document: {getElementById: element}, URL, AbortController, setTimeout, clearTimeout,
@@ -108,8 +110,8 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   assert.equal(element('endpointBody').innerHTML, 'last successful endpoints');
   // ---- API keys & provider allow-lists ----
   // The panel must never render a plaintext key, must refuse an empty
-  // allow-list, and must say the enforced policy is unchanged when a write
-  // fails. Rotation must state that the gateway does not issue keys.
+  // allow-list, and must report uncertainty when a write is not acknowledged.
+  // Rotation must state that the gateway does not issue keys.
   let nodes = [];
   const noop = () => {};
   context.document.querySelectorAll = selector =>
@@ -159,8 +161,11 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   assert.match(element('keysContent').innerHTML, /abcd…wxyz/);
   assert.match(element('keysContent').innerHTML, /deadbeefcafe/);
   assert.match(element('keysPolicyState').innerHTML, /已加载/);
-  assert.match(element('keysContent').innerHTML, /data-reset="team-a"/,
-    'a restricted tenant needs a way back to the config baseline');
+  assert.match(element('keysContent').innerHTML, /data-edit-key="team-a"/,
+    'a restricted tenant needs an explicit edit action');
+  context.openKeyDetail('team-a');
+  assert.match(element('keyDetail').innerHTML, /data-reset="team-a"/,
+    'the detail keeps the path back to the config baseline');
 
   // Per-layer counts: "did my rule persist?" is the first question when a
   // change appears not to take effect.
@@ -273,17 +278,16 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   assert.match(element('ruleModel').innerHTML, /gpt-4o/, 'the model dropdown is populated on unlock');
   // The matrix is per model, so with none chosen it says so rather than showing
   // verdicts that belong to no model.
-  assert.match(element('ruleAccounts').innerHTML, /先在第 1 步选一个模型/,
+  assert.doesNotMatch(element('ruleAccounts').innerHTML, /data-rule-account|data-global-enable/,
     'the matrix must not render verdicts before a model is chosen');
-  element('ruleModel').value = 'gpt-4o';
-  await context.refreshRoutingDiagnostic();
+  await context.loadRuleIntoEditor('gpt-4o');
   assert.match(element('ruleAccounts').innerHTML, /acct-a/, 'the matrix lists every account');
   assert.match(element('ruleAccounts').innerHTML, /acct-b/);
   assert.match(element('panelSessionBar').textContent, /已解锁/, 'the session bar shows the state');
   assert.match(element('panelSessionBar').textContent, /分钟/, 'and how long is left');
 
   // A write afterwards carries no credential at all.
-  nodes = [{selector: '#keysTable [data-tenant="team-a"]', checked: true, dataset: {provider: 'copilot'}}];
+  nodes = [{selector: '#keyDetail [data-tenant]', checked: true, dataset: {tenant: 'team-a', provider: 'copilot'}}];
   requests = [];
   context.fetch = panelFetch({'/admin/api-keys/team-a/providers': {ok: true, status: 200,
     json: async () => ({tenant: 'team-a', providers: ['copilot'],
@@ -326,23 +330,27 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   context.fetch = panelFetch({'/admin/api-keys/team-a/providers': {ok: false, status: 503,
     json: async () => ({detail: {error: {code: 'policy_write_failed'}}})}});
   await context.resetTenantProviders('team-a');
-  assert.match(element('clientkeysFeedback').textContent, /原有限制仍然生效/,
-    'a failed reset must not claim the tenant is now unrestricted');
+  assert.match(element('clientkeysFeedback').textContent, /未能确认.*结果/,
+    'a failed reset must report that the enforced policy needs verification');
+  assert.doesNotMatch(element('clientkeysFeedback').textContent, /原有限制仍然生效|已回到配置基线/,
+    'a failed reset must not guess the enforced policy');
 
-  nodes = [{selector: '#keysTable [data-tenant="team-a"]', checked: true, dataset: {provider: 'copilot'}}];
+  nodes = [{selector: '#keyDetail [data-tenant]', checked: true, dataset: {tenant: 'team-a', provider: 'copilot'}}];
   requests = [];
   context.fetch = panelFetch({'/admin/api-keys/team-a/providers': {ok: false, status: 503,
     json: async () => ({detail: {error: {code: 'policy_write_failed'}}})}});
   await context.saveTenantProviders('team-a');
-  assert.match(element('clientkeysFeedback').textContent, /执行中的策略保持不变/,
-    'a failed write must not claim the policy changed');
+  assert.match(element('clientkeysFeedback').textContent, /未能确认.*结果/,
+    'a failed write must not guess whether a lost acknowledgement changed policy');
+  assert.doesNotMatch(element('clientkeysFeedback').textContent, /执行中的策略保持不变/,
+    'a transport failure is not proof that the prior policy remains enforced');
 
-  nodes = [{selector: '#keysTable [data-tenant="team-a"]', checked: false, dataset: {provider: 'copilot'}}];
+  nodes = [{selector: '#keyDetail [data-tenant]', checked: false, dataset: {tenant: 'team-a', provider: 'copilot'}}];
   requests = [];
   await context.saveTenantProviders('team-a');
   assert.equal(requests.length, 0, 'an empty allow-list must not reach the server');
   assert.match(element('clientkeysFeedback').textContent, /至少要允许一个渠道/);
-  assert.match(element('clientkeysFeedback').textContent, /重置/, 'it must point at the control that does work');
+  assert.match(element('clientkeysFeedback').textContent, /恢复配置渠道|重置/, 'it must point at the control that does work');
 
   // Rotating the source may invalidate the key behind the session, so the
   // panel locks rather than keeping something that may no longer work.
@@ -359,7 +367,7 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   assert.ok(requests.some(r => r.url === '/admin/session' && (r.options.method || '') === 'DELETE'),
     'locking must invalidate the session server-side, not just locally');
 
-  nodes = [{selector: '#keysTable [data-tenant="team-a"]', checked: true, dataset: {provider: 'copilot'}}];
+  nodes = [{selector: '#keyDetail [data-tenant]', checked: true, dataset: {tenant: 'team-a', provider: 'copilot'}}];
   requests = [];
   await context.saveTenantProviders('team-a');
   assert.equal(requests.filter(r => r.url !== '/admin/session').length, 0,
@@ -419,7 +427,7 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   await context.unlockPanels(false);
   assert.match(element('panelLockFeedback').textContent, /密码不正确/);
   requests = [];
-  nodes = [{selector: '#keysTable [data-tenant="team-a"]', checked: true, dataset: {provider: 'copilot'}}];
+  nodes = [{selector: '#keyDetail [data-tenant]', checked: true, dataset: {tenant: 'team-a', provider: 'copilot'}}];
   await context.saveTenantProviders('team-a');
   assert.equal(requests.filter(r => r.url !== '/admin/session').length, 0,
     'a rejected login must not leave the panel usable');
@@ -578,17 +586,18 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   // ---- what the client-key page can and cannot do ----
   // The honest answer to "where is the reveal button" is that there is none,
   // and why. Saying so is the fix; adding a button that cannot work is not.
-  assert.match(html, /这一页做不到/, 'the page must say what it cannot do, not only what it holds');
-  assert.match(html, /显示明文/, 'and name revealing plaintext as one of those things');
+  assert.match(html, /不提供明文查看或密钥重置/, 'the page must state the unsupported key operations');
+  assert.match(html, /不提供明文查看/, 'plaintext revealing remains explicitly unavailable');
   assert.match(html, /不生成也不存储/, 'and that the gateway does not issue keys');
-  assert.match(html, /怎么轮换一把客户端密钥/, 'rotation must be explained, not just refused');
+  assert.match(html, /源头轮换与重读/, 'rotation must be explained, not just refused');
   assert.match(html, /sha256 前缀/, 'the fingerprint column must say what it is');
 
   // ---- panel password ----
   assert.match(html, /id="panelPasswordForm"/, 'changing the password needs a form');
   assert.match(html, /单向验证器/, 'storing a verifier rather than the password must be stated');
   assert.match(html, /忘记即不可恢复/, 'the irreversibility must be stated before use');
-  assert.match(html, /只在启动时加载/, 'the multi-replica caveat must be on screen');
+  assert.match(html, /其他副本.*旧密码|只在启动时加载/,
+    'the multi-replica caveat must explain that another replica may still accept the old password');
   assert.match(html, /是字符数，不是字节数|字符<\/strong>而不是字节/,
     'the characters-not-bytes trap must be stated');
 
@@ -701,14 +710,17 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
                 allowed_models: ['gpt-4o']}]});
   assert.match(element('accountsContent').innerHTML, /biz/);
   assert.match(element('accountsContent').innerHTML, /已启用/);
-  assert.match(element('accountsContent').innerHTML, /kimi-k3/);
+  context.openAccountDetail('biz');
+  assert.match(element('accountDetail').innerHTML, /kimi-k3/);
   assert.doesNotMatch(element('accountsContent').innerHTML, /ghu_|Bearer/, 'no token material');
 
   context.renderAccounts({policy: {state: 'loaded', backend: 'json', tenants: 0},
     accounts: [{account: '<img onerror=bad>', enabled: false, token_source: null, requests: 0,
                 capability: [], capability_at: null, allowed_models: null}]});
   assert.doesNotMatch(element('accountsContent').innerHTML, /<img onerror/, 'account names escaped');
-  assert.match(element('accountsContent').innerHTML, /尚未发现能力/);
+  context.openAccountDetail('<img onerror=bad>');
+  assert.doesNotMatch(element('accountDetail').innerHTML, /<img onerror/, 'detail account names escaped');
+  assert.match(element('accountDetail').innerHTML, /尚未发现能力|没有已发现模型/);
   assert.match(element('accountsContent').innerHTML, /已停用/);
 
   // An account shipped inert reads differently from one an operator switched
@@ -717,10 +729,11 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
     accounts: [{account: 'fresh', enabled: false, enabled_in_config: false,
                 enablement_source: 'config', token_source: 'file', requests: 0,
                 configured_models: [], capability: [], capability_at: null, allowed_models: null}]});
-  let inert = element('accountsContent').innerHTML;
+  context.openAccountDetail('fresh');
+  let inert = element('accountsContent').innerHTML + element('accountDetail').innerHTML;
   assert.match(inert, /配置声明不投入服务/, 'an inert account must not read as operator-disabled');
   assert.doesNotMatch(inert, /已停用/);
-  assert.match(inert, /启用前先「刷新能力」/, 'enabling it blind would make it a candidate for everything');
+  assert.match(inert, /启用前(?:请)?先「刷新能力」/, 'enabling it blind would make it a candidate for everything');
   assert.match(inert, /data-needs-capability="1"/, 'the guard must be reachable from the control');
 
   // Once capability is known the warning goes away; discovery alone must not
@@ -730,14 +743,15 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
                 enablement_source: 'config', token_source: 'file', requests: 0,
                 configured_models: [], capability: ['gpt-4o'], capability_at: 1700000000,
                 allowed_models: null}]});
-  inert = element('accountsContent').innerHTML;
+  context.openAccountDetail('fresh');
+  inert = element('accountsContent').innerHTML + element('accountDetail').innerHTML;
   assert.match(inert, /配置声明不投入服务/, 'discovery is not an enablement');
   assert.doesNotMatch(inert, /data-needs-capability/, 'capability is known now');
-  assert.doesNotMatch(inert, /启用前先「刷新能力」/);
+  assert.doesNotMatch(inert, /启用前(?:请)?先「刷新能力」/);
 
   // Unchecking every model must not reach the server — disabling is a separate control.
-  nodes = [{selector: '#accountsTable [data-enable="biz"]', checked: true, dataset: {}},
-           {selector: '#accountsTable [data-account="biz"]', checked: false, dataset: {model: 'gpt-4o'}}];
+  nodes = [{selector: '#accountDetail [data-enable]', checked: true, dataset: {enable: 'biz'}},
+           {selector: '#accountDetail [data-account]', checked: false, dataset: {account: 'biz', model: 'gpt-4o'}}];
   requests = [];
   await context.saveAccount('biz');
   assert.equal(requests.length, 0, 'an all-unchecked save must be refused locally');
@@ -745,16 +759,18 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
 
   // Enabling an inert account with no capability must not reach the server:
   // it would be a wildcard candidate for every model until discovery runs.
-  nodes = [{selector: '#accountsTable [data-enable="fresh"]', checked: true,
-            dataset: {needsCapability: '1'}}];
+  nodes = [{selector: '#accountDetail [data-enable]', checked: true,
+            dataset: {enable: 'fresh', needsCapability: '1'}},
+           {selector: '#accountDetail [data-account-mode]', checked: true, dataset: {accountMode: 'all'}}];
   requests = [];
   await context.saveAccount('fresh');
   assert.equal(requests.length, 0, 'enabling without capability must be refused locally');
   assert.match(element('accountsFeedback').textContent, /先点「刷新能力」/);
 
   // Disabling that same account is always allowed — the guard is about enabling.
-  nodes = [{selector: '#accountsTable [data-enable="fresh"]', checked: false,
-            dataset: {needsCapability: '1'}}];
+  nodes = [{selector: '#accountDetail [data-enable]', checked: false,
+            dataset: {enable: 'fresh', needsCapability: '1'}},
+           {selector: '#accountDetail [data-account-mode]', checked: true, dataset: {accountMode: 'all'}}];
   requests = [];
   context.fetch = panelFetch({'/admin/copilot/accounts/fresh': {ok: true, status: 200,
     json: async () => ({account: {account: 'fresh', enabled: false, enabled_in_config: false,
@@ -780,396 +796,35 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   context.fetch = panelFetch({'/admin/copilot/accounts/biz/discover': {ok: false, status: 503,
     json: async () => ({detail: {error: {code: 'policy_write_failed'}}})}});
   await context.discoverAccount('biz');
-  assert.match(element('accountsFeedback').textContent, /已有快照保持不变/,
-    'a failed discovery must not claim the snapshot changed');
+  assert.match(element('accountsFeedback').textContent, /未能确认能力发现结果/,
+    'a failed discovery must report that the persisted snapshot needs verification');
+  assert.doesNotMatch(element('accountsFeedback').textContent, /已有快照保持不变/,
+    'a missing acknowledgement cannot prove the persisted snapshot stayed unchanged');
 
-  // ---- routing rules: model → provider → GHCP account ----
-  assert.match(html, /id="routingContent"/, 'routing area needs a container');
-  assert.match(html, /只重排，不筛除/, 'reorder-not-filter must be stated for the provider segment');
-  // Stronger than the prose: both providers are rendered and the trailing one is
-  // labelled as kept, so the control itself shows that nothing was filtered.
-  assert.match(html, /fallback · 保留/, 'the kept provider must be visible, not just described');
-  assert.match(html, /id="ruleOrderPreview"/, 'the resulting order needs somewhere to render');
-  assert.match(html, /仍然只走 ADB/, 'the /v1/messages limit must be stated');
-  assert.match(html, /没有列出的模型维持原本的规则/, 'the baseline for unlisted models must be stated');
-  assert.match(html, /id="ruleModel"/, 'the model segment must be a control, not free text only');
-  assert.match(html, /id="ruleProvider"/, 'the provider segment must be a control');
-  assert.match(html, /id="ruleAccounts"/, 'the account segment needs a container');
-  // ADB does not belong in the dropdown: the preference only reorders the
-  // OpenAI-style entry points, so offering it would be an inert choice.
-  const providerSelect = html.slice(html.indexOf('id="ruleProvider"'),
-                                   html.indexOf('</select>', html.indexOf('id="ruleProvider"')));
-  assert.doesNotMatch(providerSelect, /databricks/, 'a preference cannot reorder ADB');
-  assert.match(providerSelect, /copilot/);
-  assert.match(providerSelect, /azure_openai/);
-
-  context.renderRouting({policy: {state: 'loaded', backend: 'mysql', tenants: 0},
-    default_openai_order: ['copilot', 'azure_openai'], known_models: ['gpt-5.4'],
-    copilot_accounts_available: [{account: 'acct-a', enabled: true}],
-    preferences: [{model: 'gpt-5.4', providers: ['azure_openai'],
-                   effective_openai_order: ['azure_openai', 'copilot'],
-                   copilot_accounts: [], effective_copilot_accounts: ['acct-a'],
-                   copilot_candidates_empty: false,
-                   opens_claude_on_openai_entry_points: false},
-                  {model: 'claude-opus-5.5', providers: ['copilot'],
-                   effective_openai_order: ['copilot', 'azure_openai'],
-                   copilot_accounts: ['acct-a'], effective_copilot_accounts: ['acct-a'],
-                   copilot_candidates_empty: false,
-                   opens_claude_on_openai_entry_points: true}]});
-  assert.match(element('routingContent').innerHTML, /azure_openai → copilot/,
-    'the effective order must be shown, not just the stored one');
-  assert.match(element('routingContent').innerHTML, /已在 OpenAI 风格入口放行/,
-    'a claude model opened by preference must be flagged');
-  const gptRow = element('routingContent').innerHTML.split('<tr>').find(r => r.includes('gpt-5.4'));
-  assert.doesNotMatch(gptRow, /已在 OpenAI 风格入口放行/, 'a non-claude model must not be flagged');
-  assert.match(gptRow, /不限定/, 'no account limit must read as "not limited", not as empty');
-  // A rule used to be clearable but not editable, so changing one meant filling
-  // the whole form in again.
-  assert.match(gptRow, /data-edit-route="gpt-5\.4"/, 'an existing rule must be editable in place');
-
-  // An emptied candidate set is the one outcome an operator will not expect.
-  context.renderRouting({policy: {state: 'loaded', backend: 'mysql', tenants: 0},
-    default_openai_order: ['copilot', 'azure_openai'], known_models: [],
-    copilot_accounts_available: [],
-    preferences: [{model: 'gpt-5.4', providers: [], effective_openai_order: ['copilot', 'azure_openai'],
-                   copilot_accounts: ['acct-z'], effective_copilot_accounts: [],
-                   copilot_candidates_empty: true,
-                   opens_claude_on_openai_entry_points: false}]});
-  assert.match(element('routingContent').innerHTML, /GHCP 无候选/,
-    'an emptied candidate set must be called out in the listing');
-
-  context.renderRouting({policy: {state: 'loaded', backend: 'json', tenants: 0},
-    default_openai_order: ['copilot', 'azure_openai'], known_models: ['<img onerror=bad>'],
-    copilot_accounts_available: [{account: '<img onerror=bad>', enabled: true}],
-    preferences: [{model: '<img onerror=bad>', providers: ['copilot'], effective_openai_order: [],
-                   copilot_accounts: ['<img onerror=bad>'], effective_copilot_accounts: []}]});
-  assert.doesNotMatch(element('routingContent').innerHTML, /<img onerror/, 'model names escaped');
-  assert.doesNotMatch(element('ruleModel').innerHTML, /<img onerror/, 'dropdown options escaped');
-
-  // `routingDiagnostic` is a module-level `let`, which is not reachable from the
-  // test context, so the diagnostic is always driven through the stub — closer
-  // to the real path anyway.
-  const setDiagnostic = async (model, accounts) => {
-    element('ruleModel').value = '';
-    element('ruleModelCustom').value = model;
-    context.fetch = panelFetch({['/admin/model-routing/' + model]: {ok: true, status: 200,
-      json: async () => ({model, effective_openai_order: ['copilot', 'azure_openai'],
-        copilot_accounts: accounts.filter(a => a.selected).map(a => a.account),
-        effective_copilot_accounts: accounts.filter(a => a.serves_model).map(a => a.account),
-        copilot_candidates_empty: !accounts.some(a => a.serves_model),
-        accounts, policy: {state: 'loaded'}})}});
-    await context.refreshRoutingDiagnostic();
-  };
-
-  // ---- the candidate matrix ----
-  // Two layers side by side: account enablement is global, the per-model
-  // selection is not. The headers have to say which is which, because the
-  // whole risk of merging them into one table is a global change that looks
-  // local. Each row also names the layer that dropped it — GCP's Policy
-  // Troubleshooter pattern — so "why is this account idle" is answered here
-  // rather than by comparing two screens.
-  context.renderRouting({policy: {state: 'loaded', backend: 'json', tenants: 0},
-    default_openai_order: ['copilot', 'azure_openai'], preferences: [],
-    known_models: ['gpt-4o'], copilot_accounts_available: [{account: 'acct-a', enabled: true},
-                                                           {account: 'acct-b', enabled: true},
-                                                           {account: 'acct-c', enabled: false}]});
-  assert.match(element('routingContent').innerHTML, /全部模型按默认顺序/);
-  await setDiagnostic('gpt-4o', [
-    {account: 'acct-a', enabled: true, selected: true, serves_model: true, reason: null,
-     serves_model_ignoring_selection: true, reason_ignoring_selection: null, capability_known: true},
-    {account: 'acct-b', enabled: true, selected: false, serves_model: false,
-     reason: 'not_selected_for_model', serves_model_ignoring_selection: true,
-     reason_ignoring_selection: null, capability_known: true},
-    {account: 'acct-c', enabled: false, selected: false, serves_model: false,
-     reason: 'account_never_enabled', serves_model_ignoring_selection: false,
-     reason_ignoring_selection: 'account_never_enabled', capability_known: false}]);
-  let matrix = element('ruleAccounts').innerHTML;
-  assert.match(matrix, /acct-a/); assert.match(matrix, /acct-b/); assert.match(matrix, /acct-c/);
-  assert.match(matrix, /一个都不勾 = 不限定/,
-    'the empty-selection semantics must be on screen, not just in the API');
-  assert.match(matrix, /账户启用<span class="scope-tag global">对所有模型<\/span>/,
-    'the global column must be labelled global');
-  assert.match(matrix, /本模型选中<span class="scope-tag local">仅 gpt-4o<\/span>/,
-    'the per-model column must name the model it applies to');
-  assert.match(matrix, /两张不同的表/, 'the two columns write different tables and must say so');
-  // Each verdict names its layer and points at the control that fixes it.
-  assert.match(matrix, /本模型没选它/, 'the model-side exclusion must be named');
-  assert.match(matrix, /从未启用/, 'never-enabled must not read as operator-disabled');
-  assert.match(matrix, /尚未发现能力/, 'a wildcard account must be flagged before enabling');
-  assert.match(matrix, /接流量/, 'a serving account must be marked as such');
-
-  // Ticking an account that cannot serve this model is futile, and saying so
-  // beforehand beats discovering it after the save.
-  await setDiagnostic('gpt-4o', [
-    {account: 'acct-a', enabled: true, selected: false, serves_model: false,
-     reason: 'not_in_capability', serves_model_ignoring_selection: false,
-     reason_ignoring_selection: 'not_in_capability', capability_known: true}]);
-  assert.match(element('ruleAccounts').innerHTML, /勾了也不会服务该模型/,
-    'a checkbox that cannot help must say so');
-  assert.match(element('ruleAccounts').innerHTML, /上游没有这个模型/);
-
-  // ---- the resulting provider order ----
-  // Both providers always rendered, the trailing one labelled as kept: that is
-  // "reorders, never filters" expressed by the control instead of the prose.
-  element('ruleProvider').value = '';
-  context.renderOrderPreview();
-  assert.match(element('ruleOrderPreview').innerHTML, /copilot/);
-  assert.match(element('ruleOrderPreview').innerHTML, /azure_openai/);
-  element('ruleProvider').value = 'azure_openai';
-  context.renderOrderPreview();
-  let chain = element('ruleOrderPreview').innerHTML;
-  assert.ok(chain.indexOf('azure_openai') < chain.indexOf('copilot'),
-    'the chosen provider must lead');
-  assert.match(chain, /fallback · 保留/, 'the other provider stays a candidate and must look like it');
-  assert.match(chain, /没被提前的那个仍在候选里/);
-
-  // ---- the effective set, before saving ----
-  // The server said which accounts could serve this model; the page only
-  // intersects that with the checkboxes. No policy logic is duplicated.
-  await setDiagnostic('gpt-4o', [
-    {account: 'acct-a', enabled: true, selected: true, serves_model: true, reason: null,
-     serves_model_ignoring_selection: true, reason_ignoring_selection: null, capability_known: true},
-    {account: 'acct-b', enabled: true, selected: false, serves_model: false,
-     reason: 'not_selected_for_model', serves_model_ignoring_selection: true,
-     reason_ignoring_selection: null, capability_known: true}]);
-  nodes = [{selector: '#ruleMatrix [data-rule-account]', checked: true, dataset: {ruleAccount: 'acct-a'}},
-           {selector: '#ruleMatrix [data-global-enable]', checked: true, dataset: {globalEnable: 'acct-a'}}];
-  context.renderRulePreview();
-  assert.match(element('rulePreview').textContent, /生效候选：acct-a/,
-    'the effective set must be shown before the write, not after it');
-
-  // An empty effective set is a warning *before* saving. It used to be
-  // reported only in the response, i.e. after the rule was already live.
-  nodes = [{selector: '#ruleMatrix [data-rule-account]', checked: true, dataset: {ruleAccount: 'acct-z'}},
-           {selector: '#ruleMatrix [data-global-enable]', checked: true, dataset: {globalEnable: 'acct-a'}}];
-  context.renderRulePreview();
-  assert.match(element('rulePreview').textContent, /没有任何候选/,
-    'an emptied set must be visible before the save');
-  assert.equal(element('rulePreview').dataset.state, 'warn');
-
-  // A pending global change is called out as global in the preview.
-  nodes = [{selector: '#ruleMatrix [data-rule-account]', checked: false, dataset: {ruleAccount: 'acct-a'}},
-           {selector: '#ruleMatrix [data-global-enable]', checked: false, dataset: {globalEnable: 'acct-a'}}];
-  context.renderRulePreview();
-  assert.match(element('rulePreview').textContent, /影响所有模型/,
-    'a queued global change must be labelled before it is written');
-
-  // Enabling an account whose only known blocker was enablement: the server
-  // stopped evaluating there, so whether capability also excludes it is
-  // genuinely unknown. The preview must say so rather than promise a candidate.
-  await setDiagnostic('gpt-4o', [
-    {account: 'acct-off', enabled: false, selected: true, serves_model: false,
-     reason: 'account_disabled', serves_model_ignoring_selection: false,
-     reason_ignoring_selection: 'account_disabled', capability_known: true}]);
-  nodes = [{selector: '#ruleMatrix [data-rule-account]', checked: true,
-            dataset: {ruleAccount: 'acct-off'}},
-           {selector: '#ruleMatrix [data-global-enable]', checked: true,
-            dataset: {globalEnable: 'acct-off'}}];
-  context.renderRulePreview();
-  assert.match(element('rulePreview').textContent, /以保存后的结果为准/,
-    'an optimistic preview must be labelled as approximate, not asserted');
-
-  // No model named at all must not reach the server.
-  element('ruleModel').value = '';
-  element('ruleModelCustom').value = '';
-  nodes = [];
-  requests = [];
-  await context.saveRule();
-  assert.equal(requests.length, 0, 'a rule with no model must be refused locally');
-  assert.match(element('routingFeedback').textContent, /手输模型名/);
-
-  // Accounts alone, with no provider change, is a legitimate rule.
-  element('ruleProvider').value = '';
-  await setDiagnostic('gpt-4o', [
-    {account: 'acct-a', enabled: true, selected: false, serves_model: true, reason: null,
-     serves_model_ignoring_selection: true, reason_ignoring_selection: null, capability_known: true}]);
-  nodes = [{selector: '#ruleMatrix [data-rule-account]', checked: true, dataset: {ruleAccount: 'acct-a'}},
-           {selector: '#ruleMatrix [data-global-enable]', checked: true, dataset: {globalEnable: 'acct-a'}}];
-  requests = [];
-  context.fetch = panelFetch({'/admin/model-routing/gpt-4o': {ok: true, status: 200,
-    json: async () => ({model: 'gpt-4o', providers: [],
-      effective_openai_order: ['copilot', 'azure_openai'],
-      copilot_accounts: ['acct-a'], effective_copilot_accounts: ['acct-a'],
-      copilot_candidates_empty: false, policy: {state: 'loaded'}})}});
-  await context.saveRule();
-  const ruleWrite = requests.find(r => r.url === '/admin/model-routing/gpt-4o'
-                                       && (r.options.method || '') === 'PUT');
-  assert.ok(ruleWrite, 'the rule must be written');
-  let body = JSON.parse(ruleWrite.options.body);
-  assert.deepEqual(body.copilot_accounts, ['acct-a']);
-  assert.equal(body.providers, undefined, 'an unchanged provider segment must not be sent');
-  assert.ok(!requests.some(r => r.url.startsWith('/admin/copilot/accounts/')),
-    'no global write when no global toggle moved');
-  assert.match(element('routingFeedback').textContent, /生效候选/);
-
-  // Unchecking everything must still be sent — that is how a limit is undone.
-  nodes = [{selector: '#ruleMatrix [data-rule-account]', checked: false, dataset: {ruleAccount: 'acct-a'}},
-           {selector: '#ruleMatrix [data-global-enable]', checked: true, dataset: {globalEnable: 'acct-a'}}];
-  requests = [];
-  await context.saveRule();
-  body = JSON.parse(requests.find(r => (r.options.method || '') === 'PUT').options.body);
-  assert.deepEqual(body.copilot_accounts, [],
-    'an empty selection must be sent explicitly, or clearing a limit is impossible');
-
-  // ---- two endpoints, two writes, no pretence of atomicity ----
-  // The global toggle goes first; the confirmation separates the scopes.
-  await setDiagnostic('gpt-4o', [
-    {account: 'acct-b', enabled: false, selected: false, serves_model: false,
-     reason: 'account_disabled', serves_model_ignoring_selection: false,
-     reason_ignoring_selection: 'account_disabled', capability_known: true}]);
-  nodes = [{selector: '#ruleMatrix [data-rule-account]', checked: true, dataset: {ruleAccount: 'acct-b'}},
-           {selector: '#ruleMatrix [data-global-enable]', checked: true, dataset: {globalEnable: 'acct-b'}}];
-  let confirmText = '';
-  context.confirm = text => { confirmText = text; return true; };
-  requests = [];
-  context.fetch = panelFetch({
-    '/admin/copilot/accounts/acct-b': {ok: true, status: 200,
-      json: async () => ({account: {account: 'acct-b', enabled: true, capability: ['gpt-4o']},
-                          policy: {state: 'loaded'}})},
-    '/admin/model-routing/gpt-4o': {ok: true, status: 200,
-      json: async () => ({model: 'gpt-4o', providers: [],
-        effective_openai_order: ['copilot', 'azure_openai'], copilot_accounts: ['acct-b'],
-        effective_copilot_accounts: ['acct-b'], copilot_candidates_empty: false,
-        policy: {state: 'loaded'}})}});
-  await context.saveRule();
-  assert.match(confirmText, /全局 · 影响所有模型/, 'the global half must be labelled in the confirmation');
-  assert.match(confirmText, /仅 gpt-4o/, 'and the local half scoped to the model');
-  assert.match(confirmText, /两步写入，不是一个事务/,
-    'two endpoints cannot be atomic and the dialog must not imply otherwise');
-  const order = requests.filter(r => (r.options.method || '') === 'PUT').map(r => r.url);
-  assert.deepEqual(order, ['/admin/copilot/accounts/acct-b', '/admin/model-routing/gpt-4o'],
-    'the global write goes first');
-  assert.match(element('routingFeedback').textContent, /全局已写入/);
-
-  // First step succeeds, second fails: say exactly that rather than "failed".
-  await setDiagnostic('gpt-4o', [
-    {account: 'acct-b', enabled: false, selected: false, serves_model: false,
-     reason: 'account_disabled', serves_model_ignoring_selection: false,
-     reason_ignoring_selection: 'account_disabled', capability_known: true}]);
-  requests = [];
-  context.fetch = panelFetch({
-    '/admin/copilot/accounts/acct-b': {ok: true, status: 200,
-      json: async () => ({account: {account: 'acct-b', enabled: true, capability: ['gpt-4o']},
-                          policy: {state: 'loaded'}})},
-    '/admin/model-routing/gpt-4o': {ok: false, status: 503,
-      json: async () => ({detail: {error: {code: 'policy_write_failed'}}})}});
-  await context.saveRule();
-  assert.match(element('routingFeedback').textContent, /账户启用态已生效/,
-    'a half-applied save must report which half landed');
-  assert.match(element('routingFeedback').textContent, /模型规则未写入/);
-
-  // First step fails: the second must not run at all.
-  await setDiagnostic('gpt-4o', [
-    {account: 'acct-b', enabled: false, selected: false, serves_model: false,
-     reason: 'account_disabled', serves_model_ignoring_selection: false,
-     reason_ignoring_selection: 'account_disabled', capability_known: true}]);
-  requests = [];
-  context.fetch = panelFetch({
-    '/admin/copilot/accounts/acct-b': {ok: false, status: 503,
-      json: async () => ({detail: {error: {code: 'policy_write_failed'}}})}});
-  await context.saveRule();
-  assert.ok(!requests.some(r => r.url === '/admin/model-routing/gpt-4o'
-                                && (r.options.method || '') === 'PUT'),
-    'a failed global write must stop the model write');
-  context.confirm = () => true;
-
-  // The free-text field wins, so a model missing from the catalogue is reachable.
-  element('ruleModel').value = '';
-  element('ruleModelCustom').value = 'gpt-7-unreleased';
-  element('ruleProvider').value = 'copilot';
-  nodes = [];
-  requests = [];
-  context.fetch = panelFetch({'/admin/model-routing/gpt-7-unreleased': {ok: true, status: 200,
-    json: async () => ({model: 'gpt-7-unreleased', providers: ['copilot'],
-      effective_openai_order: ['copilot', 'azure_openai'], copilot_accounts: [],
-      effective_copilot_accounts: ['acct-a'], copilot_candidates_empty: false,
-      policy: {state: 'loaded'}})}});
-  await context.saveRule();
-  assert.ok(requests.some(r => r.url === '/admin/model-routing/gpt-7-unreleased'),
-    'the free-text model name must take precedence over the dropdown');
-  assert.deepEqual(JSON.parse(requests.find(r => (r.options.method || '') === 'PUT')
-                              .options.body).providers, ['copilot']);
-
-  // A rule that empties the candidate set is applied but must be called out.
-  element('ruleModelCustom').value = 'gpt-5.4';
-  nodes = [];
-  requests = [];
-  context.fetch = panelFetch({'/admin/model-routing/gpt-5.4': {ok: true, status: 200,
-    json: async () => ({model: 'gpt-5.4', providers: ['copilot'],
-      effective_openai_order: ['copilot', 'azure_openai'], copilot_accounts: ['acct-b'],
-      effective_copilot_accounts: [], copilot_candidates_empty: true,
-      policy: {state: 'loaded'}})}});
-  await context.saveRule();
-  assert.match(element('routingFeedback').textContent, /没有任何候选账户/,
-    'an emptied candidate set must be reported even though the write succeeded');
-  assert.match(element('routingFeedback').textContent, /Foundry/, 'it must say where traffic goes instead');
-  assert.equal(element('routingFeedback').dataset.state, 'warn',
-    'applied-but-probably-unintended is a warning, not a success');
-
-  // A claude model pointed at GHCP changes both admission and pricing.
-  element('ruleModelCustom').value = 'claude-opus-5.5';
-  element('ruleProvider').value = 'copilot';
-  nodes = [];
-  context.confirm = text => { confirmText = text; return true; };
-  requests = [];
-  context.fetch = panelFetch({'/admin/model-routing/claude-opus-5.5': {ok: true, status: 200,
-    json: async () => ({model: 'claude-opus-5.5', providers: ['copilot'],
-      effective_openai_order: ['copilot', 'azure_openai'], copilot_accounts: [],
-      effective_copilot_accounts: ['acct-a'], copilot_candidates_empty: false,
-      opens_claude_on_openai_entry_points: true, policy: {state: 'loaded'}})}});
-  await context.saveRule();
-  assert.match(confirmText, /放行/, 'opening claude must be confirmed explicitly');
-  assert.match(confirmText, /GHCP 分档价/, 'the pricing change must be in the confirmation');
-  assert.match(element('routingFeedback').textContent, /已在 OpenAI 风格入口放行/);
-  context.confirm = () => true;
-
-  // A rejected account name must read as "nothing was applied".
-  element('ruleModelCustom').value = 'gpt-4o';
-  nodes = [{selector: '#ruleMatrix [data-rule-account]', checked: true, dataset: {ruleAccount: 'typo'}}];
-  requests = [];
-  context.fetch = panelFetch({'/admin/model-routing/gpt-4o': {ok: false, status: 400,
-    json: async () => ({detail: {error: {code: 'unknown_copilot_account',
-      message: 'Not configured Copilot endpoints: typo'}}})}});
-  await context.saveRule();
-  assert.match(element('routingFeedback').textContent, /规则未生效/,
-    'a rejected rule must not look partially applied');
-
-  requests = [];
-  context.fetch = panelFetch({'/admin/model-routing/claude-opus-5.5': {ok: false, status: 503,
-    json: async () => ({detail: {error: {code: 'policy_write_failed'}}})}});
-  await context.clearRouting('claude-opus-5.5');
-  assert.equal(requests[0].options.method, 'DELETE');
-  assert.match(element('routingFeedback').textContent, /规则保持不变/,
-    'a failed clear must not claim the rule changed');
-
-  requests = [];
-  context.confirm = text => { confirmText = text; return true; };
-  context.fetch = panelFetch({'/admin/model-routing/gpt-4o': {ok: true, status: 200,
-    json: async () => ({model: 'gpt-4o', providers: [],
-      effective_openai_order: ['copilot', 'azure_openai'], copilot_accounts: [],
-      effective_copilot_accounts: ['acct-a'], copilot_candidates_empty: false,
-      policy: {state: 'loaded'}})}});
-  await context.clearRouting('gpt-4o');
-  assert.match(confirmText, /整条规则/, 'clearing removes both segments and must say so');
-  assert.match(element('routingFeedback').textContent, /账户不限定/);
-  context.confirm = () => true;
-
-  // Clearing the form drops the stale diagnostic with it, so no verdicts are
-  // left on screen describing a model that is no longer selected.
-  await setDiagnostic('gpt-4o', [
-    {account: 'acct-a', enabled: true, selected: true, serves_model: true, reason: null,
-     serves_model_ignoring_selection: true, reason_ignoring_selection: null, capability_known: true}]);
-  assert.match(element('ruleAccounts').innerHTML, /acct-a/);
-  context.resetRuleForm();
-  assert.equal(element('ruleModelCustom').value, '');
-  assert.match(element('ruleAccounts').innerHTML, /先在第 1 步选一个模型/,
-    'clearing the form drops the stale verdicts with it');
+  // ---- routing surface: preserve the shared-panel safety boundary ----
+  // Stateful routing regressions live in test_dashboard_routing_ui.cjs. They
+  // replace the former route/global two-write tests with the stricter contract:
+  // routing cannot edit global enablement, and uncertain model writes require
+  // readback instead of claiming that the old policy stayed unchanged.
+  for (const id of ['routingContent', 'ruleModel', 'ruleProvider', 'ruleAccounts',
+                    'ruleAccountMode', 'routeReview']) {
+    assert.match(html, new RegExp('id="' + id + '"'), id + ' must exist');
+  }
+  assert.match(html, /配置候选/, 'configuration eligibility must be named precisely');
+  assert.match(html, /时点判断|时点发现/, 'the candidate evidence is point-in-time');
+  assert.match(html, /不代表实时流量/, 'eligibility must not masquerade as live traffic');
+  assert.match(html, /仍只走 ADB|仍然只走 ADB/, 'Messages stays Databricks-only');
+  const routingJs = section('// ---------- Routing rules:', '// A verifier is stored');
+  assert.doesNotMatch(routingJs, /data-global-enable|writeAccountEnablement\(/,
+    'the model editor must never write a global account setting');
+  assert.doesNotMatch(routingJs, /请求将落到|请求会落到/,
+    'a missing GHCP candidate does not prove a usable fallback exists');
 
   // ---- upstream credentials ----
   assert.match(html, /id="credentialsContent"/, 'credential area needs a container');
   assert.match(html, /不会退化为存明文/, 'the no-plaintext-fallback rule must be stated');
   assert.match(html, /不显示也不返回明文/, 'the panel must state plaintext is never shown');
-  assert.match(html, /需一次滚动重启才生效/, 'activation semantics must be stated');
+  assert.match(html, /需.*滚动重启|滚动重启.*生效/, 'activation semantics must be stated');
   assert.match(html, /type="password"[^>]*id="credSecret"|id="credSecret"[^>]*type="password"/,
     'the credential field must be a password input');
 
@@ -1199,8 +854,8 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   assert.match(element('credentialsContent').innerHTML, /由另一把密钥封装/);
 
   // A submitted credential must not linger in the DOM, and a 409 must be explained.
-  // The upstream secret keeps the one-request contract even though the panel
-  // key is now held: holding that one is a convenience, this one is a secret.
+  // The upstream secret keeps its one-request contract while the browser
+  // carries the panel session cookie; neither is retained by page scripts.
   element('credProvider').value = 'databricks';
   element('credAccount').value = 'ws-config';
   element('credSecret').value = 'dapi-should-not-persist';
@@ -1261,6 +916,6 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   console.log('Dashboard UI: authenticated cleanup, honest errors, safe release identity, '
     + 'panel gate (content hidden, not blurred), sub-tabs with per-section feedback, '
     + 'panel session (password + cookie, zero-interaction restore, key fallback), '
-    + 'client keys, accounts (enabled vs idle), routing matrix (two scopes, per-layer '
-    + 'reasons, pre-save preview, two-step save), panel password, credentials passed.');
+    + 'client keys, accounts (enablement vs configuration candidates), routing scope '
+    + 'safety (stateful regressions in test_dashboard_routing_ui.cjs), panel password, credentials passed.');
 })().catch(error => {console.error(error); process.exitCode = 1;});
