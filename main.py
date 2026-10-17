@@ -10023,6 +10023,48 @@ def _copilot_endpoints() -> list:
     return list(getattr(getattr(copilot_proxy, "load_balancer", None), "endpoints", []) or [])
 
 
+# Why a provider is not a path for this model, as a closed set so the
+# Dashboard can branch and tests can assert. `None` means it is a candidate.
+MESSAGES_PATH_REASONS = frozenset({'provider_not_configured', 'no_endpoint_permits_model'})
+
+
+def _messages_path_views(model: str) -> list:
+    """每个 Anthropic Messages provider 对这个模型的路径状态，按生效顺序。
+
+    为什么要逐个列出而不是只列能服务的：工作台此前只显示 OpenAI 风格那一份顺序，
+    于是 ADB 根本不出现，运维无法区分「有意不在此面」和「漏了」。**缺席本身就是
+    那个问题**，所以服务不了的 provider 也要出现并说明原因。
+
+    `forwarded_model` 把「同一模型三种拼法」摆出来 —— 配 Foundry 的 deployments
+    必须用 Foundry 的拼法，这是运维最容易配错的一处。
+    """
+    pools = _messages_pools()
+    views = []
+    for provider in _messages_provider_order(model):
+        pool = pools.get(provider)
+        endpoints = list(getattr(getattr(pool, 'load_balancer', None), 'endpoints', ()) or ())
+        forwarded = claude_identity.rewrite(model, provider) if model else model
+        if pool is None:
+            serving, reason = 0, 'provider_not_configured'
+        else:
+            # 问 supports() 的那一个收口，不在这里复述它的条件（会漂移）。
+            # Databricks/Foundry 的 WorkspaceEndpoint 没有 supports()，用 models 门控。
+            serving = sum(1 for ep in endpoints if (
+                ep.supports(forwarded) if hasattr(ep, 'supports')
+                else (not ep.models or forwarded.lower() in ep.models)))
+            reason = None if serving else 'no_endpoint_permits_model'
+        views.append({
+            'provider': provider,
+            'label': PROVIDER_LABELS.get(provider, provider),
+            'configured': pool is not None,
+            'forwarded_model': forwarded,
+            'endpoints_total': len(endpoints),
+            'endpoints_serving_model': serving,
+            'reason': reason,
+        })
+    return views
+
+
 def _model_routing_view(model: str) -> dict:
     """一条规则的三段：模型 → provider 顺序 → GHCP 账户。"""
     store = key_policy_store
@@ -10045,6 +10087,10 @@ def _model_routing_view(model: str) -> dict:
         "copilot_candidates_empty": bool(endpoints) and not effective,
         "opens_claude_on_openai_entry_points": ("claude" in model.lower()
                                                 and _model_pinned_to_openai_style_provider(model)),
+        # /v1/messages 面的三条路径各自状态。服务不了的也列出来并说明原因 ——
+        # 缺席正是「看不出 ADB 是有意不在此面还是漏了」的根源。
+        "effective_messages_order": list(_messages_provider_order(model)),
+        "messages_paths": _messages_path_views(model),
     }
 
 

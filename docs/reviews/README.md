@@ -6,7 +6,8 @@ Author: Zeno Ren
 
 | 日期 | 范围 | 入口 |
 |---|---|---|
-| 2026-10-17 | Claude 三路径（ADB / GHCP / Foundry）实测证据：三家都说 Anthropic Messages，合成器不需要；推翻我自己两条文档推断，并发现已启用的 enterprise 账户 0 个 claude | [实测证据](2026-10-17-claude-three-paths/EVIDENCE.md) |
+| 2026-10-17 | Claude 三路径（ADB / GHCP / Foundry）**接入完成**：三家都说 Anthropic Messages，合成器不需要；看板按协议面显示路径；实测抓到凭据进 repr、共享规整污染另外两家等四个真问题 | [接入回执](2026-10-17-claude-three-paths/REPORT.md)、[实测证据](2026-10-17-claude-three-paths/EVIDENCE.md) |
+| 2026-10-17 | Claude 三路径实测证据：三家都说 Anthropic Messages，合成器不需要；推翻我自己两条文档推断，并发现已启用的 enterprise 账户 0 个 claude | [实测证据](2026-10-17-claude-three-paths/EVIDENCE.md) |
 | 2026-10-17 | **AKS 发布** `34acc39`：Dashboard 工作台与 h2 连接退休一次上线；维护 66.7 秒、11 阶段一次通过，三协议探针与账本验收通过 | [发布回执](2026-10-17-aks-release/REPORT.md) |
 | 2026-10-17 | 基于 a2007ad 的 Dashboard「密钥与渠道」五 TAB 与路由工作台优化；包含本地/独立 QA，GitHub 交付与生产发布分别验收 | [实施与验收](2026-10-17-dashboard-keys-channels/REVIEW.md) |
 | 2026-10-17 | GHCP 再次 HALF_OPEN：一条 h2 连接用到服务端不再接受新流（无 GOAWAY，池子照旧复用），连接优雅退休与 stream id 观测；排除了体积与多路复用两个假设 | [事件回执](2026-10-17-ghcp-h2-connection/REPORT.md) |
