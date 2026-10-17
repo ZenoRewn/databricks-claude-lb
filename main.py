@@ -10,6 +10,7 @@ from request_telemetry import (TELEMETRY, RequestTelemetryMiddleware, inference_
                                note_local_terminal, note_failure, log_event, note_content_offered)
 from request_telemetry import note_parameter_transforms, require_image_trim_consent, note_reported_model, safe_id, note_stream_end, context_hint_headers
 from chat_adapter import build_payload as build_chat_payload
+import claude_model_identity as claude_identity
 import model_capabilities
 from model_capabilities import observe_route_budget, estimate_payload, payload_has_image
 from build_metadata import runtime_identity, release_identity
@@ -7997,6 +7998,72 @@ def _openai_provider_order(model: str) -> tuple:
     return tuple(order)
 
 
+def _messages_provider_order(model: str) -> tuple:
+    """Provider order for the Anthropic Messages surface (`/v1/messages`).
+
+    Three providers serve Claude over this protocol — verified 2026-10-17, see
+    docs/reviews/2026-10-17-claude-three-paths/EVIDENCE.md. Operator default is
+    ADB → GHCP → Foundry; a per-model rule reorders it.
+
+    Same contract as the OpenAI-style order: a preference **reorders, it never
+    removes**, so unlisted providers keep the default order behind the listed
+    ones and fallback survives. `azure_openai` named in a preference is ignored
+    here because it speaks the Azure OpenAI shape and cannot serve this
+    surface — the mirror image of `databricks` being ignored over there.
+    """
+    store = key_policy_store
+    preferred = store.model_preference(model) if store is not None else ()
+    order = [p for p in preferred if p in claude_identity.MESSAGES_PROVIDERS]
+    order += [p for p in claude_identity.DEFAULT_CLAUDE_ORDER if p not in order]
+    return tuple(order)
+
+
+def _pricing_for_model(model: str, provider: Optional[str] = None) -> Optional[dict]:
+    """Per-token list price for this model, or None when that口径 does not apply.
+
+    `MODEL_PRICING` holds Anthropic's and OpenAI's public per-token rates and
+    is matched by substring, so Foundry's `claude-opus-5-5` would otherwise hit
+    the `opus-5-5` key and be costed at Anthropic's list price. Foundry bills in
+    Claude Consumption Units through the Azure Marketplace, which is a different
+    unit entirely — that number would be confidently wrong, and CLAUDE.md
+    forbids mixing the two. Unknown stays unknown; the Dashboard already
+    renders that honestly, whereas a zero would roll up as «free».
+
+    Providers absent from this table keep their own path: Copilot is costed by
+    `copilot_pricing` against the official tier table, unchanged here.
+    """
+    if provider in _PROVIDERS_WITHOUT_LIST_PRICING:
+        return None
+    return get_model_pricing(model)
+
+
+# Billing relationships the public per-token table cannot express.
+_PROVIDERS_WITHOUT_LIST_PRICING = frozenset({'azure_anthropic'})
+
+
+def _model_routing_note() -> str:
+    """Operator-facing explanation returned by `/admin/model-routing`.
+
+    Extracted so its claims can be tested. The shipped note asserted that
+    «'databricks' in a preference only opens claude-* on the OpenAI-style entry
+    points», which the code never did: that gate is
+    `_model_pinned_to_openai_style_provider`, and it counts only copilot and
+    azure_openai. An operator following that sentence would have built a rule
+    that silently does nothing.
+    """
+    return (
+        "A preference reorders providers, it does not remove any, so fallback is kept. "
+        "Order is per protocol surface: /v1/messages is served by databricks, copilot and "
+        "azure_anthropic (default databricks -> copilot -> azure_anthropic), while "
+        "/v1/responses and /v1/chat/completions are served by copilot and azure_openai "
+        "(default copilot -> azure_openai). A provider named for a surface it cannot serve "
+        "is ignored on that surface. Naming copilot or azure_openai additionally opens a "
+        "claude-* model on the OpenAI-style entry points, which are rejected by default. "
+        "copilot_accounts subtracts accounts within the Copilot provider and does not "
+        "affect provider fallback; an empty selection means <not limited>."
+    )
+
+
 def _model_pinned_to_openai_style_provider(model: str) -> bool:
     """该模型是否被显式指到某个 OpenAI 风格 provider。"""
     store = key_policy_store
@@ -9728,11 +9795,7 @@ async def admin_model_routing(request: Request, x_api_key: Optional[str] = Heade
         "known_models": _collect_openai_model_ids(),
         "copilot_accounts_available": accounts,
         "policy": _policy_status_view(),
-        "note": ("A preference reorders providers, it does not remove any, so fallback is kept. "
-                 "'databricks' in a preference only opens claude-* on the OpenAI-style entry "
-                 "points; /v1/messages stays Databricks-only. copilot_accounts subtracts "
-                 "accounts within the Copilot provider and does not affect provider fallback; "
-                 "an empty selection means «not limited»."),
+        "note": _model_routing_note(),
     }
 
 

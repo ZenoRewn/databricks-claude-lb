@@ -25,12 +25,22 @@ import main
 
 class ProviderVocabularyTests(unittest.TestCase):
     def test_ids_match_the_values_usage_records_already_use(self):
-        # usage_store.record(provider=...) is called with exactly these.
-        self.assertEqual(set(key_policy.PROVIDER_IDS), {'databricks', 'copilot', 'azure_openai'})
+        # usage_store.record(provider=...) is called with the first three.
+        # `azure_anthropic` is registered ahead of its request path so the
+        # per-key allowlist and the Dashboard can already name it; no usage
+        # record carries that value until /v1/messages can route there. The
+        # vocabulary and the recorded values are allowed to differ only in
+        # that direction — an id nobody records is inert, an id recorded but
+        # unregistered would fail allowlist validation.
+        self.assertEqual(set(key_policy.PROVIDER_IDS),
+                         {'databricks', 'copilot', 'azure_openai', 'azure_anthropic'})
 
     def test_every_id_has_an_operator_facing_label(self):
+        # Both Foundry faces are listed: one resource, two protocols, two
+        # billing口径. See key_policy.PROVIDER_IDS for why they stay separate.
         self.assertEqual(key_policy.PROVIDER_LABELS,
-                         {'databricks': 'ADB', 'copilot': 'GHCP', 'azure_openai': 'Foundry'})
+                         {'databricks': 'ADB', 'copilot': 'GHCP',
+                          'azure_openai': 'Foundry', 'azure_anthropic': 'Foundry Claude'})
 
     def test_normalise_accepts_any_order_and_canonicalises(self):
         self.assertEqual(key_policy.normalise_providers(['copilot', 'databricks']),

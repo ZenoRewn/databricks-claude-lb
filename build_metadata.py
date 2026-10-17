@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 
-RUNTIME_FILES = ('main.py', 'build_metadata.py', 'chat_adapter.py', 'model_capabilities.py', 'effort_compat.py',
+RUNTIME_FILES = ('main.py', 'build_metadata.py', 'chat_adapter.py', 'claude_model_identity.py','model_capabilities.py', 'effort_compat.py',
                  'request_telemetry.py', 'safe_diagnostics.py', 'request_timing.py', 'request_budget.py',
                  'admission.py', 'gateway_lifecycle.py', 'upstream_body.py', 'usage_store.py', 'otel_setup.py',
                  'dashboard.html', 'response_semantics.py', 'cleanup_observability.py', 'copilot_pricing.py',

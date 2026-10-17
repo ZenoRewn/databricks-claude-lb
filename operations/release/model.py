@@ -16,7 +16,7 @@ SOURCE='lb.zeno.ink/source-revision'
 DNS=re.compile(r'[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?')
 SHA=re.compile(r'[a-f0-9]{40}')
 DIGEST=re.compile(r'[^\s@]+@sha256:[a-f0-9]{64}')
-APP_FILES=('main.py','build_metadata.py','chat_adapter.py','model_capabilities.py','effort_compat.py','request_telemetry.py','safe_diagnostics.py','request_timing.py','request_budget.py','admission.py',
+APP_FILES=('main.py','build_metadata.py','chat_adapter.py','claude_model_identity.py','model_capabilities.py','effort_compat.py','request_telemetry.py','safe_diagnostics.py','request_timing.py','request_budget.py','admission.py',
            'gateway_lifecycle.py','upstream_body.py','usage_store.py','otel_setup.py','dashboard.html',
            'response_semantics.py','cleanup_observability.py','copilot_pricing.py','release_probe.py','key_policy.py','provider_credentials.py')
 
