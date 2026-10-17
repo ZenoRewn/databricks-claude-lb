@@ -40,8 +40,16 @@ logger = logging.getLogger(__name__)
 
 IO_TIMEOUT = 10
 
-PROVIDER_IDS = ('databricks', 'copilot', 'azure_openai')
-PROVIDER_LABELS = {'databricks': 'ADB', 'copilot': 'GHCP', 'azure_openai': 'Foundry'}
+# `azure_anthropic` and `azure_openai` are the two faces of one Microsoft
+# Foundry resource and deliberately stay separate provider ids: different
+# protocol (Anthropic Messages vs Azure OpenAI), different auth header
+# (x-api-key vs api-key), different model ids, and different billing (Claude
+# Consumption Units vs per-token list price). Folding them together would make
+# a per-key allowlist unable to express "gpt on Foundry but not Claude", and
+# would let one billing口径 silently cost the other's usage.
+PROVIDER_IDS = ('databricks', 'copilot', 'azure_openai', 'azure_anthropic')
+PROVIDER_LABELS = {'databricks': 'ADB', 'copilot': 'GHCP',
+                   'azure_openai': 'Foundry', 'azure_anthropic': 'Foundry Claude'}
 ALL_PROVIDERS = frozenset(PROVIDER_IDS)
 
 # Why an account is not a candidate, as a closed set rather than prose. The

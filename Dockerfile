@@ -25,7 +25,7 @@ FROM ${DEPENDENCY_STAGE} AS runtime
 #   usage_store.py  —— 顶层 import（main.py:1888），无保护；缺失 → ModuleNotFoundError，启动即崩
 #   otel_setup.py   —— lifespan 内 import + except Exception 兜底；缺失 tracing 静默失能
 #   dashboard.html  —— import 时按 __file__ 同级路径读取，except OSError 降级空壳
-COPY main.py build_metadata.py chat_adapter.py model_capabilities.py effort_compat.py request_telemetry.py safe_diagnostics.py request_timing.py request_budget.py admission.py gateway_lifecycle.py upstream_body.py usage_store.py otel_setup.py response_semantics.py cleanup_observability.py copilot_pricing.py release_probe.py key_policy.py provider_credentials.py dashboard.html ./
+COPY main.py build_metadata.py chat_adapter.py claude_model_identity.py model_capabilities.py effort_compat.py request_telemetry.py safe_diagnostics.py request_timing.py request_budget.py admission.py gateway_lifecycle.py upstream_body.py usage_store.py otel_setup.py response_semantics.py cleanup_observability.py copilot_pricing.py release_probe.py key_policy.py provider_credentials.py dashboard.html ./
 
 ARG SOURCE_REVISION=working-tree
 ARG SOURCE_TREE_DIRTY=unknown
