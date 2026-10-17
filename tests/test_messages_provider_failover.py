@@ -21,6 +21,7 @@ to strand, unlike the OpenAI-style surface where opaque state pins a request to
 one account. Prompt-cache breakpoints do not survive the hop, which costs money
 but cannot corrupt an answer.
 """
+import asyncio
 import unittest
 from unittest.mock import patch
 
@@ -223,9 +224,14 @@ class NormalisationScopeTests(unittest.IsolatedAsyncioTestCase):
     choice is to strip for both until a field is verified acceptable.
     """
 
-    def test_foundry_is_normalised_too(self):
-        self.assertIn('azure_anthropic', main._NORMALISING_MESSAGES_PROVIDERS)
-        self.assertIn('databricks', main._NORMALISING_MESSAGES_PROVIDERS)
+    def test_all_three_providers_are_normalised(self):
+        # Each verified by a live call on 2026-10-17: Foundry and Copilot both
+        # answered `400 invalid_request_error: context_management: Extra inputs
+        # are not permitted`. Anthropic-native does not imply a superset of
+        # Databricks.
+        for provider in ('databricks', 'azure_anthropic', 'copilot'):
+            with self.subTest(provider=provider):
+                self.assertIn(provider, main._NORMALISING_MESSAGES_PROVIDERS)
 
     def test_context_management_is_stripped_for_both(self):
         for provider in ('databricks', 'azure_anthropic'):
@@ -237,11 +243,179 @@ class NormalisationScopeTests(unittest.IsolatedAsyncioTestCase):
                 pool._normalize_for_databricks(body)
                 self.assertNotIn('context_management', body)
 
-    def test_copilot_is_not_in_this_set(self):
-        # Copilot's /v1/messages is reached through its own client (session
-        # token, editor headers); its accepted schema is a separate question.
-        self.assertNotIn('copilot', main._NORMALISING_MESSAGES_PROVIDERS)
+    def test_context_management_is_stripped_for_copilot_too(self):
+        pool = main.ClaudeProxy.__new__(main.ClaudeProxy)
+        pool.provider = 'copilot'
+        body = {'model': 'claude-opus-5.5', 'context_management': {'edits': []},
+                'messages': [{'role': 'user', 'content': 'hi'}]}
+        pool._normalize_for_databricks(body)
+        self.assertNotIn('context_management', body)
 
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CopilotMessagesPoolTests(unittest.IsolatedAsyncioTestCase):
+    """Copilot as the third Anthropic Messages upstream.
+
+    Verified live on 2026-10-17 against a business-seat account:
+    `POST {session_base_url}/v1/messages` returns a standard Anthropic body,
+    and `stream: true` returns standard Anthropic SSE. Only the target differs
+    from Databricks, so only `_upstream_target` is overridden.
+    """
+
+    def pool(self):
+        owner = main.CopilotProxy.__new__(main.CopilotProxy)
+        owner.load_balancer = main.LoadBalancer([
+            main.CopilotEndpoint('biz', '', models=['claude-opus-5.5'],
+                                 session_token='sess', session_token_expires_at=2 ** 31)])
+        owner.api_key = 'local'
+        owner.client = object()
+        owner.get_session_token = lambda endpoint, force=False: _resolved('session-token')
+        return main.CopilotMessagesProxy(owner), owner
+
+    async def test_the_path_has_no_anthropic_prefix(self):
+        # Databricks and Foundry serve /anthropic/v1/messages; Copilot serves
+        # /v1/messages. Getting this wrong is a 404 on every request.
+        pool, owner = self.pool()
+        endpoint = owner.load_balancer.endpoints[0]
+        endpoint.session_base_url = 'https://api.business.githubcopilot.com'
+        url, _ = await pool._upstream_target(endpoint)
+        self.assertEqual(url, 'https://api.business.githubcopilot.com/v1/messages')
+        self.assertNotIn('/anthropic/', url)
+
+    async def test_the_session_token_and_editor_headers_are_sent(self):
+        # Without the editor headers GitHub answers 403 «Please only use
+        # approved clients for Copilot».
+        pool, owner = self.pool()
+        _, headers = await pool._upstream_target(owner.load_balancer.endpoints[0])
+        self.assertEqual(headers['Authorization'], 'Bearer session-token')
+        for header in ('Editor-Version', 'Editor-Plugin-Version',
+                       'Copilot-Integration-Id', 'User-Agent'):
+            with self.subTest(header=header):
+                self.assertIn(header, headers)
+
+    async def test_the_vision_header_follows_the_shared_detector(self):
+        pool, owner = self.pool()
+        endpoint = owner.load_balancer.endpoints[0]
+        image = {'messages': [{'role': 'user', 'content': [
+            {'type': 'image', 'source': {'type': 'base64', 'data': 'x'}}]}]}
+        token = main._MESSAGES_BODY.set(image)
+        self.addCleanup(main._MESSAGES_BODY.reset, token)
+        _, headers = await pool._upstream_target(endpoint)
+        self.assertEqual(headers.get('Copilot-Vision-Request'), 'true')
+
+    async def test_no_vision_header_without_an_image(self):
+        pool, owner = self.pool()
+        token = main._MESSAGES_BODY.set({'messages': [{'role': 'user', 'content': 'hi'}]})
+        self.addCleanup(main._MESSAGES_BODY.reset, token)
+        _, headers = await pool._upstream_target(owner.load_balancer.endpoints[0])
+        self.assertNotIn('Copilot-Vision-Request', headers)
+
+    async def test_concurrent_requests_do_not_see_each_other_bodies(self):
+        """The reason this is a ContextVar and not an attribute.
+
+        One pool instance serves concurrent requests. With an attribute, two
+        of them clobber each other and one request can be sent with the vision
+        header derived from the other's payload.
+        """
+        pool, owner = self.pool()
+        endpoint = owner.load_balancer.endpoints[0]
+        image = {'messages': [{'role': 'user', 'content': [{'type': 'image_url', 'image_url': {}}]}]}
+        plain = {'messages': [{'role': 'user', 'content': 'hi'}]}
+
+        async def target(body):
+            token = main._MESSAGES_BODY.set(body)
+            try:
+                await asyncio.sleep(0)
+                _, headers = await pool._upstream_target(endpoint)
+                return 'Copilot-Vision-Request' in headers
+            finally:
+                main._MESSAGES_BODY.reset(token)
+
+        with_image, without = await asyncio.gather(target(image), target(plain))
+        self.assertTrue(with_image)
+        self.assertFalse(without)
+
+    def test_the_pool_shares_the_owners_balancer_and_client(self):
+        # Two views of one upstream: circuit state and h2 retirement must be
+        # the same objects, not parallel copies.
+        pool, owner = self.pool()
+        self.assertIs(pool.load_balancer, owner.load_balancer)
+        self.assertIs(pool.client, owner.client)
+        self.assertEqual(pool.provider, 'copilot')
+
+    def test_the_owner_exposes_one_cached_pool(self):
+        owner = main.CopilotProxy.__new__(main.CopilotProxy)
+        owner.load_balancer = main.LoadBalancer([])
+        owner.api_key = 'local'
+        owner.client = object()
+        self.assertIs(owner.messages_pool, owner.messages_pool)
+
+
+def _resolved(value):
+    async def _coro():
+        return value
+    return _coro()
+
+
+class CredentialReprTests(unittest.TestCase):
+    """A credential must not be reachable through `repr()`.
+
+    Found the hard way on 2026-10-17: a read-only diagnostic printed a
+    `CopilotEndpoint` and its dataclass repr carried the long-lived OAuth token
+    in plain text. Any `logger.info(f"{endpoint}")`, any exception whose
+    traceback renders locals, any `print` in a debugging session would have
+    done the same — against a repository whose stated invariant is that
+    credentials never enter diagnostics.
+    """
+
+    def test_a_databricks_token_is_not_in_the_repr(self):
+        text = repr(main.WorkspaceEndpoint('n', 'https://fixture.invalid', 'SECRET-DBX'))
+        self.assertNotIn('SECRET-DBX', text)
+        self.assertIn('n', text, 'the endpoint must still be identifiable')
+
+    def test_a_copilot_token_is_not_in_the_repr(self):
+        self.assertNotIn('SECRET-GH', repr(main.CopilotEndpoint('n', 'SECRET-GH')))
+
+    def test_a_foundry_key_is_not_in_the_repr(self):
+        self.assertNotIn('SECRET-AZ', repr(main.WorkspaceEndpoint(
+            'f', 'https://fixture.invalid', 'SECRET-AZ',
+            provider='azure_anthropic', auth_style='x-api-key')))
+
+    def test_the_credential_is_still_usable_despite_being_hidden(self):
+        # repr=False hides it from diagnostics, it does not remove the field.
+        endpoint = main.WorkspaceEndpoint('n', 'https://fixture.invalid', 'SECRET-DBX')
+        self.assertEqual(main._messages_auth_headers(endpoint)['Authorization'],
+                         'Bearer SECRET-DBX')
+
+
+class DatabricksModelConversionScopeTests(unittest.TestCase):
+    """Only Databricks renames the model during normalisation.
+
+    Live-verified bug, 2026-10-17: the shared normalisation began with
+    `get_databricks_model()`, so a Copilot request for `claude-opus-5.5` was
+    rewritten into Databricks' spelling and then matched no Copilot endpoint —
+    surfacing as 404 `unsupported_model` against an account that serves the
+    model perfectly well. Cross-provider respelling belongs to the
+    orchestrator, which already does it via `claude_model_identity`.
+    """
+
+    def normalise(self, provider, model):
+        pool = main.ClaudeProxy.__new__(main.ClaudeProxy)
+        pool.provider = provider
+        body = {'model': model, 'messages': [{'role': 'user', 'content': 'hi'}]}
+        pool._normalize_for_databricks(body)
+        return body['model']
+
+    def test_copilot_keeps_its_own_spelling(self):
+        self.assertEqual(self.normalise('copilot', 'claude-opus-5.5'), 'claude-opus-5.5')
+
+    def test_foundry_keeps_its_own_spelling(self):
+        self.assertEqual(self.normalise('azure_anthropic', 'claude-opus-5-5'), 'claude-opus-5-5')
+
+    def test_databricks_still_converts(self):
+        # Whatever get_databricks_model does for this alias, it must still run.
+        self.assertEqual(self.normalise('databricks', 'claude-opus-5-5'),
+                         main.get_databricks_model('claude-opus-5-5'))

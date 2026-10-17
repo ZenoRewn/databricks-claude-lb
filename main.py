@@ -2134,7 +2134,10 @@ async def prepare_images_async(payload, *, route: str) -> dict:
 class WorkspaceEndpoint:
     name: str
     api_base: str
-    token: str
+    # repr=False：凭据绝不能出现在 repr 里。任何 `logger.info(f"{endpoint}")`、
+    # 异常回溯或 dataclass 默认 repr 都会把它带进日志 —— 2026-10-17 一次只读诊断
+    # 打印 endpoint 时就实测泄漏过一次 long-lived token。
+    token: str = field(repr=False)
     weight: int = 1
     
     active_requests: int = field(default=0, repr=False)
@@ -2403,7 +2406,8 @@ def _validate_copilot_api_types(value):
 @dataclass
 class CopilotEndpoint:
     name: str
-    github_token: str  # long-lived OAuth token（device flow 拿到的；运行时可被 reload_github_token 替换）
+    # repr=False 同 WorkspaceEndpoint.token：凭据绝不进 repr。
+    github_token: str = field(repr=False)  # long-lived OAuth token（device flow 拿到的；运行时可被 reload_github_token 替换）
     weight: int = 1
     # 可选限定模型；空列表 = 接受所有模型，遇到不支持的 400 再降级 Azure
     # 初始启用态见文件末尾的 enabled_in_config（追加在那里以保留位置参数顺序）。
@@ -3577,9 +3581,13 @@ class ClaudeProxy:
         """
 
         # 转换模型名称
-        if "model" in body:
-            original_model = body["model"]
-            body["model"] = get_databricks_model(original_model)
+        # 模型名转换**只对 Databricks**：它用 `databricks-claude-*` 的命名，而
+        # Foundry 用短横、GHCP 用点号，跨 provider 的改写已由编排器经
+        # claude_model_identity 完成。对 copilot/Foundry 再套一次 Databricks 转换，
+        # 会把一个它们认识的 id 变成它们不认识的，表现为 404 unsupported_model ——
+        # 实测踩到过。
+        if getattr(self, "provider", "databricks") == "databricks" and "model" in body:
+            body["model"] = get_databricks_model(body["model"])
         
         # 移除 Databricks 不支持的顶层字段（如新版 Claude Code 发送的 context_management 等）
         note_parameter_drops(databricks_parameter_drops(body,adaptive_supported=supports_adaptive_thinking(body.get('model',''))))
@@ -3688,6 +3696,17 @@ class ClaudeProxy:
                     logger.info(f"Added missing budget_tokens: {budget}")
         
 
+    async def _upstream_target(self, endpoint) -> tuple:
+        """这次尝试要打的 URL 与请求头。
+
+        三个 Anthropic Messages provider 的差异都收在这一个钩子里：
+        Databricks 与 Foundry 都是 `{api_base}/anthropic/v1/messages` 加一个静态
+        凭据；GitHub Copilot 是 `{session_base_url}/v1/messages`，凭据是需要异步
+        交换、会过期的会话 token，另外还要带 editor 头部（缺了 GitHub 会以
+        「Please only use approved clients」回 403）。所以这个钩子是 async。
+        """
+        return f"{endpoint.api_base}/anthropic/v1/messages", _messages_auth_headers(endpoint)
+
     async def proxy_request(self, body: dict, stream: bool = False, request_id: Optional[str] = None):
         """代理请求到 Databricks 原生 Anthropic 端点。P1.4: request_id 沿路传到
         _stream_request/_normal_request，让 SSE error 与结构化日志能关联 X-Request-Id。"""
@@ -3711,16 +3730,14 @@ class ClaudeProxy:
                 raise self.load_balancer.unavailable()
             tried.add(endpoint.name)
 
-            observe_route_budget('databricks', 'messages', model, body, endpoint.name)
+            observe_route_budget(getattr(self, 'provider', 'databricks'), 'messages', model, body, endpoint.name)
             attempt_lease = await self.load_balancer.on_request_start(endpoint)
 
-            # 使用原生 Anthropic 端点
-            url = f"{endpoint.api_base}/anthropic/v1/messages"
+            url, headers = await self._upstream_target(endpoint)
 
             logger.info(f"[{body.get('model')}] -> {endpoint.name} (attempt {attempt + 1})")
 
             try:
-                headers = _messages_auth_headers(endpoint)
 
                 if stream:
                     return await self._stream_request(endpoint, url, body, headers, model=model, start_time=start_time, attempt_lease=attempt_lease, request_id=request_id)
@@ -3900,8 +3917,7 @@ class ClaudeProxy:
                             new_endpoint = proxy_self.load_balancer.select_endpoint(model=model, tried=tried)
                             if new_endpoint:
                                 current_endpoint = new_endpoint
-                                current_url = f"{current_endpoint.api_base}/anthropic/v1/messages"
-                                current_headers = _messages_auth_headers(current_endpoint)
+                                current_url, current_headers = await self._upstream_target(current_endpoint)
                                 rejection = await start_current_request(current_endpoint)
                                 if rejection is not None:
                                     yield rejection
@@ -3969,8 +3985,7 @@ class ClaudeProxy:
                         new_endpoint = proxy_self.load_balancer.select_endpoint(model=model, tried=tried)
                         if new_endpoint:
                             current_endpoint = new_endpoint
-                            current_url = f"{current_endpoint.api_base}/anthropic/v1/messages"
-                            current_headers = _messages_auth_headers(current_endpoint)
+                            current_url, current_headers = await self._upstream_target(current_endpoint)
                             rejection = await start_current_request(current_endpoint)
                             if rejection is not None:
                                 yield rejection
@@ -4694,6 +4709,73 @@ def _build_legacy_upstream_error_detail(
     return {"error": detail_text}
 
 
+# Payload of the Anthropic Messages request being served, per asyncio task.
+# Read by `CopilotMessagesProxy._upstream_target` to decide the vision header.
+_MESSAGES_BODY: contextvars.ContextVar = contextvars.ContextVar('lb_messages_body', default=None)
+
+
+class CopilotMessagesProxy(ClaudeProxy):
+    """GitHub Copilot as an Anthropic Messages upstream.
+
+    Verified live on 2026-10-17: `POST {session_base_url}/v1/messages` on a
+    business-seat account returns a standard Anthropic body, and `stream: true`
+    returns standard Anthropic SSE (`message_start`, `content_block_start`,
+    `content_block_delta` with `text_delta`). So every piece of `ClaudeProxy`
+    applies — circuit breaker, usage accounting, stream semantics — and only
+    the target differs.
+
+    Three Copilot-specific facts live in `_upstream_target`:
+
+    * the path is `/v1/messages`, **not** `/anthropic/v1/messages`
+    * the credential is a short-lived session token that must be exchanged
+      asynchronously and refreshed before expiry, so it is fetched per attempt
+      rather than read off the endpoint
+    * the editor headers are mandatory — without them GitHub answers 403
+      «Please only use approved clients for Copilot»
+
+    Claude availability depends on the account's SKU: the enterprise seat
+    serves zero Claude models while the business seats each serve ten
+    (2026-10-17). That is ordinary per-endpoint model gating, handled by
+    `CopilotEndpoint.supports()`, not special-cased here.
+    """
+
+    def __init__(self, owner: "CopilotProxy"):
+        super().__init__(owner.load_balancer, owner.api_key, provider='copilot')
+        # Share the owner's client so pool limits, h2 settings and the
+        # connection-retirement logic apply to this traffic too.
+        self.client = owner.client
+        self.owner = owner
+
+    async def _upstream_target(self, endpoint) -> tuple:
+        session = await self.owner.get_session_token(endpoint)
+        base = (getattr(endpoint, 'session_base_url', None) or COPILOT_DEFAULT_BASE_URL).rstrip('/')
+        headers = {
+            "Authorization": f"Bearer {session}",
+            "Content-Type": "application/json",
+            "Editor-Version": COPILOT_HEADERS["Editor-Version"],
+            "Editor-Plugin-Version": COPILOT_HEADERS["Editor-Plugin-Version"],
+            "Copilot-Integration-Id": COPILOT_HEADERS["Copilot-Integration-Id"],
+            "User-Agent": COPILOT_HEADERS["User-Agent"],
+        }
+        # Vision is gated by the single shared detector; a miss would send an
+        # image-bearing request upstream without the header (see CLAUDE.md).
+        if payload_has_image(_MESSAGES_BODY.get() or {}):
+            headers["Copilot-Vision-Request"] = "true"
+        return f"{base}/v1/messages", headers
+
+    async def proxy_request(self, body: dict, stream: bool = False, request_id: Optional[str] = None):
+        # `_upstream_target` needs the payload to decide the vision header, and
+        # the base class does not pass it through. A ContextVar rather than an
+        # attribute: one pool instance serves concurrent requests, and an
+        # attribute would let two of them clobber each other's body — sending
+        # the vision header derived from somebody else's payload.
+        token = _MESSAGES_BODY.set(body)
+        try:
+            return await super().proxy_request(body, stream=stream, request_id=request_id)
+        finally:
+            _MESSAGES_BODY.reset(token)
+
+
 class CopilotProxy:
     """代理 GitHub Copilot 的 /chat/completions 与 /responses 端点。
 
@@ -4971,6 +5053,19 @@ class CopilotProxy:
                    "threshold_seconds": threshold},
         )
         return 1
+
+    @property
+    def messages_pool(self) -> "CopilotMessagesProxy":
+        """This account pool viewed as an Anthropic Messages upstream.
+
+        Built lazily and cached: it shares this proxy's load balancer and httpx
+        client, so circuit state, pool limits and h2 connection retirement are
+        the same objects — two views of one upstream, not two upstreams.
+        """
+        pool = getattr(self, '_messages_pool', None)
+        if pool is None:
+            pool = self._messages_pool = CopilotMessagesProxy(self)
+        return pool
 
     def _retire_h2_connection(self, reason: str, *, min_stream_id=None) -> int:
         """Take pooled h2 connections out of service and record why.
@@ -8091,9 +8186,12 @@ def _messages_pools(allowed_providers=None) -> dict:
 
 
 # Providers whose upstream rejects the extra fields `_normalize_for_databricks`
-# strips. Both members are verified: Databricks by its documented schema,
-# Foundry by a live 400 on `context_management` (2026-10-17).
-_NORMALISING_MESSAGES_PROVIDERS = frozenset({'databricks', 'azure_anthropic'})
+# strips. All three are verified, each by a live call on 2026-10-17: Databricks
+# by its documented schema, and both Foundry and Copilot by an actual
+# `400 invalid_request_error: context_management: Extra inputs are not
+# permitted`. Being Anthropic-native does not make an upstream a superset of
+# Databricks — that assumption cost me one wrong design decision already.
+_NORMALISING_MESSAGES_PROVIDERS = frozenset({'databricks', 'azure_anthropic', 'copilot'})
 
 
 def _messages_auth_headers(endpoint) -> dict:
