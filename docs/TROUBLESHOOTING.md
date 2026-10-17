@@ -424,6 +424,7 @@ KQL / Loki 直接过：`ContainerLog | where LogEntry contains "copilot_pool_tim
 - `COPILOT_UPSTREAM_PROBE_TIMEOUT`（默认 3s）：DNS + TCP 探针的每一步超时。
 - `COPILOT_UPSTREAM_PROBE_CACHE_TTL`（默认 5s）：探针结果缓存 TTL，防止密集失败风暴。
 - `COPILOT_POOL_MAX_CONNECTIONS` / `COPILOT_POOL_MAX_KEEPALIVE` / `COPILOT_POOL_KEEPALIVE_EXPIRY`：池上限与 keepalive；只在 `httpx_pool_observed_full=true` 的那类观测下调大池上限才有意义。
+- `COPILOT_H2_RETIRE_STREAM_ID`（默认 400，`0` 关闭）：出向 h2 stream id 达到此值就主动退休该连接。h2 下所有流量复用一条连接，服务端对单连接的流数有一个没有文档的上限（2026-10-17 实测在 683 以下开始拒绝新流且**不发 GOAWAY**），主动轮换比撞上去再恢复便宜得多。关掉它只会停掉主动轮换，收到 REFUSED_STREAM 时的被动退休仍然生效。见 [第 22 条](#22-ghcp-一段时间内全部大请求失败但网络正常单独调用也正常)。
 
 ### 相关 metrics
 
@@ -1207,5 +1208,75 @@ kubectl -n zeno-apps logs deploy/claude-lb --since=1h \
 - **不要把客户端取消算成上游失败** —— 会误伤账户健康度。
 - **不要因为取消的试探就判定上游已恢复** —— 没有拿到上游成功证据。
 - **不要仅因备用账户存在就启用它** —— 要先验模型/API/鉴权与会话亲和。
-- **不要无条件关掉 HTTP/2 或每次 RST 就重建整个连接池** —— 需要受控对照，否则会伤到
-  并发与健康请求。
+- **不要无条件关掉 HTTP/2 或每次 RST 就重建整个连接池** —— 重建会打断在途响应。但
+  2026-10-17 之后有了针对性的中间手段：REFUSED_STREAM 会**优雅退休那一条连接**（只拦新流），
+  见 [第 22 条](#22-ghcp-一段时间内全部大请求失败但网络正常单独调用也正常)。
+
+## 22. GHCP 一段时间内「全部大请求失败」，但网络正常、单独调用也正常
+
+### 症状
+
+```
+RemoteProtocolError: Upstream request could not complete; execution may have occurred.
+(connection_id=... chunks_yielded=0 first_event=None last_event=None
+ probe.ok=True dns_ms=27 tcp_ms=229 ips=140.82.114.22)
+```
+
+典型表现：**一道断崖**。之前十几分钟同样大小的请求稳定成功，某一刻之后同类请求几乎全败；
+`probe.ok=True`、DNS/TCP 正常；你用别的客户端单独调 GHCP 却完全正常。
+
+### 识别签名（四个一起出现才是这个问题）
+
+| 看什么 | 这个故障的取值 |
+|---|---|
+| `http2_stream_id`（在 `copilot_stream_network_error` 事件里） | 很高且**严格 +2 递增**，例如 683 → 685 → 687 |
+| `httpx_pool.total` | **1** —— 所有流量复用同一条连接 |
+| `http2_error_code` | **7**（REFUSED_STREAM，`headers=false`）与 **8**（CANCEL，`headers=true` 且 `upstream_idle_seconds` 精确 ≈120.0）**交替出现** |
+| 日志里 `goaway` | **0 次** |
+
+含义：这条连接已经被用到服务端不再接受新流，但服务端**没有发 GOAWAY**，于是 httpcore 的
+`is_available()` 认为它健康，继续把它交给每一个新请求 —— 包括重试。
+
+一行命令：
+
+```bash
+kubectl logs <pod> -n zeno-apps --tail=4000 \
+  | grep -o '"http2_stream_id":[0-9]*\|"http2_error_code":[0-9]*' | tail -20
+```
+
+### 从 2026-10-17 起会自动处理
+
+网关现在会**优雅退休**这条连接：只停止给它分配新流，在途流照常跑完，新请求开新连接。
+确认它生效看两个信号：
+
+```bash
+curl -s https://lb.zeno.ink/metrics | grep copilot_h2_
+# copilot_h2_connections_retired_total{reason="refused_stream"} 1
+# copilot_h2_stream_id_watermark 42          ← 退休后回落
+```
+
+`copilot_h2_stream_id_watermark` 是**故障前就能看见的预警**：连接复用时每请求 +2，默认到
+400 就主动轮换（`COPILOT_H2_RETIRE_STREAM_ID`）。如果它持续攀到 600 以上而没有退休事件，
+说明主动轮换被关掉了或者退休逻辑没生效。
+
+`retirement_reason` 三种：`refused_stream`（服务端拒了）、`prefirst_content_stall`（收到头后
+静默 90 秒）、`stream_id_cap`（我们主动轮换）。
+
+### 不要误判成这几件事
+
+- **不是请求体积问题，压缩请求体没有用。** 2026-10-17 实测：断崖前同样 0.9–3.0 MB 的 body
+  完成了 112 个、`send_to_headers` p50 5.9 秒。体积只是**占用时长**的代理 —— 推理模型的大请求
+  把流按分钟占着，所以连接出问题时倒下的是它们。
+- **不是多路复用压力。** 同一次事件里，在途 ≥3 个请求的 90 次调用传输失败为 0，失败全在
+  在途 1–2 个时。
+- **不是账户坏了。** 同一账户在该窗口累计完成 450+ 请求。
+- **不要用 `/admin/copilot/reset-pool` 当自动修复。** 它重建整个 client，会打断在途响应；
+  手动自救可以，自动触发不行。连接退休就是为了避免这个代价。
+- **不要靠调大 `COPILOT_POOL_KEEPALIVE_EXPIRY` 或超时。** 连接在持续负载下从不空闲，
+  keepalive 到期永远不触发。
+
+### 仍未确认
+
+GitHub 那个上限究竟按流数、连接寿命还是字节数算，以及 `idle=120.0s` 属于哪一层。
+`copilot_h2_stream_id_watermark` 的历史会随时间给出第一个答案。现场证据见
+[2026-10-17 事件回执](reviews/2026-10-17-ghcp-h2-connection/REPORT.md)。

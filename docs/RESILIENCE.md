@@ -448,6 +448,43 @@ null response, no delivered content, and their existing attempt budget. The code
 also still counts toward the shared circuit, so sustained refusal trips the
 breaker and stops the retries rather than amplifying an overload.
 
+### Replay-safe is not the same as replay-useful
+
+Retrying a `REFUSED_STREAM` is safe, but retrying it *on the same connection* is
+futile, and until 2026-10-17 that is exactly what happened. Copilot runs HTTP/2,
+so every request multiplexes over one pooled connection. GitHub enforces an
+undocumented per-connection stream limit and, on reaching it, sends **no
+`GOAWAY`** — it simply refuses each new stream with code 7 and cancels already
+accepted ones after an exact 120.0s idle with code 8. httpcore's
+`is_available()` consults `_used_all_stream_ids`, `_connection_error` and the h2
+state machine; a silent refusal touches none of them, so the pool kept handing
+out the dead connection, including to the retries:
+
+    req 1605f0cc  attempt0 -> stream 685 refused   attempt1 -> 689 refused
+    req b409791b  attempt0 -> stream 695 refused   attempt1 -> 699 refused
+
+Each wasted retry also counted toward the shared circuit, so three business
+requests produced five errors and tripped a threshold of five.
+
+The fix is graceful retirement: setting the reuse gate removes the connection
+from *new* stream assignment while in-flight streams drain, because httpcore
+closes a connection when it is closed, expired or a surplus idle one — never
+merely because it is unavailable. That is the `GOAWAY` the server never sent.
+Rebuilding the client would abort live responses, so it stays a manual tool
+(`/admin/copilot/reset-pool`). Retirement fires on REFUSED_STREAM (before the
+retry), on a stream silent past the prefirst-content threshold, and proactively
+at `COPILOT_H2_RETIRE_STREAM_ID`. `copilot_h2_stream_id_watermark` makes the
+approach to the ceiling visible before it is reached.
+
+This was not a request-size problem: the same 0.9–3.0 MB bodies completed 112
+times in the preceding thirteen minutes at p50 5.9s to headers. Size only
+correlates because a large reasoning request occupies its stream for minutes, so
+it is the one still alive when the connection dies. Compression would change
+nothing. Evidence: [2026-10-17 receipt](reviews/2026-10-17-ghcp-h2-connection/REPORT.md).
+
+The ceiling's actual unit — streams, connection age or bytes — remains
+unconfirmed, as does which layer owns the 120.0s idle timeout.
+
 `GOAWAY` carrying `NO_ERROR` is an orderly shutdown (RFC 7540 §6.8), not a
 fault, and no longer accumulates circuit errors. The stream is still lost and
 the client still sees a failure; the endpoint simply is not unhealthy. It is not
