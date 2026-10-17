@@ -5,7 +5,7 @@ Author: Zeno Ren
 GitHub 集成基线：`a2007adef81c14efeb8f2bf6c6b7e5b0424f4c87`  
 设计与初次本地验收基线：`eaa44b8d0d4e13c91b48c29f5f18ad55cd85edac`
 
-用户已批准设计，并明确选择推荐的「路由工作台」：左侧模型列表，右侧单模型编辑与诊断。本次交付范围为基于 `a2007ad` 整合 Dashboard、测试和文档，并通过 GitHub PR 与 CI 交付。没有调用真实管理写入或上游推理，也不包含生产发布。
+用户已批准设计，并明确选择推荐的「路由工作台」：左侧模型列表，右侧单模型编辑与诊断。本次交付范围为基于 `a2007ad` 整合 Dashboard、测试和文档，并通过 GitHub PR 与 CI 交付。没有调用真实管理写入或上游推理，也不包含生产发布。该范围之外，本批已于 2026-10-17 随 `34acc39` 发布到 AKS，回执见 [2026-10-17 发布回执](../2026-10-17-aks-release/REPORT.md)。
 
 `a2007ad` 中的 `main.py`、`safe_diagnostics.py`、`tests/test_h2_connection_lifecycle.py` 及 H2 可靠性文档保持原样。本次只改变 Dashboard、对应的前端回归与验证入口；旧的私有事故目录和本地 `AGENTS.md` 不纳入提交。
 

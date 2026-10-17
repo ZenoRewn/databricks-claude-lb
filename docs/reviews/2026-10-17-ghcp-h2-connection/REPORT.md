@@ -147,4 +147,6 @@ pyflakes（一方代码）             → 零告警
 新增 `tests/test_h2_connection_lifecycle.py`（27 项 + 18 subtests），含一条端到端用例：让真实的
 REFUSED_STREAM 走完 `_stream_response`，断言连接被退休且**只报告一次**（不是每次 attempt 一次）。
 
-**未发布 AKS。** 发布时机等通知。
+**已于 2026-10-17 随 `34acc39` 发布到 AKS**（维护 66.7 秒，三协议探针通过），回执见
+[2026-10-17 发布回执](../2026-10-17-aks-release/REPORT.md)。注意本修复**没有在生产复现过** ——
+验证来自镜像内自检与 27 项回归，下一次 REFUSED_STREAM 才会产生第一条退休事件。
