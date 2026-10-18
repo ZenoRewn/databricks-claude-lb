@@ -36,6 +36,8 @@ import tempfile
 import time
 from typing import Optional
 
+import claude_model_identity as claude_identity
+
 logger = logging.getLogger(__name__)
 
 IO_TIMEOUT = 10
@@ -111,6 +113,38 @@ def ordered_providers(value) -> tuple:
     if unknown:
         raise ValueError(f'unknown provider ids: {", ".join(unknown)}')
     return tuple(items)
+
+
+def rule_key(mapping, model: str) -> Optional[str]:
+    """Which stored key holds the per-model rule for `model`, or None.
+
+    A rule names a **model**, not a spelling. The same Claude model is spelled
+    three ways (`claude_model_identity`) and every failover hop rewrites it, so
+    a rule keyed by one literal string was invisible to clients using another —
+    and, worse, the per-model account selection was looked up with the Copilot
+    spelling the Messages path rewrites to, under a key stored in the Databricks
+    or Foundry spelling, so it silently stopped subtracting.
+
+    The exact spelling wins when present: it is the least surprising answer and
+    keeps rules written before identity matching working unchanged. Only a
+    Claude model has a canonical identity — `gpt-5.4` and `gpt-5-4` are not
+    known to name one model, and inventing that equivalence would apply a
+    routing rule nobody wrote. Siblings are sorted so a legacy collision
+    resolves the same way on every call instead of following dict order.
+    """
+    if model in mapping:
+        return model
+    siblings = identity_siblings(mapping, model)
+    return siblings[0] if siblings else None
+
+
+def identity_siblings(mapping, model: str) -> list:
+    """Keys in `mapping` that are other spellings of the same Claude model."""
+    canonical_id = claude_identity.canonical(model)
+    if canonical_id is None:
+        return []
+    return sorted(key for key in mapping
+                  if key != model and claude_identity.canonical(key) == canonical_id)
 
 
 def normalise_accounts(value) -> tuple:
@@ -246,10 +280,14 @@ class KeyPolicyStore:
     # -- per-model provider preference -----------------------------------
 
     def model_preference(self, model: str) -> tuple:
-        """Ordered preference for one model; empty means «use the default order»."""
+        """Ordered preference for one model; empty means «use the default order».
+
+        Resolved by model identity, not by spelling — see `rule_key`.
+        """
         if self._state == 'unavailable':
             return ()
-        return tuple(self._preferences.get(model, ()))
+        key = rule_key(self._preferences, model)
+        return tuple(self._preferences.get(key, ())) if key is not None else ()
 
     def model_preferences_snapshot(self) -> dict:
         return {model: tuple(order) for model, order in self._preferences.items()}
@@ -258,10 +296,13 @@ class KeyPolicyStore:
         if not isinstance(model, str) or not model.strip():
             raise ValueError('model must be a non-empty string')
         order = ordered_providers(providers)
+        key = model.strip()
         async with self._lock:
             async with asyncio.timeout(IO_TIMEOUT):
-                await self._backend_write_preference(model.strip(), order)
-            self._preferences[model.strip()] = order
+                await self._backend_write_preference(key, order)
+                self._preferences[key] = order
+                await self._collapse_siblings(self._preferences, key,
+                                              self._backend_delete_preference)
             if self._state == 'unavailable':
                 self._state = 'loaded'
                 self._last_loaded_at = time.time()
@@ -271,7 +312,28 @@ class KeyPolicyStore:
         async with self._lock:
             async with asyncio.timeout(IO_TIMEOUT):
                 await self._backend_delete_preference(model)
-            self._preferences.pop(model, None)
+                self._preferences.pop(model, None)
+                await self._collapse_siblings(self._preferences, model,
+                                              self._backend_delete_preference)
+
+    async def _collapse_siblings(self, mapping: dict, key: str, delete) -> None:
+        """Drop rules held under other spellings of the same Claude model.
+
+        One model, one rule — enforced in storage rather than only resolved on
+        read, so the Dashboard cannot list a model twice with two answers and
+        no way to tell which one wins.
+
+        The new value is written (and cached) **before** the siblings go, in
+        that order deliberately: a failure here leaves an extra stale spelling
+        that `rule_key` resolves deterministically and the next write retries,
+        whereas deleting first and then failing to write would silently drop
+        the operator's rule back to the default order. The cache is updated in
+        step with each backend call because the JSON backend serialises the
+        whole mapping from it.
+        """
+        for sibling in identity_siblings(mapping, key):
+            await delete(sibling)
+            mapping.pop(sibling, None)
 
     # -- per-model Copilot account selection -----------------------------
     #
@@ -291,7 +353,8 @@ class KeyPolicyStore:
         """
         if self._state == 'unavailable':
             return ()
-        return tuple(self._model_accounts.get(model, ()))
+        key = rule_key(self._model_accounts, model)
+        return tuple(self._model_accounts.get(key, ())) if key is not None else ()
 
     def model_accounts_exclusion_reason(self, model: str, account: str) -> Optional[str]:
         """Why this model's selection drops this account, or None if it does not."""
@@ -324,12 +387,15 @@ class KeyPolicyStore:
             async with asyncio.timeout(IO_TIMEOUT):
                 if selection:
                     await self._backend_write_model_accounts(key, selection)
+                    self._model_accounts[key] = selection
                 else:
                     await self._backend_delete_model_accounts(key)
-            if selection:
-                self._model_accounts[key] = selection
-            else:
-                self._model_accounts.pop(key, None)
+                    self._model_accounts.pop(key, None)
+                # Also when clearing: unchecking the last box is the UI's undo,
+                # and it has to find the limit even if the operator is looking
+                # at a different spelling than the one it was stored under.
+                await self._collapse_siblings(self._model_accounts, key,
+                                              self._backend_delete_model_accounts)
             if self._state == 'unavailable':
                 self._state = 'loaded'
                 self._last_loaded_at = time.time()
@@ -339,7 +405,9 @@ class KeyPolicyStore:
         async with self._lock:
             async with asyncio.timeout(IO_TIMEOUT):
                 await self._backend_delete_model_accounts(model)
-            self._model_accounts.pop(model, None)
+                self._model_accounts.pop(model, None)
+                await self._collapse_siblings(self._model_accounts, model,
+                                              self._backend_delete_model_accounts)
 
     # -- Copilot account enablement --------------------------------------
 

@@ -399,7 +399,8 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
                     <h4 style="margin-top:14px">OpenAI 风格入口 <small><code>/v1/responses</code>、<code>/v1/chat/completions</code></small></h4>
                     <label class="field" for="ruleProvider">优先渠道<select id="ruleProvider"><option value="">保持当前顺序</option></select></label><div class="order-chain" id="ruleOrderPreview"></div>
                     <h4 style="margin-top:14px">Anthropic Messages 面 <small><code>/v1/messages</code></small></h4>
-                    <label class="field" for="ruleMessagesProvider">优先渠道<select id="ruleMessagesProvider"><option value="">保持当前顺序</option></select></label>
+                    <div class="rule-row"><label class="field" for="ruleMessagesProvider">第一跳<select id="ruleMessagesProvider"><option value="">保持当前顺序</option></select></label>
+                    <label class="field" for="ruleMessagesSecond">第二跳<select id="ruleMessagesSecond" disabled><option value="">按默认顺序</option></select></label></div>
                     <div class="order-chain" id="ruleMessagesPaths"></div>
                     <p class="scope-note" id="ruleMessagesNote">三条路径都说 Anthropic Messages 协议，所以可以互为回落。服务不了本模型的渠道也会列出并说明原因 —— 看不见不等于配漏了。</p></div>
                   <div class="rule-step"><div class="routing-heading"><h4>GHCP 账户范围</h4><button class="btn route-link" id="routeManageAccounts" type="button">管理全局账户 ↗</button></div>
@@ -409,7 +410,8 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
                     <div id="ruleAccounts"></div><div class="preview-line" id="rulePreview" role="status">先选择一个模型。</div>
                     <p class="scope-note">配置候选是时点判断，不代表实时流量或推理成功。全局账户状态在账户页修改。</p>
                   </div>
-                  <div class="rule-step"><h4>入口与影响范围</h4><p class="scope-note" id="routeEntryImpact"></p><p class="scope-note">客户端密钥仍限制可用渠道；账户选择是集合，不改变会话亲和。<code>/v1/messages</code> 仍只走 ADB。</p></div>
+                  <div class="rule-step"><h4>入口与影响范围</h4><p class="scope-note" id="routeEntryImpact"></p><p class="scope-note">客户端密钥仍限制可用渠道；账户选择是集合，不改变会话亲和。<code>/v1/messages</code> 现在有三条路径，顺序由上面那一段决定。</p>
+                    <p class="scope-note">规则<strong>按模型身份匹配</strong>：同一模型的三种拼法（<code>databricks-claude-opus-5-5</code> / <code>claude-opus-5.5</code> / <code>claude-opus-5-5</code>）共用这一条规则，目录里选哪一种都一样。保存会把它收敛成一条，不会留下两份互相覆盖的顺序。</p></div>
                 </fieldset>
                 <div class="route-actions"><span class="scope-note" id="routeDirtyState"></span><div class="rule-row"><button class="btn" id="restoreRoute" type="button">恢复整条默认</button><button class="btn" id="resetRuleForm" type="button">放弃修改</button><button class="btn btn-primary" id="saveRule" type="button" disabled>检查并保存</button></div></div>
                 <div class="route-review" id="routeReview" role="region" aria-label="路由变更确认" hidden></div>
@@ -1805,7 +1807,7 @@ function routeBaseline(model) {
         effective_copilot_accounts: [], opens_claude_on_openai_entry_points: false};
 }
 function routeDraftFrom(snapshot) {
-  return {providerChoice: '', messagesProviderChoice: '',
+  return {providerChoice: '', messagesProviderChoice: '', messagesSecondChoice: '',
     accountMode: (snapshot.copilot_accounts || []).length ? 'selected' : 'all',
     accounts: (snapshot.copilot_accounts || []).slice()};
 }
@@ -1815,9 +1817,22 @@ function routeOrder() {
   return choice ? [choice, ...defaultOrder.filter(p => p !== choice)]
     : (routeEditorState.baseline?.effective_openai_order || defaultOrder).slice();
 }
+// Three providers, so naming the first two fixes the whole order — which is why
+// the second select is the entire remaining expressiveness and no reordering
+// widget is needed. A second hop without a first hop is meaningless (there is
+// nothing for it to come after), and repeating the first would be rejected by
+// `ordered_providers`, so both are dropped here rather than relying on the
+// select being disabled: the draft is the thing that gets submitted.
+function routeMessagesSegment() {
+  const draft = routeEditorState.draft;
+  const first = draft?.messagesProviderChoice || '';
+  if (!first) return [];
+  const second = draft.messagesSecondChoice || '';
+  return second && second !== first ? [first, second] : [first];
+}
 function routeMessagesOrder() {
-  const choice = routeEditorState.draft?.messagesProviderChoice || '';
-  return choice ? [choice, ...defaultMessagesOrder.filter(p => p !== choice)]
+  const named = routeMessagesSegment();
+  return named.length ? [...named, ...defaultMessagesOrder.filter(p => !named.includes(p))]
     : (routeEditorState.baseline?.effective_messages_order || defaultMessagesOrder).slice();
 }
 // One stored preference feeds both surfaces, so writing more than was chosen
@@ -1846,7 +1861,9 @@ function routeMergedPreference() {
   const openaiChoice = draft.providerChoice || routeSavedChoice(defaultOrder);
   const messagesChoice = draft.messagesProviderChoice || routeSavedChoice(defaultMessagesOrder);
   if (!openaiChoice && !messagesChoice) return null;
-  if (!openaiChoice) return [messagesChoice];
+  // The messages segment can be two providers long now, so it is emitted whole
+  // rather than as its leader — `[first]` would silently discard the second hop.
+  if (!openaiChoice) return routeMessagesSegment().length ? routeMessagesSegment() : [messagesChoice];
   if (!messagesChoice) return [openaiChoice];
   const messages = routeMessagesOrder();
   const openai = routeOrder();
@@ -1888,7 +1905,11 @@ function routeCanSave() {
     // Each choice is validated against **its own** surface. Checking both
     // against defaultOrder is what made azure_anthropic unsavable.
     && (!draft.providerChoice || defaultOrder.includes(draft.providerChoice))
-    && (!draft.messagesProviderChoice || defaultMessagesOrder.includes(draft.messagesProviderChoice));
+    && (!draft.messagesProviderChoice || defaultMessagesOrder.includes(draft.messagesProviderChoice))
+    // The second hop needs no clause of its own: `routeMessagesSegment()` is the
+    // single place that decides whether it counts, and a second validator here
+    // would be a copy of that rule free to drift from it.
+    && (!draft.messagesSecondChoice || defaultMessagesOrder.includes(draft.messagesSecondChoice));
 }
 function renderOrderPreview() {
   const order = routeOrder();
@@ -1948,11 +1969,35 @@ const REASON_TEXT = {
   api_type_unsupported: ['入口形状不支持', '查看账户 api_types 配置'],
 };
 
+function renderMessagesSecondOptions() {
+  // Built from the first hop, not once at load: offering the leader again would
+  // produce a repeated provider, which the backend rejects outright. Without a
+  // first hop there is nothing for a second one to follow, so the control stays
+  // disabled rather than silently ignored.
+  const node = document.getElementById('ruleMessagesSecond');
+  if (!node) return;
+  const draft = routeEditorState.draft;
+  const first = draft?.messagesProviderChoice || '';
+  const available = defaultMessagesOrder.filter(p => p !== first);
+  node.disabled = !first;
+  node.innerHTML = '<option value="">按默认顺序</option>'
+    + available.map(p => '<option value="' + escapeHtml(p) + '">' + escapeHtml(providerLabel(p))
+      + ' 第二</option>').join('');
+  // Replacing the options resets the select to its first entry — the browser
+  // discards the option nodes rather than re-matching the value, so the choice
+  // has to be put back from the draft. Without this the control looked right
+  // and then submitted the leader alone, since `renderRulePreview` reads the
+  // DOM back into the draft on the next pass.
+  const second = draft?.messagesSecondChoice || '';
+  node.value = available.includes(second) ? second : '';
+}
 function syncRouteFields() {
   const draft = routeEditorState.draft;
   if (!draft) return;
   document.getElementById('ruleProvider').value = draft.providerChoice;
   document.getElementById('ruleMessagesProvider').value = draft.messagesProviderChoice;
+  renderMessagesSecondOptions();
+  document.getElementById('ruleMessagesSecond').value = draft.messagesSecondChoice;
   document.getElementById('ruleAccountMode').value = draft.accountMode;
   document.querySelectorAll('[name="routeAccountScope"]').forEach(input => {
     input.checked = input.value === draft.accountMode;
@@ -2009,6 +2054,8 @@ function renderRulePreview(sync = true) {
     const focusedAccount = sync && sync.target && sync.target.dataset && sync.target.dataset.ruleAccount;
     state.draft.providerChoice = document.getElementById('ruleProvider').value || '';
     state.draft.messagesProviderChoice = document.getElementById('ruleMessagesProvider').value || '';
+    state.draft.messagesSecondChoice = document.getElementById('ruleMessagesSecond').value || '';
+    renderMessagesSecondOptions();
     state.draft.accountMode = document.getElementById('ruleAccountMode').value || 'all';
     state.draft.accounts = state.draft.accountMode === 'selected' ? matrixSelection() : [];
     cancelRouteReview();
@@ -2050,6 +2097,7 @@ function changeRouteAccountMode(mode) {
   if (!routeEditorState.draft) return;
   routeEditorState.draft.providerChoice = document.getElementById('ruleProvider').value || '';
   routeEditorState.draft.messagesProviderChoice = document.getElementById('ruleMessagesProvider').value || '';
+  routeEditorState.draft.messagesSecondChoice = document.getElementById('ruleMessagesSecond').value || '';
   routeEditorState.draft.accountMode = mode;
   if (mode === 'selected' && !routeEditorState.draft.accounts.length) {
     routeEditorState.draft.accounts = routeCandidates() || [];
@@ -2203,6 +2251,7 @@ function renderRouteReview(type) {
   const resetting = type === 'reset';
   const payload = resetting ? {copilot_accounts: [], providers: []} : routePayload();
   const order = resetting ? defaultOrder : routeOrder();
+  const messagesOrder = resetting ? defaultMessagesOrder : routeMessagesOrder();
   const claude = /claude/i.test(state.model);
   const opening = !resetting && claude && payload.providers?.some(provider => ['copilot', 'azure_openai'].includes(provider))
     && !(base.providers || []).some(provider => ['copilot', 'azure_openai'].includes(provider));
@@ -2215,14 +2264,19 @@ function renderRouteReview(type) {
   node.hidden = false;
   node.innerHTML = '<h4>' + (resetting ? '恢复整条规则默认' : '确认本模型变更') + '</h4><p class="scope-note">'
     + escapeHtml(state.model) + ' · 不修改任何账户的全局启用状态</p><div class="table-scroll"><table><thead><tr><th>设置</th>'
-    + '<th>当前已保存</th><th>拟提交</th></tr></thead><tbody><tr><td>渠道顺序</td><td>'
+    + '<th>当前已保存</th><th>拟提交</th></tr></thead><tbody><tr><td>渠道顺序 · OpenAI 面</td><td>'
     + escapeHtml((base.effective_openai_order || defaultOrder).map(providerLabel).join(' → ')) + '</td><td>'
     + escapeHtml(order.map(providerLabel).join(' → ')) + (resetting ? '（默认）' : payload.providers ? '（显式）' : '（保持）')
+    // 两个面存的是同一份偏好，但生效顺序各自过滤 —— 只列一面会让另一面的改动
+    // 在确认环节完全不可见，而这里正是运维唯一会逐行核对的地方。
+    + '</td></tr><tr><td>渠道顺序 · Messages 面</td><td>'
+    + escapeHtml((base.effective_messages_order || defaultMessagesOrder).map(providerLabel).join(' → ')) + '</td><td>'
+    + escapeHtml(messagesOrder.map(providerLabel).join(' → ')) + (resetting ? '（默认）' : payload.providers ? '（显式）' : '（保持）')
     + '</td></tr><tr><td>账户范围</td><td>' + escapeHtml(accountsText(base.copilot_accounts || []))
     + '</td><td>' + escapeHtml(accountsText(payload.copilot_accounts)) + '</td></tr></tbody></table></div>'
     + (resetting ? '<p class="route-warning">同时清除渠道偏好与账户限定。'
       + (claude ? '该 Claude 模型的 Responses / Chat 入口将关闭。' : '这不是仅清除渠道偏好。') + '</p>' : '')
-    + (opening ? '<p class="route-warning">将显式开放此 Claude 模型的 Responses / Chat；Messages 仍只走 ADB。裸 claude-* 按 GHCP 分档参考价估算，与 ADB 的公开 API 参考计价不同。</p>' : '')
+    + (opening ? '<p class="route-warning">将显式开放此 Claude 模型的 Responses / Chat。Messages 面不受此影响，它的顺序见上一行。裸 claude-* 按 GHCP 分档参考价估算，与 ADB 的公开 API 参考计价不同。</p>' : '')
     + (zero ? '<p class="route-warning">GHCP 配置候选为 0；Foundry 的部署、密钥权限与可用性未在此验证。</p>' : '')
     + (risk ? '<label class="route-option"><input type="checkbox" id="routeRiskAck">我已了解上述影响</label>' : '')
     + '<div class="rule-row route-review-actions"><button class="btn" id="cancelRouteReview" type="button">返回编辑</button>'

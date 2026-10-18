@@ -20,8 +20,8 @@ Author: Zeno Ren
 | 层 | 粒度 | 作用 | 存储 | 读取函数 |
 |---|---|---|---|---|
 | 渠道 allowlist | per-key（租户） | **减法**：移除 provider 候选 | `api_key_policy` | `allowed(tenant)` |
-| provider 优先序 | per-model | **只排序，不减** | `model_provider_preference` | `model_preference(model)` |
-| GHCP 账户选择 | per-model | **减法**：限定该模型用哪些账户 | `model_copilot_account` | `model_allows_account(model, account)` |
+| provider 优先序 | per-model（按**模型身份**，三种拼法共用一条） | **只排序，不减** | `model_provider_preference` | `model_preference(model)` |
+| GHCP 账户选择 | per-model（同上） | **减法**：限定该模型用哪些账户 | `model_copilot_account` | `model_allows_account(model, account)` |
 | `allowed_models` | per-account | **减法**：限定该账户服务哪些模型 | `copilot_account_policy` | `account_allows(account, model)` |
 | 账户启用态 | per-account | **三态开关** | 同上（`enabled` 可空列） | `account_policy(account)` |
 
@@ -382,7 +382,13 @@ Dashboard 的编辑器分三步，并支持点已有规则那一行直接载入�
 - 只编辑一个面时要带上另一个面**已保存**的选择 —— `providers` 是整份替换，只发被编辑的那一段会把另一面悄悄打回默认；
 - 两面都有选择时以 `copilot`（两面唯一共享的 provider）为锚，把 OpenAI 段插进 messages 段，否则为一面指定首位会连带挪动另一面的 `copilot`。
 
-每个下拉只指定**首位**，其余按该面默认序补齐。想要「Foundry Claude → ADB → GHCP」就选 Foundry Claude 优先；`Foundry Claude → GHCP → ADB`（第二位也换）目前表达不了。顺序偏好是运行时 overlay，**保存即生效，不需要重启**（只有端点构建才需要）。
+OpenAI 风格面只有两个 provider，所以指定首位就是完整排序。Messages 面有三个，因此多一个「第二跳」下拉：**选定前两位即确定全序**（第三位只剩一个），不需要拖拽排序控件。第二跳的选项按第一跳动态生成并排除它本身 —— 重复的 provider 会被 `ordered_providers` 拒（400），而那是一个本可以不发生的失败。不选第二跳就回到「只指首位、其余按默认序补齐」，写入的仍然只有一个 provider。
+
+`Foundry Claude → GHCP → ADB` 因此是可表达的：第一跳 Foundry Claude、第二跳 GHCP。顺序偏好是运行时 overlay，**保存即生效，不需要重启**（只有端点构建才需要）。
+
+**规则按模型身份匹配，不按拼法。** 同一个 Claude 模型有三种拼法（`databricks-claude-opus-5-5` / `claude-opus-5.5` / `claude-opus-5-5`），`known_models` 里它们是三个条目，但共用**一条**规则 —— 规则命名的是模型，不是拼法。实现是 `key_policy.rule_key()`：精确拼法优先（最不意外，也让身份匹配之前写的规则继续按原样工作），否则按 `claude_model_identity.canonical()` 归并；非 Claude 模型没有 canonical 身份，仍只精确匹配（没有任何依据说 `gpt-5.4` 与 `gpt-5-4` 是同一个模型）。写入会把其他拼法下的同一条规则**收敛掉**，所以存储里一个模型只有一条规则，Dashboard 不会把同一个模型列两次、给两个互相覆盖的答案。
+
+这一条修掉的不只是体验：`/v1/messages` 的失败转移在调用池**之前**就把模型改写成了各 provider 的拼法，所以 `supports()` 看到的是 `claude-opus-5.5`。按 ADB 或 Foundry 拼法保存的 GHCP 账户限定因此永远查不到，**这一层静默地不再做减法**。
 
 #### 第二段：限定 GHCP 账户
 

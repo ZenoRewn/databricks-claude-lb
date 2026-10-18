@@ -8401,7 +8401,11 @@ def _model_routing_note() -> str:
         "is ignored on that surface. Naming copilot or azure_openai additionally opens a "
         "claude-* model on the OpenAI-style entry points, which are rejected by default. "
         "copilot_accounts subtracts accounts within the Copilot provider and does not "
-        "affect provider fallback; an empty selection means <not limited>."
+        "affect provider fallback; an empty selection means <not limited>. "
+        "A rule is matched by model identity, not by spelling: the same Claude model is "
+        "named three ways (databricks-claude-opus-5-5, claude-opus-5.5, claude-opus-5-5) "
+        "and one rule covers all of them, so writing one spelling replaces a rule stored "
+        "under another instead of shadowing it."
     )
 
 
@@ -10157,6 +10161,23 @@ def _messages_path_views(model: str) -> list:
     return views
 
 
+def _copilot_model_id(model: str) -> str:
+    """How GHCP spells this model — for **diagnostics only**.
+
+    The Copilot capability snapshot holds the ids the upstream returned, so a
+    question about a Claude model has to be asked in Copilot's spelling or the
+    answer is `not_in_capability` for a model it serves.
+
+    Deliberately *not* pushed down into `_copilot_support_reason`: that is the
+    candidate-decision choke point, and the OpenAI-style path forwards the
+    caller's model id verbatim (only `_serve_messages_across_providers`
+    rewrites). Rewriting inside the choke point would let `supports()` promise a
+    spelling the request body then sends unchanged — a 404 from the upstream
+    instead of an honest refusal here.
+    """
+    return claude_identity.rewrite(model, 'copilot') if model else model
+
+
 def _model_routing_view(model: str) -> dict:
     """一条规则的三段：模型 → provider 顺序 → GHCP 账户。"""
     store = key_policy_store
@@ -10165,7 +10186,11 @@ def _model_routing_view(model: str) -> dict:
     # allowed_models、capability 与 config 的 models 列表全在那一个收口里，
     # 在这里再写一遍必然漂移。不传 api_type —— 要答的是「这条规则有没有把
     # 候选清空」，而不是某一个入口的候选集。
-    effective = [ep.name for ep in endpoints if ep.supports(model)]
+    #
+    # 问的是 **GHCP 自己的拼法**：capability 快照存的是上游返回的 id，而
+    # `_messages_path_views` 早就按 `forwarded` 问同一个收口。两处拼法不同
+    # 时，同一个响应会既说 Copilot 这一跳能服务、又说没有账户能服务它。
+    effective = [ep.name for ep in endpoints if ep.supports(_copilot_model_id(model))]
     return {
         "model": model,
         "providers": list(store.model_preference(model)) if store is not None else [],
@@ -10300,10 +10325,14 @@ async def admin_model_routing_candidates(model: str, request: Request,
     store = key_policy_store
     selection = set(store.model_accounts(model)) if store is not None else set()
     accounts = []
+    # 同 `_model_routing_view`：capability 存的是上游的拼法，逐层裁决必须用
+    # GHCP 自己的 id 去问，否则一个它确实在服务的 Claude 模型会被报成
+    # `not_in_capability`。
+    asked = _copilot_model_id(model)
     for ep in _copilot_endpoints():
         policy = _copilot_account_policy(ep.name)
-        reason = _copilot_support_reason(ep, model)
-        ignoring = _copilot_support_reason(ep, model, ignore_model_selection=True)
+        reason = _copilot_support_reason(ep, asked)
+        ignoring = _copilot_support_reason(ep, asked, ignore_model_selection=True)
         accounts.append({
             "account": ep.name,
             "enabled": _copilot_account_enabled(ep),
