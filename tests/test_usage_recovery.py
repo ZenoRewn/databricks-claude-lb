@@ -199,8 +199,10 @@ class TransactionPool:
         elif 'SELECT payload_sha256' in sql:
             self.row=(ledger[params[0]],)
         elif 'INSERT INTO usage_daily' in sql:
+            # (date, model, provider, input_tokens, ...) —— provider 在 model 之后，
+            # 所以 input_tokens 是 params[3]。按上游分行是为了让计价口径分得开。
             if params[1]==self.fail_model:raise OSError('model write failed')
-            tokens[params[1]]=tokens.get(params[1],0)+params[2]
+            tokens[params[1]]=tokens.get(params[1],0)+params[3]
     async def fetchall(self):return []
     async def fetchone(self):return self.row
 

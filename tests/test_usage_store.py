@@ -99,6 +99,18 @@ def _upsert_calls(pool: FakePool) -> list:
     return [(sql, params) for sql, params in pool.executed if "INSERT INTO usage_daily" in sql]
 
 
+# Positional params are brittle: adding the provider column shifted every index
+# by one and broke four unrelated assertions. Name them once instead.
+_UPSERT_FIELDS = ('date', 'model', 'provider', 'input_tokens', 'output_tokens',
+                  'cache_creation_tokens', 'cache_read_tokens', 'requests', 'errors')
+
+
+def _upsert_params(call) -> dict:
+    params = call[1]
+    assert len(params) == len(_UPSERT_FIELDS), f'upsert arity changed: {params}'
+    return dict(zip(_UPSERT_FIELDS, params))
+
+
 class MysqlIncrementalUpsertTests(unittest.IsolatedAsyncioTestCase):
     """MySQL 后端必须增量累加，不能绝对覆盖。"""
 
@@ -132,10 +144,11 @@ class MysqlIncrementalUpsertTests(unittest.IsolatedAsyncioTestCase):
         calls = _upsert_calls(store._pool)
         self.assertEqual(len(calls), 2)
         # params 顺序: (date, model, input, output, cache_creation, cache_read, requests, errors)
-        first_input, second_input = calls[0][1][2], calls[1][1][2]
+        first_input = _upsert_params(calls[0])['input_tokens']
+        second_input = _upsert_params(calls[1])['input_tokens']
         self.assertEqual(first_input, 10)
         self.assertEqual(second_input, 3, "第二批应写增量 3，写 13 说明退回了累计语义")
-        self.assertEqual(calls[1][1][6], 1, "requests 同样是本批增量")
+        self.assertEqual(_upsert_params(calls[1])["requests"], 1, "requests 同样是本批增量")
 
         # 内存里的当天视图仍是累计（/stats 依赖它）
         self.assertEqual(store.get_today_data()["models"]["gpt-5.6-sol"]["input_tokens"], 13)
@@ -148,7 +161,8 @@ class MysqlIncrementalUpsertTests(unittest.IsolatedAsyncioTestCase):
         DB 最终只保留最后写入的那份 → 断言失败。
         """
         # 两个 pod 启动时都从 DB 读到同一天已有 100 input tokens
-        existing_rows = [("gpt-5.6-sol", 100, 50, 0, 0, 4, 0)]
+        # provider 列为 'unknown' —— 迁移前写入的行就是这个形状。
+        existing_rows = [("gpt-5.6-sol", "unknown", 100, 50, 0, 0, 4, 0)]
 
         pod_a = _mysql_store(rows=existing_rows)
         pod_b = _mysql_store(rows=existing_rows)
@@ -164,8 +178,8 @@ class MysqlIncrementalUpsertTests(unittest.IsolatedAsyncioTestCase):
         await pod_a._flush()
         await pod_b._flush()
 
-        a_written = _upsert_calls(pod_a._pool)[0][1][2]
-        b_written = _upsert_calls(pod_b._pool)[0][1][2]
+        a_written = _upsert_params(_upsert_calls(pod_a._pool)[0])['input_tokens']
+        b_written = _upsert_params(_upsert_calls(pod_b._pool)[0])['input_tokens']
         # 增量语义下 DB 行 = 100 + 10 + 7 = 117
         self.assertEqual(100 + a_written + b_written, 117,
                          "两副本的落盘增量之和必须等于真实总量；"
@@ -187,7 +201,7 @@ class MysqlIncrementalUpsertTests(unittest.IsolatedAsyncioTestCase):
         store.record("gpt-5.6-sol", input_tokens=1, output_tokens=1)
         await store._flush()
         calls = _upsert_calls(store._pool)
-        self.assertEqual(calls[0][1][7], 1, "per-model errors 必须是真实增量")
+        self.assertEqual(_upsert_params(calls[0])["errors"], 1, "per-model errors 必须是真实增量")
         self.assertEqual(store.get_today_data()["models"]["gpt-5.6-sol"]["errors"], 1)
         self.assertEqual(store.get_today_data()["totals"]["errors"], 1)
 
@@ -197,7 +211,7 @@ class MysqlIncrementalUpsertTests(unittest.IsolatedAsyncioTestCase):
         否则「进程内新建」与「从 DB 载入」两条路径的字典形状不同，消费方一旦不用
         `.get()` 取值就 KeyError —— 而这种差异只会在重启后才暴露。
         """
-        store = _mysql_store(rows=[("gpt-5.6-sol", 10, 5, 0, 3, 2, 1)])
+        store = _mysql_store(rows=[("gpt-5.6-sol", "unknown", 10, 5, 0, 3, 2, 1)])
         loaded = await store._load_day(date.today())
         self.assertEqual(set(loaded["models"]["gpt-5.6-sol"]),
                          set(UsageDataStore._empty_model()))
@@ -438,3 +452,93 @@ class FactoryTests(unittest.TestCase):
         with patch.dict(sys.modules, {"aiomysql": None}):
             with self.assertRaises(SystemExit):
                 create_usage_store({"type": "mysql", "host": "h", "database": "d"})
+
+
+class ProviderAttributionTests(unittest.IsolatedAsyncioTestCase):
+    """用量必须按 provider 归因，否则 Foundry 的量会被按别人的价结算。
+
+    2026-10-18 查到的链路：Foundry 在 /v1/messages 上记录的模型名是裸
+    `claude-opus-5-5`，而 `usage_daily` 的主键只有 (date, model)，日聚合层
+    没有 provider。于是：
+
+    * `historical_model_cost` 只能按名字推断渠道，裸 `claude-*` 被判为
+      Copilot，于是 Foundry 的量套上 GHCP 分档价，还报 `status=complete`
+      —— 一个自信的错数字，正是不变量禁止的；
+    * 更糟的是 `claude-opus-5` 与 `claude-sonnet-5` 在 GHCP 与 Foundry
+      **完全同名**，两家的量会被合并进同一行，连理论上都无法分开核账。
+
+    逐请求事件本来就有 provider 字段，所以修法是把它一路带到日聚合。
+    """
+
+    async def test_each_provider_gets_its_own_daily_row(self):
+        store = _mysql_store()
+        # 同一天、同一个模型名、两个不同上游 —— 这是 claude-opus-5 的真实形状。
+        store.record("claude-opus-5", input_tokens=10, output_tokens=5, provider="copilot")
+        store.record("claude-opus-5", input_tokens=70, output_tokens=7, provider="azure_anthropic")
+        await store._flush()
+
+        calls = _upsert_calls(store._pool)
+        self.assertEqual(len(calls), 2,
+                         "两个 provider 必须写两行，合并成一行就无法分开核账")
+        providers = {_upsert_params(call)['provider'] for call in calls}
+        self.assertEqual(providers, {"copilot", "azure_anthropic"},
+                         "provider 必须作为键参数写进去")
+
+    async def test_the_primary_key_separates_providers(self):
+        store = _mysql_store()
+        store.record("claude-opus-5", input_tokens=1, output_tokens=1, provider="copilot")
+        await store._flush()
+        sql = _upsert_calls(store._pool)[0][0]
+        self.assertIn("provider", sql, "upsert 必须包含 provider 列")
+        # 累加语义不能被这次改动破坏
+        for col in ("input_tokens", "output_tokens", "requests"):
+            self.assertIn(f"{col} = {col} + VALUES({col})", sql)
+
+    async def test_the_in_memory_view_keeps_the_model_total_and_adds_a_breakdown(self):
+        store = _mysql_store()
+        store.record("claude-opus-5", input_tokens=10, output_tokens=5, provider="copilot")
+        store.record("claude-opus-5", input_tokens=70, output_tokens=7, provider="azure_anthropic")
+        await store._flush()
+        model = store.get_today_data()["models"]["claude-opus-5"]
+        # 总量语义不变 —— 看板的模型用量表读的是这一层。
+        self.assertEqual(model["input_tokens"], 80)
+        self.assertEqual(model["requests"], 2)
+        # 新增的分解让计价能按各自口径算。
+        self.assertEqual(model["by_provider"]["copilot"]["input_tokens"], 10)
+        self.assertEqual(model["by_provider"]["azure_anthropic"]["input_tokens"], 70)
+        self.assertEqual(model["by_provider"]["azure_anthropic"]["requests"], 1)
+
+    async def test_an_unattributed_event_is_recorded_as_unknown_not_guessed(self):
+        store = _mysql_store()
+        store.record("gpt-5.6-sol", input_tokens=1, output_tokens=1)
+        await store._flush()
+        self.assertEqual(_upsert_params(_upsert_calls(store._pool)[0])["provider"], "unknown",
+                         "没有归因就记 unknown；猜一个 provider 会污染计价口径")
+
+    async def test_loading_a_day_rebuilds_the_breakdown_from_the_rows(self):
+        # 「进程内新建」与「从 DB 载入」的形状必须一致，否则消费方 KeyError。
+        rows = [("claude-opus-5", "copilot", 10, 5, 0, 0, 1, 0),
+                ("claude-opus-5", "azure_anthropic", 70, 7, 0, 0, 1, 0)]
+        store = _mysql_store(rows=rows)
+        day = await store._load_day(date(2026, 10, 18))
+        model = day["models"]["claude-opus-5"]
+        self.assertEqual(model["input_tokens"], 80, "总量是各 provider 之和")
+        self.assertEqual(set(model["by_provider"]), {"copilot", "azure_anthropic"})
+        self.assertEqual(day["totals"]["requests"], 2)
+        self.assertEqual(set(model) - {"by_provider"}, set(UsageDataStore._empty_model()) - {"by_provider"},
+                         "除 by_provider 外键集必须与 _empty_model 一致")
+
+    async def test_a_legacy_row_without_a_provider_loads_as_unknown(self):
+        # 迁移前写入的行 provider 是 DEFAULT 'unknown'，必须照旧可读。
+        store = _mysql_store(rows=[("databricks-claude-opus-5", "unknown", 5, 2, 0, 0, 1, 0)])
+        day = await store._load_day(date(2026, 10, 18))
+        model = day["models"]["databricks-claude-opus-5"]
+        self.assertEqual(model["input_tokens"], 5)
+        self.assertEqual(list(model["by_provider"]), ["unknown"])
+
+    async def test_the_created_schema_carries_provider_in_its_primary_key(self):
+        store = _mysql_store()
+        await store._create_schema()
+        ddl = "\n".join(sql for sql, _ in store._pool.executed if "CREATE TABLE" in sql)
+        self.assertIn("provider", ddl)
+        self.assertIn("PRIMARY KEY (date, model, provider)", ddl)
