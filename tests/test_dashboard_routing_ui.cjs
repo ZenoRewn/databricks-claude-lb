@@ -67,10 +67,27 @@ function harness(overrides = {}) {
         addEventListener(type, listener) {listeners.set(`${id}:${type}`, listener);},
         focus() {}, scrollIntoView() {}, querySelector() {return null;},
         querySelectorAll() {return [];}};
+      const optionValues = markup =>
+        [...markup.matchAll(/<option[^>]*value="([^"]*)"/g)].map(match => match[1]);
       Object.defineProperty(node, 'options', {get() {
-        return [...this.innerHTML.matchAll(/<option[^>]*value="([^"]*)"/g)]
-          .map(match => ({value: match[1]}));
+        return optionValues(this.innerHTML).map(value => ({value}));
       }});
+      // Replacing a <select>'s innerHTML destroys every option node, so the
+      // browser resets it to the first option — it does **not** match the old
+      // value by string, even when an equal one is still in the new list
+      // (verified in Chrome). A plain string property cannot see that, which is
+      // how «rebuilt the options and silently dropped the operator's choice»
+      // passed these fixtures while being visibly wrong in the real panel.
+      let markup = '';
+      Object.defineProperty(node, 'innerHTML', {
+        get() {return markup;},
+        set(next) {
+          markup = String(next == null ? '' : next);
+          if (!markup.includes('<option')) return;
+          const values = optionValues(markup);
+          this.value = values.length ? values[0] : '';
+        },
+      });
       elements.set(id, node);
     }
     return elements.get(id);
@@ -158,10 +175,11 @@ function harness(overrides = {}) {
     await tick();
     return editorState();
   }
-  function edit({provider = '', messagesProvider = '', mode = 'selected',
-                 accounts = ['acct-a']} = {}) {
+  function edit({provider = '', messagesProvider = '', messagesSecond = '',
+                 mode = 'selected', accounts = ['acct-a']} = {}) {
     element('ruleProvider').value = provider;
     element('ruleMessagesProvider').value = messagesProvider;
+    element('ruleMessagesSecond').value = messagesSecond;
     element('ruleAccountMode').value = mode;
     routeNodes = [...new Set(['acct-a', 'acct-b', 'acct-off', 'acct-unknown', ...accounts])]
       .map(name => ({checked: accounts.includes(name), disabled: false,
@@ -765,6 +783,129 @@ test('the messages order control says it shares one preference with the other su
   assert.ok(!/只调整 GHCP \/ Foundry/.test(html),
     'the claim that the order touches only GHCP/Foundry is wrong and must go');
   assert.match(html, /同一份偏好/);
+});
+
+test('the pre-save review shows the messages surface, not only the OpenAI one', async () => {
+  // The review table is the one place an operator reads line by line before
+  // committing. It listed `effective_openai_order` alone, so a messages-surface
+  // change — the whole point of the second dropdown — was invisible there.
+  const h = harness();
+  h.snapshots['claude-review-synthetic'] = diagnostic('claude-review-synthetic');
+  await h.select('claude-review-synthetic');
+  h.edit({messagesProvider: 'azure_anthropic', mode: 'all', accounts: []});
+  await h.context.saveRule();
+  const review = h.element('routeReview').innerHTML;
+  assert.match(review, /Messages 面/, 'the messages surface needs its own row');
+  assert.match(review, /OpenAI 面/, 'and the other row must say which surface it is');
+  assert.match(review, /Foundry Claude → ADB → GHCP/,
+    'the proposed messages order must be spelled out, chosen provider first');
+  assert.equal(h.mutations().length, 0, 'review precedes any write');
+});
+
+test('the panel states that one rule covers every spelling of the model', async () => {
+  // Three dropdown entries name one model. Without saying they share a rule,
+  // picking the «wrong» one looks like the rule did not apply.
+  assert.match(html, /按模型身份匹配/);
+  assert.match(html, /claude-opus-5\.5/, 'the spellings must be shown, not just asserted');
+  assert.ok(!/仍只走 ADB/.test(html), 'the messages surface is no longer ADB-only');
+});
+
+// ---- the second hop on the messages surface --------------------------------
+// «Pick the leader» cannot express `Foundry Claude → GHCP → ADB`: it fixes
+// first place and leaves the rest on the default order. With three providers,
+// naming the first two determines the whole order, so one more select is the
+// entire remaining expressiveness — no reordering widget needed.
+
+test('the messages surface can name its second hop', async () => {
+  const h = harness();
+  await h.select('claude-haiku-5.5');
+  h.edit({messagesProvider: 'azure_anthropic', messagesSecond: 'copilot',
+    mode: 'all', accounts: []});
+  // Preview first: the effect has to be visible *before* committing, the same
+  // contract the leader-only control already keeps.
+  const chain = h.element('ruleMessagesPaths').innerHTML;
+  assert.ok(chain.indexOf('Foundry Claude') < chain.indexOf('GHCP')
+    && chain.indexOf('GHCP') < chain.indexOf('ADB'),
+    'the preview must show the full order the choice produces');
+  await h.save();
+  assert.deepEqual(JSON.parse(h.mutations()[0].options.body).providers,
+    ['azure_anthropic', 'copilot'],
+    'both named hops must reach the backend, which appends the remainder');
+});
+
+test('the second hop is optional and leaves the default filling the rest', async () => {
+  const h = harness();
+  await h.select('claude-haiku-5.5');
+  h.edit({messagesProvider: 'azure_anthropic', mode: 'all', accounts: []});
+  await h.save();
+  assert.deepEqual(JSON.parse(h.mutations()[0].options.body).providers, ['azure_anthropic'],
+    'naming only the leader must keep writing exactly one provider');
+});
+
+test('the second hop cannot repeat the first', async () => {
+  const h = harness();
+  await h.select('claude-haiku-5.5');
+  h.edit({messagesProvider: 'azure_anthropic', mode: 'all', accounts: []});
+  const options = h.element('ruleMessagesSecond').options.map(o => o.value);
+  assert.ok(!options.includes('azure_anthropic'),
+    'the leader must not be offered again; a repeat is rejected by the backend');
+  assert.ok(options.includes('databricks') && options.includes('copilot'));
+  assert.ok(options.includes(''), 'leaving the second hop to the default stays possible');
+});
+
+test('a stale second hop is dropped when it becomes the first', async () => {
+  // Choosing GHCP second and then GHCP first would otherwise submit a repeated
+  // provider, which `ordered_providers` rejects — a 400 on save.
+  const h = harness();
+  await h.select('claude-haiku-5.5');
+  h.edit({messagesProvider: 'azure_anthropic', messagesSecond: 'copilot',
+    mode: 'all', accounts: []});
+  h.edit({messagesProvider: 'copilot', messagesSecond: 'copilot',
+    mode: 'all', accounts: []});
+  await h.save();
+  assert.deepEqual(JSON.parse(h.mutations()[0].options.body).providers, ['copilot'],
+    'no provider may repeat');
+});
+
+test('a second hop on one surface does not move the other surface', async () => {
+  const h = harness();
+  await h.select('claude-sonnet-5.5');  // has a saved azure_openai-first rule
+  h.edit({messagesProvider: 'azure_anthropic', messagesSecond: 'copilot',
+    mode: 'all', accounts: []});
+  await h.save();
+  const providers = JSON.parse(h.mutations()[0].options.body).providers;
+  const messages = providers.filter(p => ['databricks', 'copilot', 'azure_anthropic'].includes(p));
+  const openai = providers.filter(p => ['copilot', 'azure_openai'].includes(p));
+  assert.deepEqual(messages, ['azure_anthropic', 'copilot', 'databricks'],
+    'the messages surface keeps the order both named hops imply');
+  assert.deepEqual(openai, ['azure_openai', 'copilot'],
+    'the saved OpenAI choice must survive an edit to the other surface');
+});
+
+test('rebuilding the second-hop options keeps the chosen hop', async () => {
+  // Found in a real browser, not here: the options are rebuilt from the first
+  // hop on every render, and replacing them resets the select. The draft stayed
+  // correct for exactly one render, then `renderRulePreview` read the emptied
+  // DOM back and the save submitted the leader alone.
+  const h = harness();
+  await h.select('claude-haiku-5.5');
+  h.edit({messagesProvider: 'azure_anthropic', messagesSecond: 'copilot',
+    mode: 'all', accounts: []});
+  h.context.renderRulePreview();          // the extra pass `saveRule` performs
+  assert.equal(h.element('ruleMessagesSecond').value, 'copilot',
+    'the control must still show the chosen second hop');
+  assert.equal(h.editorState().draft.messagesSecondChoice, 'copilot',
+    'and the draft must not have been emptied by the rebuild');
+});
+
+test('the review shows the full ordered messages chain, not just the leader', async () => {
+  const h = harness();
+  h.snapshots['claude-second-synthetic'] = diagnostic('claude-second-synthetic');
+  await h.select('claude-second-synthetic');
+  h.edit({messagesProvider: 'azure_anthropic', messagesSecond: 'copilot',
+    mode: 'all', accounts: []});
+  await h.context.saveRule();
+  assert.match(h.element('routeReview').innerHTML, /Foundry Claude → GHCP → ADB/);
 });
 
 async function run() {

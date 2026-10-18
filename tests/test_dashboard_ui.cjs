@@ -813,7 +813,14 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
   assert.match(html, /配置候选/, 'configuration eligibility must be named precisely');
   assert.match(html, /时点判断|时点发现/, 'the candidate evidence is point-in-time');
   assert.match(html, /不代表实时流量/, 'eligibility must not masquerade as live traffic');
-  assert.match(html, /仍只走 ADB|仍然只走 ADB/, 'Messages stays Databricks-only');
+  // The messages surface is no longer Databricks-only (three verified paths,
+  // 2026-10-17), and this panel can order it. The old copy claiming otherwise
+  // was pinned here and survived the change — a false statement with a test
+  // defending it, which is worse than no test.
+  assert.doesNotMatch(html, /仍只走 ADB|仍然只走 ADB/,
+    'the messages surface has three paths and this panel orders them');
+  assert.match(html, /同一?模型的?三种拼法|按模型身份匹配/,
+    'one rule covers every spelling of the model, and the panel must say so');
   const routingJs = section('// ---------- Routing rules:', '// A verifier is stored');
   assert.doesNotMatch(routingJs, /data-global-enable|writeAccountEnablement\(/,
     'the model editor must never write a global account setting');

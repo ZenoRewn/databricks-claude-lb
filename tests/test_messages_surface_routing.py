@@ -138,6 +138,26 @@ class LivePreferenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([p['provider'] for p in main._messages_path_views('claude-opus-5-5')],
                          ['azure_anthropic', 'databricks', 'copilot'])
 
+    async def test_naming_two_hops_fixes_the_whole_order(self):
+        # What «pick the leader» could not express: the second position. With
+        # three providers the first two determine the third, so a two-entry
+        # preference is a complete order and the default fills nothing that
+        # contradicts it.
+        await self.store.set_model_preference('claude-opus-5-5', ['azure_anthropic', 'copilot'])
+        self.assertEqual(main._messages_provider_order('claude-opus-5-5'),
+                         ('azure_anthropic', 'copilot', 'databricks'))
+        self.assertEqual(main._openai_provider_order('claude-opus-5-5'),
+                         ('copilot', 'azure_openai'),
+                         'naming GHCP second on this surface must not reorder the other one')
+
+    async def test_a_second_hop_is_resolved_by_model_identity_too(self):
+        await self.store.set_model_preference('databricks-claude-opus-5-5',
+                                              ['azure_anthropic', 'copilot'])
+        for model in ('claude-opus-5-5', 'claude-opus-5.5', 'databricks-claude-opus-5-5'):
+            with self.subTest(model=model):
+                self.assertEqual(main._messages_provider_order(model),
+                                 ('azure_anthropic', 'copilot', 'databricks'))
+
     async def test_a_merged_two_surface_preference_satisfies_both(self):
         # Exactly what the Dashboard writes when both dropdowns are set:
         # copilot is the shared anchor, each surface still leads with its own.
@@ -201,6 +221,14 @@ class RoutingNoteTests(unittest.TestCase):
         # And it must say what actually happens on each surface.
         self.assertIn('/v1/messages', note)
         self.assertIn('azure_anthropic', note)
+
+    def test_the_note_says_a_rule_covers_every_spelling_of_the_model(self):
+        # `known_models` offers the same Claude model under three spellings.
+        # Without this sentence an operator cannot tell that picking a different
+        # one edits the same rule rather than creating a second.
+        note = main._model_routing_note()
+        self.assertIn('spelling', note)
+        self.assertIn('identity', note)
 
 
 if __name__ == '__main__':
