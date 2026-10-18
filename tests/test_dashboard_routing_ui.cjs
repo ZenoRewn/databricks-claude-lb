@@ -39,6 +39,15 @@ const seedDiagnostics = {
   'gpt-5.4': diagnostic('gpt-5.4'),
   'claude-opus-5.5': diagnostic('claude-opus-5.5', {providers: ['copilot'],
     opens_claude_on_openai_entry_points: true}),
+  // A saved OpenAI-side choice that is NOT that surface's default first hop.
+  // With ['copilot'] the loss of the preference is invisible, because copilot
+  // is where the default lands anyway.
+  'claude-sonnet-5.5': diagnostic('claude-sonnet-5.5', {providers: ['azure_openai'],
+    effective_openai_order: ['azure_openai', 'copilot'],
+    opens_claude_on_openai_entry_points: true}),
+  // No stored preference at all, so a single surface choice has nothing to
+  // carry along and must write exactly one provider.
+  'claude-haiku-5.5': diagnostic('claude-haiku-5.5'),
 };
 function section(from, to) {
   assert.ok(html.includes(from) && html.includes(to), `Missing script section ${from}`);
@@ -69,7 +78,9 @@ function harness(overrides = {}) {
   const requests = [];
   const snapshots = clone(seedDiagnostics);
   const routingPayload = () => ({default_openai_order: ['copilot', 'azure_openai'],
-    provider_labels: {copilot: 'GHCP', azure_openai: 'Foundry', databricks: 'ADB'},
+    default_messages_order: ['databricks', 'copilot', 'azure_anthropic'],
+    provider_labels: {copilot: 'GHCP', azure_openai: 'Foundry', databricks: 'ADB',
+      azure_anthropic: 'Foundry Claude'},
     known_models: [...Object.keys(snapshots), 'constructor', '__proto__'],
     copilot_accounts_available: [account('acct-a'), account('acct-b'),
       account('acct-off', {enabled: false}), account('acct-unknown')],
@@ -147,8 +158,10 @@ function harness(overrides = {}) {
     await tick();
     return editorState();
   }
-  function edit({provider = '', mode = 'selected', accounts = ['acct-a']} = {}) {
+  function edit({provider = '', messagesProvider = '', mode = 'selected',
+                 accounts = ['acct-a']} = {}) {
     element('ruleProvider').value = provider;
+    element('ruleMessagesProvider').value = messagesProvider;
     element('ruleAccountMode').value = mode;
     routeNodes = [...new Set(['acct-a', 'acct-b', 'acct-off', 'acct-unknown', ...accounts])]
       .map(name => ({checked: accounts.includes(name), disabled: false,
@@ -545,7 +558,17 @@ test('a legacy ADB-only preference does not open Claude and still requires ackno
   await h.context.confirmRouteSave();
   assert.equal(h.mutations().length, 1);
   assert.equal(h.mutations()[0].method, 'PUT');
-  assert.deepEqual(JSON.parse(h.mutations()[0].options.body).providers, ['copilot']);
+  const sent = JSON.parse(h.mutations()[0].options.body).providers;
+  const leads = (surface) => {
+    const kept = sent.filter(p => surface.includes(p));
+    return [...kept, ...surface.filter(p => !kept.includes(p))][0];
+  };
+  // The opt-in names copilot on the OpenAI-style surface...
+  assert.equal(leads(['copilot', 'azure_openai']), 'copilot');
+  // ...and must not quietly demote ADB on the messages surface, which is what
+  // the stored `['databricks']` says there. Writing a bare ['copilot'] would
+  // have made GHCP lead /v1/messages as a side effect of an unrelated edit.
+  assert.equal(leads(['databricks', 'copilot', 'azure_anthropic']), 'databricks');
   assert.equal(h.snapshots[model].opens_claude_on_openai_entry_points, true);
 });
 
@@ -619,6 +642,129 @@ test('the OpenAI-style order is labelled as that surface, not as the only one', 
   assert.match(html, /OpenAI 风格入口/);
   assert.match(html, /Anthropic Messages 面/);
   assert.match(html, /v1\/messages/);
+});
+
+test('the messages surface has its own order control, offering all three of its providers', async () => {
+  // It previously had none: the single dropdown was built from
+  // default_openai_order, so its only «Foundry» was azure_openai — the gpt
+  // face, which the messages surface filters out. Picking it did nothing to
+  // Claude, and azure_anthropic could not be named at all.
+  const h = harness();
+  await h.select('claude-opus-5.5');
+  const options = h.element('ruleMessagesProvider').options.map(o => o.value);
+  for (const provider of ['databricks', 'copilot', 'azure_anthropic']) {
+    assert.ok(options.includes(provider), `the messages order must offer ${provider}`);
+  }
+  assert.ok(!options.includes('azure_openai'),
+    'azure_openai cannot serve /v1/messages and must not be offered there');
+});
+
+test('choosing a messages-surface order updates the preview before saving', async () => {
+  // The preview read the saved baseline, so selecting «Foundry Claude 优先»
+  // left the chain showing ADB → GHCP → Foundry and looked like a no-op.
+  const h = harness();
+  await h.select('claude-opus-5.5');
+  h.edit({messagesProvider: 'azure_anthropic'});
+  const chain = h.element('ruleMessagesPaths').innerHTML;
+  const order = ['databricks', 'copilot', 'azure_anthropic']
+    .map(p => ({p, at: chain.indexOf({databricks: 'ADB', copilot: 'GHCP',
+      azure_anthropic: 'Foundry Claude'}[p])}));
+  assert.ok(order.every(entry => entry.at >= 0), 'all three paths stay listed');
+  assert.equal(order.slice().sort((a, b) => a.at - b.at)[0].p, 'azure_anthropic',
+    'the chosen provider must lead the chain without saving first');
+});
+
+test('the two surface orders are stored as one preference without crosstalk', async () => {
+  // One stored list feeds both surfaces, and copilot is the only provider they
+  // share. Naming a first choice on each surface must survive both filters —
+  // that is what makes «Foundry Claude first on messages» coexist with
+  // «Foundry first on the OpenAI entries».
+  const h = harness();
+  await h.select('claude-opus-5.5');
+  h.edit({provider: 'azure_openai', messagesProvider: 'azure_anthropic'});
+  await h.save();
+  const put = h.mutations().find(r => r.method === 'PUT');
+  assert.ok(put, 'the choice must be written');
+  const sent = JSON.parse(put.options.body).providers;
+  const MESSAGES = ['databricks', 'copilot', 'azure_anthropic'];
+  const OPENAI = ['copilot', 'azure_openai'];
+  // Replay the backend's own filter: keep what the surface serves, then append
+  // the surface default for anything unnamed.
+  const effective = (surface, fallback) => {
+    const kept = sent.filter(p => surface.includes(p));
+    return [...kept, ...fallback.filter(p => !kept.includes(p))];
+  };
+  assert.equal(effective(MESSAGES, MESSAGES)[0], 'azure_anthropic',
+    'the messages surface must lead with the provider chosen for it');
+  assert.equal(effective(OPENAI, OPENAI)[0], 'azure_openai',
+    'the OpenAI-style surface must keep its own first choice');
+});
+
+test('a messages-only choice still leaves the OpenAI surface on its default', async () => {
+  const h = harness();
+  await h.select('claude-opus-5.5');
+  h.edit({messagesProvider: 'azure_anthropic'});
+  await h.save();
+  const sent = JSON.parse(h.mutations().find(r => r.method === 'PUT').options.body).providers;
+  const openai = sent.filter(p => ['copilot', 'azure_openai'].includes(p));
+  assert.ok(!openai.length || openai[0] === 'copilot',
+    'picking a messages provider must not silently promote one on the other surface');
+});
+
+test('neither surface chosen writes no provider preference at all', async () => {
+  // Writing a list equal to the default would turn «no opinion» into a stored
+  // opinion, which then survives a change of defaults.
+  const h = harness();
+  await h.select('claude-opus-5.5');
+  h.edit({provider: '', messagesProvider: '', accounts: ['acct-a']});
+  await h.save();
+  const put = h.mutations().find(r => r.method === 'PUT');
+  assert.ok(put, 'the account segment still saves');
+  assert.ok(!('providers' in JSON.parse(put.options.body)),
+    'an unset order must not be written as a preference');
+});
+
+test('an OpenAI-only choice leaves the messages surface following its default', async () => {
+  // Spelling out both segments when only one was chosen moves `copilot` to a
+  // position nobody asked for: the messages surface would read copilot first
+  // instead of ADB. A single choice must write a single provider.
+  const h = harness();
+  await h.select('claude-haiku-5.5');
+  h.edit({provider: 'azure_openai'});
+  await h.save();
+  const sent = JSON.parse(h.mutations().find(r => r.method === 'PUT').options.body).providers;
+  assert.deepEqual(sent, ['azure_openai'], 'only the chosen provider belongs in the preference');
+  const MESSAGES = ['databricks', 'copilot', 'azure_anthropic'];
+  const kept = sent.filter(p => MESSAGES.includes(p));
+  assert.deepEqual([...kept, ...MESSAGES.filter(p => !kept.includes(p))], MESSAGES,
+    'the messages surface must still resolve to its untouched default order');
+});
+
+test('setting one surface does not discard the other surface saved choice', async () => {
+  // `providers` is replaced wholesale, so emitting only the segment just edited
+  // silently reverts the other surface to its default. Caught on a live preview,
+  // not by fixtures: the other seed's saved choice happened to equal the default.
+  const h = harness();
+  await h.select('claude-sonnet-5.5');
+  h.edit({messagesProvider: 'azure_anthropic'});
+  await h.save();
+  const sent = JSON.parse(h.mutations().find(r => r.method === 'PUT').options.body).providers;
+  const first = (surface) => {
+    const kept = sent.filter(p => surface.includes(p));
+    return [...kept, ...surface.filter(p => !kept.includes(p))][0];
+  };
+  assert.equal(first(['databricks', 'copilot', 'azure_anthropic']), 'azure_anthropic',
+    'the newly chosen messages provider must lead');
+  assert.equal(first(['copilot', 'azure_openai']), 'azure_openai',
+    'the previously saved OpenAI choice must survive an unrelated edit');
+});
+
+test('the messages order control says it shares one preference with the other surface', async () => {
+  // The old copy claimed the single dropdown ordered the OpenAI entries only,
+  // which is why picking «Foundry 优先» for a Claude model looked broken.
+  assert.ok(!/只调整 GHCP \/ Foundry/.test(html),
+    'the claim that the order touches only GHCP/Foundry is wrong and must go');
+  assert.match(html, /同一份偏好/);
 });
 
 async function run() {

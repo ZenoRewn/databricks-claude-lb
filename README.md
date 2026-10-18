@@ -2,7 +2,7 @@
 
 Author: Zeno Ren
 
-为 Claude Code、OpenAI 兼容客户端和内部工具提供统一的模型网关：接入 Databricks、Azure OpenAI 与 GitHub Copilot，管理端点分流、保守重试、流式协议、用量持久化和运行观测。
+为 Claude Code、OpenAI 兼容客户端和内部工具提供统一的模型网关：接入 Databricks、Azure OpenAI、GitHub Copilot 与 Microsoft Foundry，管理端点分流、保守重试、流式协议、用量持久化和运行观测。
 
 [快速开始](#快速开始) · [配置与客户端](docs/CONFIGURATION.md) · [Dashboard](#dashboard) · [AKS 发布](docs/AKS.md) · [完整文档](docs/README.md)
 
@@ -10,9 +10,12 @@ Author: Zeno Ren
 
 | 渠道 | 客户端入口 | 路由行为 |
 |---|---|---|
-| Databricks Claude | `/v1/messages` | Claude 模型映射、多 workspace 分流 |
-| GitHub Copilot | `/v1/responses`、`/v1/chat/completions` | OpenAI 风格模型优先使用 Copilot；保留账户亲和与有界认证修复 |
+| Databricks Claude | `/v1/messages` | Claude 模型映射、多 workspace 分流；messages 面默认第一跳 |
+| GitHub Copilot | `/v1/responses`、`/v1/chat/completions`、`/v1/messages` | OpenAI 风格模型优先使用 Copilot；保留账户亲和与有界认证修复。能否服务 Claude 取决于账户 SKU |
 | Azure OpenAI | `/v1/responses`、`/v1/chat/completions` | 按已配置 deployment 选择端点；仅在允许的准入/兼容性分支接管 |
+| Foundry Claude | `/v1/messages` | 同一 Foundry 资源的 Anthropic 面，与上一行**分开配置**：协议、鉴权头、模型 id、计费单位都不同。按 CCU 计量，所以费用报未知而非零 |
+
+`/v1/messages` 由三家共同服务（默认 ADB → GHCP → Foundry），优先序可**逐模型**调整。同一模型在三家有三种拼法（`databricks-claude-opus-5-5` / `claude-opus-5.5` / `claude-opus-5-5`），回落时自动改写 —— 拿点号问 Foundry 会 404。见 [三路径证据](docs/reviews/2026-10-17-claude-three-paths/EVIDENCE.md)。
 
 网关提供完整 SSE 帧转发、请求 ID 与分阶段诊断、熔断与半开试探、有界并发和输入预算、参数兼容提示，以及 JSON/MySQL 用量后端。图片可以压缩；超量裁剪默认拒绝，必须明确允许。Chat→Responses 适配保留可支持的工具、schema、refusal 和 incomplete 语义。
 
@@ -125,7 +128,7 @@ python -m operations.build_identity \
 
 AKS 操作从 [部署指南](docs/AKS.md) 和 [受控发布工具](docs/RELEASE_TOOL.md) 开始。`deploy/k8s/` 是示例形态，**不能整份 apply 覆盖现有生产环境**。单副本发布可能产生维护窗口；需要预先完成备份、排空、恢复材料和业务验收。
 
-最近一次已记录的 AKS 发布为 [2026-10-17 Dashboard 工作台与 h2 连接退休](docs/reviews/2026-10-17-aks-release/REPORT.md)，应用源码 `34acc39`，维护 66.7 秒，三协议业务探针、账本与清理验收通过。该次包含 Dashboard「密钥与渠道」工作台改版，以及一条 h2 连接被用到服务端不再接受新流时的优雅退休（只拦新流、在途流跑完），外加 `copilot_h2_stream_id_watermark` 这个故障前就能看见的预警。后续文档或代码提交不自动表示线上更新。历次验证与部署结果集中在 [验证索引](docs/reviews/README.md)。
+最近一次已记录的 AKS 发布为 [2026-10-17 Claude 三路径上线](docs/reviews/2026-10-17-three-paths-release/REPORT.md)，应用源码 `0a9f830`，维护 48.0 秒，三协议业务探针、账本与清理验收通过。该次把 `/v1/messages` 从单一 Databricks 扩成 ADB / GHCP / Foundry 三条路径，并首次把 Foundry 凭据配进生产。已知缺口：Foundry 尚未进入 `/stats` 与 `/metrics`，它一旦接流量就看不见请求数、熔断与成本。后续文档或代码提交不自动表示线上更新。历次验证与部署结果集中在 [验证索引](docs/reviews/README.md)。
 
 ## 开发
 

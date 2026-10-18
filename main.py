@@ -3467,6 +3467,13 @@ class LoadBalancer:
             }
             if hasattr(ep, "deployments"):
                 stat["deployments"] = ep.deployments
+            elif getattr(ep, "provider", None) == "azure_anthropic" and ep.models:
+                # Foundry declares its models as `deployments` in config and has
+                # no Models API to ask, so this list is the only statement of
+                # what it serves — and it is the spelling most easily got wrong
+                # (dashes, not dots). Reported under the same key the Azure
+                # OpenAI face uses, so one column renders both.
+                stat["deployments"] = list(ep.models)
             endpoints_stats.append(stat)
         return {"endpoints": endpoints_stats}
 
@@ -9586,7 +9593,35 @@ async def metrics(schema: str = 'lb-metrics-v2'):
         emit("azure_openai_html_soft_cooldown_remaining_seconds",
              "Remaining seconds before Azure endpoint exits HTML soft cooldown", "gauge", az_cd_rem)
 
-    for provider, instance in (("copilot", copilot_proxy), ("azure_openai", azure_proxy), ("databricks", proxy)):
+    # Foundry Claude（Anthropic Messages 面）。与 azure_openai 分开导出：同一个 Azure
+    # 资源的两个面，协议、鉴权、模型 id、计费单位都不同，合并会让告警指向错的那一面。
+    # 2026-10-17 发布时它已进入 /v1/messages 候选集却没有任何指标 —— 一旦 ADB 与 GHCP
+    # 同时不可用，真正在服务的就是唯一看不见的那个。
+    foundry_proxy = getattr(proxy, "foundry", None)
+    if foundry_proxy is not None:
+        fdy_circuit, fdy_active, fdy_req, fdy_err, fdy_in, fdy_out = [], [], [], [], [], []
+        for ep in foundry_proxy.load_balancer.endpoints:
+            lbl = f'endpoint="{ep.name}"'
+            fdy_circuit.append(f'azure_anthropic_endpoint_circuit_open{{{lbl}}} {1 if ep.circuit_open else 0}')
+            fdy_active.append(f'azure_anthropic_endpoint_active_requests{{{lbl}}} {ep.active_requests}')
+            fdy_req.append(f'azure_anthropic_endpoint_requests_total{{{lbl}}} {ep.total_requests}')
+            fdy_err.append(f'azure_anthropic_endpoint_errors_total{{{lbl}}} {ep.total_errors}')
+            fdy_in.append(f'azure_anthropic_endpoint_input_tokens_total{{{lbl}}} {ep.total_input_tokens}')
+            fdy_out.append(f'azure_anthropic_endpoint_output_tokens_total{{{lbl}}} {ep.total_output_tokens}')
+        emit("azure_anthropic_endpoint_circuit_open",
+             "1 if Foundry Claude endpoint circuit open", "gauge", fdy_circuit)
+        emit("azure_anthropic_endpoint_active_requests", "In-flight requests", "gauge", fdy_active)
+        emit("azure_anthropic_endpoint_requests_total", "Total requests", "counter", fdy_req)
+        emit("azure_anthropic_endpoint_errors_total", "Total errors", "counter", fdy_err)
+        emit("azure_anthropic_endpoint_input_tokens_total",
+             "Cumulative input tokens; Foundry bills in CCU so this is not a cost basis",
+             "counter", fdy_in)
+        emit("azure_anthropic_endpoint_output_tokens_total",
+             "Cumulative output tokens; Foundry bills in CCU so this is not a cost basis",
+             "counter", fdy_out)
+
+    for provider, instance in (("copilot", copilot_proxy), ("azure_openai", azure_proxy),
+                               ("databricks", proxy), ("azure_anthropic", foundry_proxy)):
         if not instance:
             continue
         for field_name, kind in (("consecutive_errors", "gauge"), ("usage_record_errors", "counter"), ("cancelled_requests", "counter"),
@@ -10113,7 +10148,11 @@ async def admin_model_routing(request: Request, x_api_key: Optional[str] = Heade
                         for model in sorted(set(preferences) | set(selections))],
         "providers": list(PROVIDER_IDS),
         "provider_labels": dict(PROVIDER_LABELS),
+        # 两个协议面各发一份选项。只给 OpenAI 面那一份时，工作台的顺序下拉里唯一的
+        # 「Foundry」是 azure_openai（gpt 那一面），选它对 Claude 毫无作用，而真正
+        # 想选的 azure_anthropic 根本无法命名 —— 一个没有选项的面就是配不了的面。
         "default_openai_order": list(OPENAI_STYLE_PROVIDERS),
+        "default_messages_order": list(claude_identity.DEFAULT_CLAUDE_ORDER),
         # 下拉数据源。known_models 是运维核验过的时点目录，不是供应商能力认证。
         "known_models": _collect_openai_model_ids(),
         "copilot_accounts_available": accounts,
@@ -11071,6 +11110,16 @@ async def stats():
         result["azure_openai"] = azure_stats
     if copilot_proxy:
         result["github_copilot"] = copilot_proxy.get_stats()
+    foundry = getattr(proxy, "foundry", None)
+    if foundry is not None:
+        # 刻意不走 calculate_cost：MODEL_PRICING 按模型名**子串**匹配，Foundry 的
+        # `claude-opus-5-5` 会命中 `opus-5-5` 从而被套上 Anthropic 公开 per-token 价。
+        # Foundry 按 Azure Marketplace 的 CCU 计量，是另一个单位 —— 自信的错数字比
+        # 空白更糟，而 0 会在面板里汇总成「免费」。pricing 显式说明这是未知而非遗漏。
+        result["azure_anthropic"] = {
+            **foundry.get_stats(),
+            "pricing": {"status": "unknown", "basis": "ccu_not_per_token"},
+        }
     return result
 
 

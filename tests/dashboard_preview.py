@@ -91,6 +91,30 @@ def preview_reason(name, model_name, selection):
     return None
 
 
+def preview_messages_path(provider, model_name):
+    """One model, three spellings — the preview has to show the real rewrite.
+
+    Foundry answers the dotted spelling with 404 DeploymentNotFound, so the
+    dashes/dots difference is the thing an operator must be able to see.
+    """
+    label = {'databricks': 'ADB', 'copilot': 'GHCP', 'azure_anthropic': 'Foundry Claude'}[provider]
+    bare = model_name.replace('databricks-', '')
+    forwarded = {'databricks': 'databricks-' + bare.replace('.', '-'),
+                 'copilot': bare.replace('-5-5', '-5.5'),
+                 'azure_anthropic': bare.replace('.', '-')}[provider]
+    if 'claude' not in model_name:
+        forwarded = model_name
+    # Synthetic shapes: a serving path, a blocked one, and an unconfigured one.
+    totals = {'databricks': (3, 3), 'copilot': (5, 2), 'azure_anthropic': (1, 1)}[provider]
+    if 'claude' not in model_name and provider != 'copilot':
+        totals = (totals[0], 0)
+    reason = None if totals[1] else ('provider_not_configured' if not totals[0]
+                                     else 'no_endpoint_permits_model')
+    return dict(provider=provider, label=label, configured=bool(totals[0]),
+                forwarded_model=forwarded, endpoints_total=totals[0],
+                endpoints_serving_model=totals[1], reason=reason)
+
+
 def stats():
     summary = dict(total_requests=4280, total_input_tokens=11_520_000, total_output_tokens=2_220_000,
                    total_tokens=13_740_000, total_cache_creation_tokens=540_000, total_cache_read_tokens=5_880_000,
@@ -101,6 +125,13 @@ def stats():
     return {'global': summary, 'endpoints': db, 'today_date': '2026-09-30',
             'today_model_stats': {'databricks-claude-opus-5': model(1620, 31.56), 'databricks-claude-sonnet-5': model(740, 11.04)},
             'azure_openai': {'global': summary, 'endpoints': [endpoint('azure-eastus', {'gpt-5.4': model(360, 4.56)})]},
+            # Foundry bills in CCU, so the synthetic models carry no cost at all
+            # — the preview has to show what «unknown, not zero» looks like.
+            'azure_anthropic': {'global': {**summary, 'estimated_total_cost_usd': None},
+                'pricing': {'status': 'unknown', 'basis': 'ccu_not_per_token'},
+                'endpoints': [endpoint('eastus2-foundry',
+                                       {'claude-opus-5-5': model(180, None),
+                                        'claude-sonnet-5-5': model(60, None)}, latency=2240)]},
             'github_copilot': {'global': {**summary, 'estimated_total_cost_usd': None,
                 'estimated_ai_credits': None, 'known_cost_subtotal_usd': 3.84, 'priced_requests': 240,
                 'unpriced_requests': 3, 'pricing_status': 'partial'},
@@ -137,14 +168,25 @@ def main():
         def routing_view(self, model_name):
             order = panel['preferences'].get(model_name) or []
             default = ['copilot', 'azure_openai']
-            effective = (order + [p for p in default if p not in order]) if order else default
+            # Filter to this surface first, exactly like _openai_provider_order:
+            # a preference naming azure_anthropic says nothing about gpt routing,
+            # and an unfiltered preview would show it leading this surface.
+            openai_kept = [p for p in order if p in default]
+            effective = openai_kept + [p for p in default if p not in openai_kept]
             selected = panel['selection'].get(model_name) or []
             live = [name for name in PREVIEW_ACCOUNTS
                     if panel['enabled'].get(name)
                     and preview_reason(name, model_name, panel['selection']) is None]
+            # Same filter the gateway applies: keep what this surface serves,
+            # then append its default for anything unnamed.
+            messages_default = ['databricks', 'copilot', 'azure_anthropic']
+            kept = [p for p in order if p in messages_default]
+            messages_order = kept + [p for p in messages_default if p not in kept]
             return dict(model=model_name, providers=order, effective_openai_order=effective,
                         copilot_accounts=selected, effective_copilot_accounts=live,
                         copilot_candidates_empty=not live,
+                        effective_messages_order=messages_order,
+                        messages_paths=[preview_messages_path(p, model_name) for p in messages_order],
                         opens_claude_on_openai_entry_points='claude' in model_name and bool(order))
 
         def panel_guard(self):
@@ -181,10 +223,12 @@ def main():
                 return self.reply(200, dict(
                     preferences=[self.routing_view(m) for m in
                                  sorted(set(panel['preferences']) | set(panel['selection']))],
-                    providers=['databricks', 'copilot', 'azure_openai'],
+                    providers=['databricks', 'copilot', 'azure_openai', 'azure_anthropic'],
                     provider_labels={'databricks': 'ADB', 'copilot': 'GHCP',
-                                     'azure_openai': 'Foundry'},
+                                     'azure_openai': 'Foundry',
+                                     'azure_anthropic': 'Foundry Claude'},
                     default_openai_order=['copilot', 'azure_openai'],
+                    default_messages_order=['databricks', 'copilot', 'azure_anthropic'],
                     known_models=['gpt-4o', 'gpt-5.4', 'gpt-5.5', 'gpt-6-astra', 'kimi-k3',
                                   'claude-opus-5.5'],
                     copilot_accounts_available=[dict(account=n, enabled=panel['enabled'][n])

@@ -97,6 +97,56 @@ class MessagesOrderTests(unittest.TestCase):
         self.assertEqual(main._openai_provider_order('gpt-6.1-sol')[0], 'copilot')
 
 
+class LivePreferenceTests(unittest.IsolatedAsyncioTestCase):
+    """A saved order must take effect without restarting the gateway.
+
+    Endpoints are built once at startup, so configuration changes need a
+    rolling restart — but a per-model preference is an overlay read on every
+    request. Operators need to know which of the two they are doing, and the
+    answer here is «no restart», verified against the real store rather than a
+    stub that cannot tell the difference.
+    """
+
+    async def asyncSetUp(self):
+        self.store = key_policy.KeyPolicyStore(None)
+        await self.store.start()
+        patcher = patch.object(main, 'key_policy_store', self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_saving_foundry_first_takes_effect_immediately(self):
+        self.assertEqual(main._messages_provider_order('claude-opus-5-5')[0], 'databricks')
+        await self.store.set_model_preference('claude-opus-5-5', ['azure_anthropic'])
+        self.assertEqual(main._messages_provider_order('claude-opus-5-5'),
+                         ('azure_anthropic', 'databricks', 'copilot'))
+
+    async def test_the_other_surface_is_untouched_by_a_messages_only_choice(self):
+        # This is the crosstalk the Dashboard must not create: one stored list,
+        # two surfaces. Naming azure_anthropic says nothing about gpt routing.
+        await self.store.set_model_preference('claude-opus-5-5', ['azure_anthropic'])
+        self.assertEqual(main._openai_provider_order('claude-opus-5-5'),
+                         ('copilot', 'azure_openai'))
+
+    async def test_clearing_the_preference_restores_the_default_order(self):
+        await self.store.set_model_preference('claude-opus-5-5', ['azure_anthropic'])
+        await self.store.clear_model_preference('claude-opus-5-5')
+        self.assertEqual(main._messages_provider_order('claude-opus-5-5'),
+                         ('databricks', 'copilot', 'azure_anthropic'))
+
+    async def test_the_path_view_follows_the_saved_order(self):
+        await self.store.set_model_preference('claude-opus-5-5', ['azure_anthropic'])
+        self.assertEqual([p['provider'] for p in main._messages_path_views('claude-opus-5-5')],
+                         ['azure_anthropic', 'databricks', 'copilot'])
+
+    async def test_a_merged_two_surface_preference_satisfies_both(self):
+        # Exactly what the Dashboard writes when both dropdowns are set:
+        # copilot is the shared anchor, each surface still leads with its own.
+        await self.store.set_model_preference(
+            'claude-opus-5-5', ['azure_openai', 'copilot', 'databricks', 'azure_anthropic'])
+        self.assertEqual(main._messages_provider_order('claude-opus-5-5')[0], 'copilot')
+        self.assertEqual(main._openai_provider_order('claude-opus-5-5')[0], 'azure_openai')
+
+
 class PricingSeparationTests(unittest.TestCase):
     """A Foundry model id must not silently inherit Anthropic list prices.
 

@@ -287,6 +287,7 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
       <button class="tab-btn active" id="nav-anthropic" data-tab="anthropic" role="tab" aria-controls="tab-anthropic" aria-selected="true"><span class="nav-icon" aria-hidden="true">DB</span>Databricks</button>
       <button class="tab-btn" id="nav-azure" data-tab="azure" role="tab" aria-controls="tab-azure" aria-selected="false" tabindex="-1"><span class="nav-icon" aria-hidden="true">AZ</span>Azure OpenAI</button>
       <button class="tab-btn" id="nav-copilot" data-tab="copilot" role="tab" aria-controls="tab-copilot" aria-selected="false" tabindex="-1"><span class="nav-icon" aria-hidden="true">GH</span>GitHub Copilot</button>
+      <button class="tab-btn" id="nav-foundry" data-tab="foundry" role="tab" aria-controls="tab-foundry" aria-selected="false" tabindex="-1"><span class="nav-icon" aria-hidden="true">FC</span>Foundry Claude</button>
       <div class="nav-divider" role="presentation"></div>
       <button class="tab-btn" id="nav-history" data-tab="history" role="tab" aria-controls="tab-history" aria-selected="false" tabindex="-1"><span class="nav-icon" aria-hidden="true">↗</span>历史用量</button>
       <button class="tab-btn" id="nav-keys" data-tab="keys" role="tab" aria-controls="tab-keys" aria-selected="false" tabindex="-1"><span class="nav-icon" aria-hidden="true">⚿</span>密钥与渠道</button>
@@ -320,6 +321,7 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
       </section>
       <section class="tab-panel" id="tab-azure" role="tabpanel" aria-labelledby="nav-azure"><div id="azureContent"><div class="info-box">正在读取 Azure OpenAI…</div></div></section>
       <section class="tab-panel" id="tab-copilot" role="tabpanel" aria-labelledby="nav-copilot"><div id="copilotContent"><div class="info-box">正在读取 GitHub Copilot…</div></div></section>
+      <section class="tab-panel" id="tab-foundry" role="tabpanel" aria-labelledby="nav-foundry"><div id="foundryContent"><div class="info-box">正在读取 Foundry Claude…</div></div></section>
       <section class="tab-panel" id="tab-history" role="tabpanel" aria-labelledby="nav-history">
         <div class="history-toolbar"><label for="histDays">最近</label><input id="histDays" type="number" value="7" min="1" max="365"><span>天</span><button class="btn btn-primary" id="refreshHistory" type="button">更新用量</button></div>
         <p class="scope-note">持久化历史跨进程保留；金额按当前公开参考价估算，长上下文档位不明时显示区间，不等同于历史账单。</p>
@@ -392,8 +394,12 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
               <section class="route-detail rule-editor" id="routeEditor" aria-label="单模型规则编辑" hidden>
                 <div class="route-detail-heading"><div><h4 id="routeEditorModel"></h4><p class="scope-note" id="routeEditorState" role="status"></p></div><div class="rule-row"><button class="btn" id="retryRoutingDiagnostic" type="button">重读诊断</button><button class="btn" id="closeRouteEditor" type="button">关闭编辑</button></div></div>
                 <fieldset id="routeEditorFields" class="route-fields" disabled>
-                  <div class="rule-step"><h4>渠道优先序 <small>仅此模型</small></h4><label class="field" for="ruleProvider">优先序设置<select id="ruleProvider"><option value="">保持当前顺序</option></select></label><div class="order-chain" id="ruleOrderPreview"></div><p class="scope-note">这一段排的是 <strong>OpenAI 风格入口</strong>（<code>/v1/responses</code>、<code>/v1/chat/completions</code>）的顺序：只调整 GHCP / Foundry，不停用渠道；后续候选不代表失败后一定切换。</p>
+                  <div class="rule-step"><h4>渠道优先序 <small>仅此模型</small></h4>
+                    <p class="scope-note">两个协议面各排一份，但存的是 <strong>同一份偏好</strong>：各面只认自己能服务的渠道，<code>databricks</code> 在 OpenAI 面、<code>azure_openai</code> 在 Messages 面都会被忽略。两边都只<strong>重排不停用</strong>，后续候选不代表失败后一定切换。</p>
+                    <h4 style="margin-top:14px">OpenAI 风格入口 <small><code>/v1/responses</code>、<code>/v1/chat/completions</code></small></h4>
+                    <label class="field" for="ruleProvider">优先渠道<select id="ruleProvider"><option value="">保持当前顺序</option></select></label><div class="order-chain" id="ruleOrderPreview"></div>
                     <h4 style="margin-top:14px">Anthropic Messages 面 <small><code>/v1/messages</code></small></h4>
+                    <label class="field" for="ruleMessagesProvider">优先渠道<select id="ruleMessagesProvider"><option value="">保持当前顺序</option></select></label>
                     <div class="order-chain" id="ruleMessagesPaths"></div>
                     <p class="scope-note" id="ruleMessagesNote">三条路径都说 Anthropic Messages 协议，所以可以互为回落。服务不了本模型的渠道也会列出并说明原因 —— 看不见不等于配漏了。</p></div>
                   <div class="rule-step"><div class="routing-heading"><h4>GHCP 账户范围</h4><button class="btn route-link" id="routeManageAccounts" type="button">管理全局账户 ↗</button></div>
@@ -550,6 +556,7 @@ const TAB_INFO = {
   anthropic: ['Databricks','请求及 Token 累计包含启动恢复用量；模型与费用为今日累计，端点分布为本进程累计。'],
   azure: ['Azure OpenAI','Azure 渠道的请求分布与端点表现。此页为当前进程累计，不等同于资源配额或历史账单。'],
   copilot: ['GitHub Copilot','Copilot 渠道的请求、账户端点与费用估算。此页为当前进程累计，未知价格不会按零费用处理。'],
+  foundry: ['Foundry Claude','Foundry 在 Anthropic Messages 面（/v1/messages）服务 Claude，与 Azure OpenAI 是同一资源的两个面。按 CCU 计量，所以此页不报 per-token 费用 —— 那是未知，不是零。此页为当前进程累计。'],
   history: ['历史用量','查看已持久化的每日请求和模型用量，跨进程保留；未落盘的内存事件不在历史记录中。'],
   keys: ['密钥与渠道','管理访问边界、模型路由与上游账户。解锁后按任务查看五个子页。']
 };
@@ -1780,6 +1787,7 @@ async function discoverAccount(account) {
 // ---------- Routing rules: model → provider → GHCP account ----------
 // Author: Zeno Ren. A model-scoped draft never changes global account policy.
 let defaultOrder = [];
+let defaultMessagesOrder = [];
 let providerLabels = {};
 let routingDiagnostic = null;
 let routingLast = null;
@@ -1793,10 +1801,12 @@ function routeCopy(value) { return JSON.parse(JSON.stringify(value)); }
 function routeBaseline(model) {
   return ((routingLast && routingLast.preferences) || []).find(p => p.model === model)
     || {model, providers: [], copilot_accounts: [], effective_openai_order: defaultOrder.slice(),
+        effective_messages_order: defaultMessagesOrder.slice(),
         effective_copilot_accounts: [], opens_claude_on_openai_entry_points: false};
 }
 function routeDraftFrom(snapshot) {
-  return {providerChoice: '', accountMode: (snapshot.copilot_accounts || []).length ? 'selected' : 'all',
+  return {providerChoice: '', messagesProviderChoice: '',
+    accountMode: (snapshot.copilot_accounts || []).length ? 'selected' : 'all',
     accounts: (snapshot.copilot_accounts || []).slice()};
 }
 function routeSameSet(a, b) { return JSON.stringify([...a].sort()) === JSON.stringify([...b].sort()); }
@@ -1805,11 +1815,58 @@ function routeOrder() {
   return choice ? [choice, ...defaultOrder.filter(p => p !== choice)]
     : (routeEditorState.baseline?.effective_openai_order || defaultOrder).slice();
 }
+function routeMessagesOrder() {
+  const choice = routeEditorState.draft?.messagesProviderChoice || '';
+  return choice ? [choice, ...defaultMessagesOrder.filter(p => p !== choice)]
+    : (routeEditorState.baseline?.effective_messages_order || defaultMessagesOrder).slice();
+}
+// One stored preference feeds both surfaces, so writing more than was chosen
+// leaks across them: spelling out the messages order while only the OpenAI
+// surface was set would hand `copilot` a position the operator never asked for,
+// and the messages surface would silently stop following its default.
+//
+// So a single choice writes a single provider — the backend appends each
+// surface's default behind it. Only when **both** surfaces are set do the two
+// segments have to be reconciled, and `copilot` (the one provider they share)
+// is the anchor: splicing the OpenAI segment around copilot's position inside
+// the messages segment leaves both surfaces leading with their own choice.
+function routeSavedChoice(surface) {
+  // `providers` is replaced wholesale, so an edit to one surface must carry the
+  // other surface's **saved** choice along. Emitting only the edited segment
+  // silently reverts the untouched one to its default.
+  const saved = (routeEditorState.baseline || {}).providers || [];
+  return saved.find(p => surface.includes(p)) || '';
+}
+function routeMergedPreference() {
+  const draft = routeEditorState.draft;
+  if (!draft) return null;
+  // «Hold current order» on both surfaces means omit `providers` entirely —
+  // never rewrite it. Only an actual choice makes this segment part of the write.
+  if (!draft.providerChoice && !draft.messagesProviderChoice) return null;
+  const openaiChoice = draft.providerChoice || routeSavedChoice(defaultOrder);
+  const messagesChoice = draft.messagesProviderChoice || routeSavedChoice(defaultMessagesOrder);
+  if (!openaiChoice && !messagesChoice) return null;
+  if (!openaiChoice) return [messagesChoice];
+  if (!messagesChoice) return [openaiChoice];
+  const messages = routeMessagesOrder();
+  const openai = routeOrder();
+  const anchor = openai.indexOf('copilot');
+  const before = anchor >= 0 ? openai.slice(0, anchor) : [];
+  const after = anchor >= 0 ? openai.slice(anchor + 1) : openai;
+  const at = messages.indexOf('copilot');
+  const merged = at >= 0
+    ? [...messages.slice(0, at), ...before, 'copilot', ...after, ...messages.slice(at + 1)]
+    : [...messages, ...openai];
+  return merged.filter((p, index) => merged.indexOf(p) === index);
+}
 function routePayload() {
   const draft = routeEditorState.draft;
   if (!draft) return null;
+  const providers = routeMergedPreference();
+  // An unset order stays unwritten: storing a list equal to today's default
+  // would turn «no opinion» into an opinion that outlives the default.
   return Object.assign({copilot_accounts: draft.accountMode === 'all' ? [] : draft.accounts.slice()},
-    draft.providerChoice ? {providers: [draft.providerChoice]} : {});
+    providers ? {providers} : {});
 }
 function routeDiagnosticReady() {
   return routeEditorState.diagnosticState === 'ready'
@@ -1828,7 +1885,10 @@ function routeCanSave() {
   const draft = routeEditorState.draft;
   return !!draft && routeDiagnosticReady() && routeEditorState.dirty && !keysInFlight
     && (draft.accountMode === 'all' || draft.accounts.length > 0)
-    && (!draft.providerChoice || defaultOrder.includes(draft.providerChoice));
+    // Each choice is validated against **its own** surface. Checking both
+    // against defaultOrder is what made azure_anthropic unsavable.
+    && (!draft.providerChoice || defaultOrder.includes(draft.providerChoice))
+    && (!draft.messagesProviderChoice || defaultMessagesOrder.includes(draft.messagesProviderChoice));
 }
 function renderOrderPreview() {
   const order = routeOrder();
@@ -1845,8 +1905,16 @@ const MESSAGES_PATH_REASON_TEXT = {
 function renderMessagesPaths() {
   const host = document.getElementById('ruleMessagesPaths');
   if (!host) return;
-  const paths = (routeEditorState.baseline || {}).messages_paths || [];
-  if (!paths.length) { host.innerHTML = '<span class="order-chip"><strong>—</strong><small>保存后可见</small></span>'; return; }
+  const known = (routeEditorState.baseline || {}).messages_paths || [];
+  if (!known.length) { host.innerHTML = '<span class="order-chip"><strong>—</strong><small>保存后可见</small></span>'; return; }
+  // Order comes from the draft, reasons and endpoint counts from the diagnostic.
+  // Reading order from the baseline made a fresh choice look like a no-op — the
+  // same «work out the effect before saving» contract as renderOrderPreview.
+  const order = routeMessagesOrder();
+  const paths = [...known].sort((a, b) => {
+    const rank = p => { const at = order.indexOf(p.provider); return at < 0 ? order.length : at; };
+    return rank(a) - rank(b);
+  });
   host.innerHTML = paths.map((path, index) => {
     const reason = MESSAGES_PATH_REASON_TEXT[path.reason];
     const serving = !path.reason;
@@ -1884,6 +1952,7 @@ function syncRouteFields() {
   const draft = routeEditorState.draft;
   if (!draft) return;
   document.getElementById('ruleProvider').value = draft.providerChoice;
+  document.getElementById('ruleMessagesProvider').value = draft.messagesProviderChoice;
   document.getElementById('ruleAccountMode').value = draft.accountMode;
   document.querySelectorAll('[name="routeAccountScope"]').forEach(input => {
     input.checked = input.value === draft.accountMode;
@@ -1939,6 +2008,7 @@ function renderRulePreview(sync = true) {
   if (sync !== false) {
     const focusedAccount = sync && sync.target && sync.target.dataset && sync.target.dataset.ruleAccount;
     state.draft.providerChoice = document.getElementById('ruleProvider').value || '';
+    state.draft.messagesProviderChoice = document.getElementById('ruleMessagesProvider').value || '';
     state.draft.accountMode = document.getElementById('ruleAccountMode').value || 'all';
     state.draft.accounts = state.draft.accountMode === 'selected' ? matrixSelection() : [];
     cancelRouteReview();
@@ -1979,6 +2049,7 @@ function renderRulePreview(sync = true) {
 function changeRouteAccountMode(mode) {
   if (!routeEditorState.draft) return;
   routeEditorState.draft.providerChoice = document.getElementById('ruleProvider').value || '';
+  routeEditorState.draft.messagesProviderChoice = document.getElementById('ruleMessagesProvider').value || '';
   routeEditorState.draft.accountMode = mode;
   if (mode === 'selected' && !routeEditorState.draft.accounts.length) {
     routeEditorState.draft.accounts = routeCandidates() || [];
@@ -2052,7 +2123,7 @@ function resetRoutingState() {
   Object.assign(routeEditorState, {model: '', baseline: null, draft: null, dirty: false,
     diagnosticState: 'idle', diagnostic: null, review: null, writeState: 'idle'});
   routingDiagnostic = routingLast = null;
-  defaultOrder = []; providerLabels = {}; routingAccounts = [];
+  defaultOrder = []; defaultMessagesOrder = []; providerLabels = {}; routingAccounts = [];
   for (const id of ['routeReview', 'ruleAccounts', 'routeEditorModel', 'routeEntryImpact', 'routeEditorState', 'routeDirtyState']) {
     const node = document.getElementById(id); node.innerHTML = ''; node.textContent = '';
   }
@@ -2071,18 +2142,27 @@ function resetRuleForm(silent) {
 function renderRoutingForm(payload) {
   routingAccounts = payload.copilot_accounts_available || [];
   defaultOrder = payload.default_openai_order || [];
+  defaultMessagesOrder = payload.default_messages_order || [];
   providerLabels = payload.provider_labels || {};
   const select = document.getElementById('ruleModel');
   const keep = select.value;
   select.innerHTML = '<option value="">从模型目录选择</option>' + (payload.known_models || [])
     .map(m => '<option value="' + escapeHtml(m) + '">' + escapeHtml(m) + '</option>').join('');
   select.value = keep;
-  const providerSelect = document.getElementById('ruleProvider');
   const baseline = routeEditorState.baseline;
-  providerSelect.innerHTML = '<option value="">保持当前顺序'
-    + (baseline ? '（' + escapeHtml((baseline.effective_openai_order || defaultOrder).map(providerLabel).join(' → ')) + '）' : '')
-    + '</option>' + defaultOrder.map(p => '<option value="' + escapeHtml(p) + '">'
-      + escapeHtml(providerLabel(p)) + ' 优先</option>').join('');
+  // Each surface offers **its own** providers. Building both from
+  // default_openai_order left the messages surface unconfigurable: its only
+  // «Foundry» was azure_openai, which that surface filters out.
+  const orderOptions = (node, providers, effective) => {
+    node.innerHTML = '<option value="">保持当前顺序'
+      + (baseline ? '（' + escapeHtml((effective || providers).map(providerLabel).join(' → ')) + '）' : '')
+      + '</option>' + providers.map(p => '<option value="' + escapeHtml(p) + '">'
+        + escapeHtml(providerLabel(p)) + ' 优先</option>').join('');
+  };
+  orderOptions(document.getElementById('ruleProvider'), defaultOrder,
+    baseline && baseline.effective_openai_order);
+  orderOptions(document.getElementById('ruleMessagesProvider'), defaultMessagesOrder,
+    baseline && baseline.effective_messages_order);
   syncRouteFields(); renderOrderPreview(); renderMessagesPaths();
 }
 function renderRoutingList() {
@@ -2657,6 +2737,84 @@ async function refresh(force = false) {
       azContent.dataset.built = '';
     }
 
+    // Foundry Claude section (Anthropic Messages face of the same Azure resource)
+    const fdyContent = document.getElementById('foundryContent');
+    if (d.azure_anthropic) {
+      if (!fdyContent.dataset.built) {
+        fdyContent.innerHTML =
+          '<div class="info-box">Foundry 按 <strong>CCU</strong>（Claude Consumption Unit）计量，'
+          + '既不是 Anthropic 公开 per-token 价也不是 GHCP 分档价，所以本页<strong>不报费用</strong>'
+          + ' —— 那是未知而不是零。Token 数仍然展示，但不能当作计费依据。</div>' +
+          '<div class="global-grid" id="foundryGlobalGrid"></div>' +
+          '<div class="grid-2">' +
+          '<div class="chart-card"><h3>模型 Token 分布</h3><div class="canvas-wrap"><canvas id="foundryModelChart"></canvas></div></div>' +
+          '<div class="chart-card"><h3>端点平均响应耗时 · ms</h3><div class="canvas-wrap"><canvas id="foundryLatencyChart"></canvas></div></div>' +
+          '</div>' +
+          '<h2 class="section-title">Foundry Claude 端点 <small style="color:var(--text-tertiary)">（deployment 名即该渠道收到的模型名）</small></h2>' +
+          '<div class="table-wrap"><div class="table-scroll"><table>' +
+          '<thead><tr><th>端点</th><th>熔断状态</th><th>进行中</th><th>请求数</th><th>错误率</th><th>平均耗时</th><th>Token 合计</th><th>Deployments</th></tr></thead>' +
+          '<tbody id="foundryEndpointBody"></tbody>' +
+          '</table></div></div>' +
+          '<h2 class="section-title">模型用量</h2>' +
+          '<div class="table-wrap"><div class="table-scroll"><table>' +
+          '<thead><tr><th>模型</th><th>请求数</th><th>输入</th><th>输出</th><th>缓存写入</th><th>缓存读取</th><th>Token 合计</th></tr></thead>' +
+          '<tbody id="foundryModelBody"></tbody>' +
+          '</table></div></div>';
+        fdyContent.dataset.built = '1';
+      }
+      // Cost KPI filtered out deliberately: see the CCU note above.
+      const FOUNDRY_KPIS = KPI_DEFS.filter(k => k.key !== 'estimated_total_cost_usd');
+      // Own id prefix: sharing 'kpi-azure' would make getElementById hand these
+      // numbers to the Azure panel's nodes, leaving this tab on «—».
+      renderKpiGrid('foundryGlobalGrid', FOUNDRY_KPIS, d.azure_anthropic.global, 'kpi-foundry');
+      const fdyBody = document.getElementById('foundryEndpointBody');
+      const fdySeen = new Set();
+      (d.azure_anthropic.endpoints || []).forEach(e => {
+        const rowId = 'foundry-row-' + e.name;
+        fdySeen.add(rowId);
+        let tr = document.getElementById(rowId);
+        const isAlert = e.circuit_open || (e.error_rate || 0) > 5;
+        const barColor = errBarColor(+e.error_rate || 0);
+        const barWidth = Math.max(0, Math.min(100, +e.error_rate || 0));
+        const rowHtml =
+          '<td data-label="Name"><strong>' + escapeHtml(e.name) + '</strong></td>' +
+          '<td data-label="Status">' + circuitBadge(e) + '</td>' +
+          '<td data-label="Active" class="mono">' + fmt(e.active_requests) + '</td>' +
+          '<td data-label="Total" class="mono">' + fmt(e.total_requests) + '</td>' +
+          '<td data-label="Error Rate"><span class="err-rate"><span class="bar"><span style="width:' + barWidth + '%;background:' + barColor + '"></span></span><span class="mono">' + fmtPct(e.error_rate) + '</span></span></td>' +
+          '<td data-label="Avg Latency" class="mono">' + fmtMs(e.avg_response_time_ms) + '</td>' +
+          '<td data-label="Token 合计" class="mono">' + fmt(e.total_tokens) + '</td>' +
+          '<td data-label="Deployments">' + (e.deployments || []).map(x => '<span class="deployments-tag">' + escapeHtml(x) + '</span>').join('') + '</td>';
+        if (!tr) {
+          tr = document.createElement('tr');
+          tr.id = rowId;
+          tr.className = 'row';
+          tr.innerHTML = rowHtml;
+          fdyBody.appendChild(tr);
+        } else { tr.innerHTML = rowHtml; }
+        tr.classList.toggle('alert', isAlert);
+      });
+      Array.from(fdyBody.children).forEach(tr => { if (!fdySeen.has(tr.id)) tr.remove(); });
+      const fdyModels = aggregateModels(d.azure_anthropic.endpoints);
+      renderModelTable('foundryModelBody', fdyModels, false);
+      const fdyModelChart = ensureDoughnut('foundryModelChart');
+      if (fdyModelChart) {
+        const entries = Object.entries(fdyModels);
+        fdyModelChart.data.labels = entries.map(e => e[0]);
+        fdyModelChart.data.datasets[0].data = entries.map(e => e[1].input_tokens + e[1].output_tokens);
+        fdyModelChart.update('none');
+      }
+      const fdyLatencyChart = ensureBar('foundryLatencyChart');
+      if (fdyLatencyChart) {
+        fdyLatencyChart.data.labels = (d.azure_anthropic.endpoints || []).map(e => e.name);
+        fdyLatencyChart.data.datasets[0].data = (d.azure_anthropic.endpoints || []).map(e => +e.avg_response_time_ms || 0);
+        fdyLatencyChart.update('none');
+      }
+    } else {
+      fdyContent.innerHTML = '<div class="info-box">未配置 Foundry Claude（<code>azure_anthropic</code>）渠道。它与 Azure OpenAI 是同一个 Foundry 资源的两个面，需各自配置；配置完成并重启服务后，此页将显示对应端点。</div>';
+      fdyContent.dataset.built = '';
+    }
+
     // GitHub Copilot section
     const cpContent = document.getElementById('copilotContent');
     if (d.github_copilot) {
@@ -2880,6 +3038,9 @@ document.getElementById('ruleModelCustom').addEventListener('keydown', event => 
   if (event.key === 'Enter') { event.preventDefault(); document.getElementById('startRule').click(); }
 });
 document.getElementById('ruleProvider').addEventListener('change', () => {
+  renderOrderPreview(); renderMessagesPaths(); renderRulePreview();
+});
+document.getElementById('ruleMessagesProvider').addEventListener('change', () => {
   renderOrderPreview(); renderMessagesPaths(); renderRulePreview();
 });
 document.getElementById('panelPasswordForm').addEventListener('submit', event => {
