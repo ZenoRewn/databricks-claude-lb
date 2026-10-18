@@ -7561,6 +7561,43 @@ def expand_env_vars(value: str) -> str:
     return re.sub(pattern, replace, value)
 
 
+def resolve_credential(value, *, field: str) -> str:
+    """Expand `${ENV}` in a credential, refusing to produce a blank one.
+
+    `expand_env_vars` substitutes a missing variable with the empty string, and
+    nothing downstream rejects an empty token: the endpoint is built, logged as
+    «Loaded» and counted in `/config/effective`, and the only symptom is 401s
+    from the upstream with nothing pointing at the typo. That was harmless while
+    every credential sat inline — there was no reference to get wrong — but once
+    they live in a Secret, one misspelled variable name is the expected failure
+    mode, so it has to be loud and early instead of silent and remote.
+
+    A **literal** empty value is still fine: `auth.api_key` is absent in
+    multi-tenant configs. Only a reference that resolves to nothing is an error,
+    which is what keeps an all-inline config loading byte-for-byte unchanged.
+
+    `field` names the config path (and, for endpoints, which one) because that
+    plus the variable name is the whole repair instruction. Neither is secret;
+    the resolved value is never included, not even the parts that did resolve.
+
+    The Copilot token path deliberately does **not** use this: it falls back to
+    the mounted credential cache and already warns that the rotated Secret is
+    not in use. That is resilience with somewhere to fall back to, which no
+    other provider has.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f'{field} must be a string')
+    missing = [name for name in re.findall(r'\$\{([^}]+)\}', value)
+               if not os.environ.get(name, '').strip()]
+    if missing:
+        raise ValueError(
+            f'{field} references environment variable(s) '
+            f'{", ".join(sorted(set(missing)))} that are unset or empty. A blank '
+            f'credential would be accepted here and then rejected by the upstream, '
+            f'so the gateway refuses to start instead.')
+    return expand_env_vars(value)
+
+
 def load_config(config_path: str = "config.yaml") -> tuple:
     """返回 (ClaudeProxy, Optional[AzureOpenAIProxy], Optional[CopilotProxy], storage_config)"""
     with open(config_path, 'r') as f:
@@ -7572,7 +7609,7 @@ def load_config(config_path: str = "config.yaml") -> tuple:
 
     lb_config = config.get("load_balancer", {})
     auth_config = config.get("auth", {}) or {}
-    api_key = expand_env_vars(auth_config.get("api_key", ""))
+    api_key = resolve_credential(auth_config.get("api_key", "") or "", field='auth.api_key')
     # P3.2: multi-tenant api_keys —— 与旧的 single api_key 并存，都注册到全局 map
     api_keys_dict = auth_config.get("api_keys")
     _register_api_keys(api_key, api_keys_dict)
@@ -7585,7 +7622,7 @@ def load_config(config_path: str = "config.yaml") -> tuple:
         endpoints.append(WorkspaceEndpoint(
             name=ep["name"],
             api_base=ep["api_base"],
-            token=expand_env_vars(ep["token"]),
+            token=resolve_credential(ep["token"], field=f'endpoints[{ep["name"]!r}].token'),
             weight=ep.get("weight", 1),
             models=ep.get("models", []),
         ))
@@ -7610,7 +7647,8 @@ def load_config(config_path: str = "config.yaml") -> tuple:
         foundry_endpoints.append(WorkspaceEndpoint(
             name=ep["name"],
             api_base=str(ep["api_base"]).rstrip("/"),
-            token=expand_env_vars(ep["api_key"]),
+            token=resolve_credential(
+                ep["api_key"], field=f'azure_anthropic.endpoints[{ep["name"]!r}].api_key'),
             weight=ep.get("weight", 1),
             models=ep.get("deployments", []),
             provider="azure_anthropic",
@@ -7638,7 +7676,8 @@ def load_config(config_path: str = "config.yaml") -> tuple:
             azure_endpoints.append(AzureOpenAIEndpoint(
                 name=ep["name"],
                 endpoint=ep["endpoint"],
-                api_key=expand_env_vars(ep["api_key"]),
+                api_key=resolve_credential(
+                    ep["api_key"], field=f'azure_openai.endpoints[{ep["name"]!r}].api_key'),
                 deployments=ep.get("deployments", []),
                 weight=ep.get("weight", 1),
             ))
@@ -7704,11 +7743,16 @@ def load_config(config_path: str = "config.yaml") -> tuple:
         if isinstance(storage_config, dict):
             for k in ["password", "path"]:
                 if k in storage_config and isinstance(storage_config[k], str):
-                    storage_config[k] = expand_env_vars(storage_config[k])
+                    # The ledger password is a credential like any other; `path`
+                    # goes through the same gate because a blank path would make
+                    # the store write somewhere nobody chose.
+                    storage_config[k] = resolve_credential(
+                        storage_config[k], field=f'usage_storage.{k}')
         else:
             storage_config = {"type": "json", "path": "./usage_data"}
     else:
-        storage_config = {"type": "json", "path": expand_env_vars(config.get("usage_data_dir", "./usage_data"))}
+        storage_config = {"type": "json", "path": resolve_credential(
+            config.get("usage_data_dir", "./usage_data"), field='usage_data_dir')}
     return claude_proxy, azure_proxy, copilot_proxy, storage_config
 
 
@@ -8162,7 +8206,8 @@ def _build_api_key_map(single_key: str, keys_dict: Optional[dict]) -> Dict[str, 
         built[single_key] = "default"
     if keys_dict:
         for tenant_name, raw_key in keys_dict.items():
-            key = expand_env_vars(raw_key) if isinstance(raw_key, str) else raw_key
+            key = (resolve_credential(raw_key, field=f'auth.api_keys[{tenant_name!r}]')
+                   if isinstance(raw_key, str) else raw_key)
             if not isinstance(tenant_name, str) or not tenant_name.strip():
                 raise ValueError(f"auth.api_keys tenant name must be non-empty string, got {tenant_name!r}")
             if not isinstance(key, str) or not key:

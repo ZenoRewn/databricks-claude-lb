@@ -4,6 +4,14 @@ Author: Zeno Ren
 
 从 [完整配置示例](../config.yaml.example) 复制本地 `config.yaml`，只启用实际使用的渠道。`CONFIG_PATH` 可以指定其他路径；`${VARIABLE}` 从服务进程环境展开，容器不会自动继承宿主机全部环境变量。
 
+**引用解析不出来就拒绝启动。** 凭据字段（`auth.api_key`、`auth.api_keys[*]`、各 provider 的 `token`/`api_key`、`usage_storage.password`）经 `resolve_credential()` 解析：`${X}` 指向一个未设置或为空的变量时报错并带上 config 路径与变量名，**不**带任何已解析出的值。**字面空值仍合法** —— 多租户配置里 `auth.api_key` 本就缺省，所以全内联的配置加载行为分毫不变。
+
+这一条的由来：早先缺失变量被静默替换成空串，而没有任何一层拒绝空 token —— 端点照常构建、照常打 `Loaded`、照常进 `/config/effective`，唯一症状是上游 401 而配置和日志里毫无线索。凭据全部内联时这无所谓（没有引用可写错），改成从 Secret 注入后「变量名拼错」就是首要失败模式。
+
+**唯一例外是 Copilot 的 `github_token`**：它会回落到挂载的凭据缓存，并已经明确警告「刚 rotate 的 Secret 没有在用」。那是有落点的韧性；其他 provider 没有落点，空凭据只是坏的。
+
+代价要说清：单副本 + `maxSurge:0/maxUnavailable:1` 意味着拒绝启动就是停服直到回滚。所以改 Secret 或 config 前要先用一个短期校验 Pod 跑一遍 `load_config`（挂新 config + 新 Secret），确认退出码 0 再动生产 —— 这与镜像预检是同一种关卡。
+
 ## 认证与凭据
 
 `auth.api_key` 用于客户端访问 LB，与上游 Databricks、Azure、Copilot 凭据分开。多租户 `auth.api_keys` 的映射语义见配置示例及 [诊断契约](OBSERVABILITY_AND_CONTEXT.md)。不要把真实配置、`.env`、token 缓存或 Kubernetes Secret 放进 Git。
