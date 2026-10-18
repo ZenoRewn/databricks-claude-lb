@@ -29,10 +29,15 @@ gateway still rejects them unless an explicit preference maps that model to a
 non-Databricks provider. Without that, a client sending claude to
 /v1/chat/completions keeps getting the same 400 as before.
 
-Scope limit: this only covers the OpenAI-style entry points, where Copilot
-serves claude natively. /v1/messages stays Databricks-only because serving the
-Anthropic Messages protocol from Copilot needs a bidirectional adapter — the
-repository can parse Anthropic SSE but has no emitter.
+One stored preference now feeds **two** protocol surfaces, each filtering to
+what it can reach: the OpenAI-style entries order copilot and azure_openai,
+while /v1/messages orders databricks, copilot and azure_anthropic. The earlier
+note here — that /v1/messages stays Databricks-only because serving Anthropic
+Messages from Copilot would need a bidirectional adapter — was wrong, and the
+2026-10-17 upstream probes are what disproved it: Copilot declares
+`supported_endpoints: ["/v1/messages", ...]` itself and Foundry answers
+`POST /anthropic/v1/messages` natively, so no adapter exists or is needed.
+Per-surface ordering lives in tests/test_messages_surface_routing.py.
 """
 import asyncio
 import unittest

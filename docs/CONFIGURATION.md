@@ -367,7 +367,22 @@ Dashboard 的编辑器分三步，并支持点已有规则那一行直接载入�
 (能服务该模型的 provider) ∩ (该 key 允许的 provider)，先按偏好排序，再按默认顺序
 ```
 
-偏好里的 `databricks` 不参与 OpenAI 风格入口的顺序 —— 它服务 `/v1/messages`。Dashboard 的下拉因此只给 GHCP 与 Foundry 两项：列 ADB 会给出一个什么都不做的选项。
+**一份偏好，两个协议面各自过滤。** 偏好里的 `databricks` 不参与 OpenAI 风格入口的顺序（它服务 `/v1/messages`），`azure_openai` 反过来不参与 messages 面的顺序（它说 Azure OpenAI 形状）。所以 Dashboard 有**两个**顺序下拉，各用自己的选项来源：
+
+| 下拉 | 选项来源 | 可选 |
+|---|---|---|
+| OpenAI 风格入口 | `default_openai_order` | GHCP、Foundry（`azure_openai`，gpt 那一面） |
+| Anthropic Messages 面 | `default_messages_order` | ADB、GHCP、**Foundry Claude**（`azure_anthropic`） |
+
+此前只有前一个下拉，于是唯一的「Foundry」是 `azure_openai` —— 给 Claude 选它**毫无作用**（messages 面会把它过滤掉），而真正想选的 `azure_anthropic` 根本无法命名。一个没有选项的面就是配不了的面。
+
+两段合成**一份** `providers` 时有三条规则：
+
+- 两面都选「保持当前顺序」就**省略 `providers`**，绝不重写已存的偏好；
+- 只编辑一个面时要带上另一个面**已保存**的选择 —— `providers` 是整份替换，只发被编辑的那一段会把另一面悄悄打回默认；
+- 两面都有选择时以 `copilot`（两面唯一共享的 provider）为锚，把 OpenAI 段插进 messages 段，否则为一面指定首位会连带挪动另一面的 `copilot`。
+
+每个下拉只指定**首位**，其余按该面默认序补齐。想要「Foundry Claude → ADB → GHCP」就选 Foundry Claude 优先；`Foundry Claude → GHCP → ADB`（第二位也换）目前表达不了。顺序偏好是运行时 overlay，**保存即生效，不需要重启**（只有端点构建才需要）。
 
 #### 第二段：限定 GHCP 账户
 

@@ -79,6 +79,8 @@ DNS/TCP/TLS/pool 没有可靠独立 hook，保持 null。阶段可能嵌套，�
 - 未知版本返回 400；v2/v3 定义分别在 `operations/metrics-contract.json` 与 `operations/metrics-contract-v3.json`。解析 v3 时显式传 `parse_exposition(text, schema_version='lb-metrics-v3')`。
 - send result 的有限 provider/API/result 组合在初始抓取就有零值；不预创建任意模型或用户 series。新 reason/parameter 枚举仍需消费者认识 unknown 与扩展值。
 - 计数按 Pod UID/容器启动时间分段；缺失、重启、采集失败和 sparse 首值不能当 0 增量。`operations.reporting` 的类型化窗口仍可复用。
+- **Foundry Claude（`azure_anthropic`）有自己的一套端点指标**：`azure_anthropic_endpoint_{circuit_open,active_requests,requests_total,errors_total,input_tokens_total,output_tokens_total}`，并进入与其他 provider 共用的恢复可见性循环（`consecutive_errors` / `cooldown_elapsed_seconds` / `trial_in_flight_age_seconds` 等）。它与 `azure_openai_endpoint_*` 是**同一个 Foundry 资源的两个面**，不可合并统计 —— 告警落到错的那一面就指错了方向。2026-10-17 发布把它放进了 `/v1/messages` 候选集却没有任何指标，而 ADB 与 GHCP 同时不可用时真正在服务的恰好就是那个看不见的。
+- Token 计数**不是**计费依据：Foundry 按 CCU 计量。`/stats` 的 `azure_anthropic` 段带 `pricing.status = "unknown"` / `basis = "ccu_not_per_token"`，明说这是未知而非遗漏；该段不附 `estimated_cost_usd`，也不计入 Anthropic 口径的费用合计。
 
 升级外部采集器前确认真实运行版本和响应头，再切换 v3 解析器；本轮没有修改 OpenClaw 自动化、baseline 或历史日报。
 

@@ -913,6 +913,36 @@ vm.runInContext(section('// ---------- Formatters', '// ---------- Number Ticker
     'a locked panel must not start a device flow');
   assert.match(element('deviceStatus').textContent, /请先解锁/);
 
+  // ---- Foundry Claude surface ----
+  // The 2026-10-17 release made azure_anthropic a /v1/messages candidate but
+  // gave it no stats section, no metrics and no tab: the provider that serves
+  // traffic when ADB and GHCP are both down was the only invisible one.
+  assert.match(html, /id="nav-foundry"[^>]*data-tab="foundry"/,
+    'Foundry Claude needs its own tab button');
+  assert.match(html, /id="tab-foundry"[^>]*role="tabpanel"/,
+    'Foundry Claude needs its own tab panel');
+  assert.match(html, /id="nav-foundry"[^>]*aria-controls="tab-foundry"/,
+    'the tab button must point at its panel like the other five');
+  assert.match(html, /id="tab-foundry"[^>]*aria-labelledby="nav-foundry"/,
+    'the panel must name its button, or it is unlabelled in the a11y tree');
+  assert.match(html, /foundry: \['Foundry Claude'/,
+    'switchTab refuses a tab missing from TAB_INFO, so the title must be declared');
+  assert.match(html, /id="foundryContent"/, 'the panel needs a render host');
+  // Foundry bills in CCU. Reusing the per-token cost KPI would price it at
+  // Anthropic's public rate; a zero would roll up as «free».
+  assert.match(html, /CCU/, 'the CCU basis must be stated, not left blank');
+  assert.ok(!/renderKpiGrid\('foundryGlobalGrid', KPI_DEFS,/.test(html),
+    'the cost KPI must be filtered out of the Foundry grid');
+  // Each KPI grid builds element ids from its prefix. Reusing 'kpi-azure' makes
+  // getElementById hand Foundry's numbers to the Azure panel's nodes, so this
+  // tab renders «—» forever while silently overwriting the other one.
+  const kpiPrefixes = [...html.matchAll(/renderKpiGrid\('(\w+)GlobalGrid',[^)]*'(kpi-[\w-]+)'\)/g)]
+    .map(m => ({grid: m[1], prefix: m[2]}));
+  assert.ok(kpiPrefixes.length >= 3, 'the KPI grids must stay discoverable for this check');
+  const prefixes = kpiPrefixes.map(e => e.prefix);
+  assert.equal(new Set(prefixes).size, prefixes.length,
+    'two KPI grids sharing an id prefix collide in the DOM: ' + prefixes.join(', '));
+
   console.log('Dashboard UI: authenticated cleanup, honest errors, safe release identity, '
     + 'panel gate (content hidden, not blurred), sub-tabs with per-section feedback, '
     + 'panel session (password + cookie, zero-interaction restore, key fallback), '

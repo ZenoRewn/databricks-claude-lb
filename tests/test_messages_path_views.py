@@ -5,6 +5,7 @@ appeared anywhere and an operator could not tell whether that was deliberate
 or forgotten. Now each protocol surface reports its own ordered paths, and a
 provider that cannot serve the surface says so instead of being absent.
 """
+import asyncio
 import unittest
 from unittest.mock import patch
 
@@ -91,3 +92,40 @@ class MessagesPathViewTests(unittest.TestCase):
         for path in main._messages_path_views('claude-opus-5-5'):
             with self.subTest(provider=path['provider']):
                 self.assertIn(path['reason'], main.MESSAGES_PATH_REASONS | {None})
+
+
+class SurfaceOrderDataSourceTests(unittest.TestCase):
+    """Both surfaces must offer their options, or one of them cannot be set.
+
+    The workbench built its order dropdown from `default_openai_order` alone,
+    so the only «Foundry» on offer was `azure_openai` — the gpt face, which
+    `_messages_provider_order` filters out. Picking it therefore did nothing to
+    Claude, and `azure_anthropic` could not be named at all. A surface whose
+    option list is absent is a surface the operator cannot configure.
+    """
+
+    def test_the_messages_surface_publishes_its_own_default_order(self):
+        payload = asyncio.run(self._routing_payload())
+        self.assertEqual(payload['default_messages_order'],
+                         ['databricks', 'copilot', 'azure_anthropic'])
+
+    def test_the_two_surfaces_publish_different_option_lists(self):
+        # Shared list = the bug. azure_openai cannot serve messages and
+        # databricks cannot serve the OpenAI-style entries.
+        payload = asyncio.run(self._routing_payload())
+        self.assertNotEqual(payload['default_messages_order'],
+                            payload['default_openai_order'])
+        self.assertNotIn('azure_openai', payload['default_messages_order'])
+        self.assertNotIn('databricks', payload['default_openai_order'])
+
+    def test_every_published_option_has_a_label_to_render(self):
+        payload = asyncio.run(self._routing_payload())
+        for provider in payload['default_messages_order']:
+            with self.subTest(provider=provider):
+                self.assertIn(provider, payload['provider_labels'])
+
+    async def _routing_payload(self):
+        with patch.object(main, '_require_admin_access', lambda *a, **k: None), \
+             patch.object(main, '_copilot_endpoints', lambda: []), \
+             patch.object(main, '_collect_openai_model_ids', lambda: []):
+            return await main.admin_model_routing(None, None)
