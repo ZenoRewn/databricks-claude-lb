@@ -210,8 +210,24 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
         current={x['metadata']['uid']:x['spec'] for x in self.api.list('ingress',self.namespace)}
         expected={x['metadata']['uid']:x['spec'] for x in self.snapshot['ingresses']}
         if current!=expected:raise UnsafeState('ingress_drift')
-    def _image_preflight(self,image,suffix,hashes=None):
+    def _image_preflight(self,image,suffix,hashes=None,receipts=None):
+        """Validate one image in a short-lived pod, remembering the verdict.
+
+        The conclusion used to be re-derived from `pod.status.phase` on every
+        tick, and the pod carries `activeDeadlineSeconds=90`. So a slow first
+        pull could have the container exit 0 and print its OK line, then cross
+        the deadline before the phase settled on `Succeeded` — kubelet marks it
+        `DeadlineExceeded`/`Failed` and the next tick raises
+        `image_preflight_failed` for a check that had actually passed
+        (observed 2026-10-16: container exited at t+81, deadline at t+156).
+        Enlarging the deadline only lengthens the same fuse.
+
+        Two changes: a container that terminated with exit code 0 is success on
+        its own (available before the phase settles), and the first success is
+        written to the receipt so later ticks stop re-deriving it.
+        """
         name='lb-check-'+self.release_id+'-'+suffix
+        if receipts is not None and receipts.get(suffix)=='verified':return
         pod=self.api.optional('pod',self.namespace,name)
         if pod is None:
             spec=copy.deepcopy(self.snapshot['deployment']['spec']['template']['spec'])
@@ -230,8 +246,16 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
             raise PendingOperation('image_preflight_created')
         if self._annotations(pod).get(CONTROL)!=self.release_id:raise UnsafeState('preflight_pod_owner_changed')
         phase=pod['status'].get('phase')
+        # Exit code first: it is set when the container terminates, which is
+        # strictly earlier than the phase settling, and it survives a later
+        # DeadlineExceeded rewrite of the phase.
+        terminated=[c.get('state',{}).get('terminated') for c in pod['status'].get('containerStatuses') or []]
+        exited_clean=bool(terminated) and all(t and t.get('exitCode')==0 for t in terminated)
+        if phase=='Succeeded' or exited_clean:
+            if receipts is not None:receipts[suffix]='verified'
+            return
         if phase=='Failed':raise RuntimeError('image_preflight_failed')
-        if phase!='Succeeded':raise PendingOperation('image_preflight_pending')
+        raise PendingOperation('image_preflight_pending')
     def _stop_writer(self,record,pod,key):
         name=pod['metadata']['name'];current=self.api.optional('pod',self.namespace,name)
         receipts=record['action_receipts'].setdefault('writer_termination',{})
@@ -348,8 +372,10 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
             self._public_health()
             discovered=[s['metadata']['name'] for s in self.api.list('service',self.namespace) if matches(s['spec'].get('selector'),old['metadata']['labels'])]
             if set(discovered)!=set(self.plan['services']):raise UnsafeState('entrypoint_inventory_changed')
-            self._image_preflight(self.plan['image'],'new',self.plan['source_hashes'])
-            self._image_preflight(self.snapshot['deployment']['spec']['template']['spec']['containers'][0]['image'],'old')
+            # Receipts persist across ticks, so a check that passed stays passed.
+            verified=record['action_receipts'].setdefault('image_preflight',{})
+            self._image_preflight(self.plan['image'],'new',self.plan['source_hashes'],verified)
+            self._image_preflight(self.snapshot['deployment']['spec']['template']['spec']['containers'][0]['image'],'old',None,verified)
             self._claim('deployment',self.deployment_object())
             for name in self.plan['services']:self._claim('service',self.api.get('service',self.namespace,name))
             return {'verified':True,'runtime_control_version':version,'services':self.plan['services'],'server_dry_run_verified':True}
