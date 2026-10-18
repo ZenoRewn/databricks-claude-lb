@@ -4,7 +4,7 @@ Author: Zeno Ren
 
 ## 当前运行版本
 
-最近一次已记录的 AKS 发布：**2026-10-18，应用源码 `3afb3ac`**，维护 58.0 秒，11 个阶段一次通过，三协议业务探针、账本与清理验收通过。内容是 `/v1/messages` 优先序可**逐模型**设定（此前工作台顺序下拉里唯一的「Foundry」是 `azure_openai`（gpt 那一面），给 Claude 选它毫无作用，而真正想选的 `azure_anthropic` 根本无法命名），外加补上 Foundry 的 `/stats` 段、`azure_anthropic_endpoint_*` 指标与看板入口 —— 那是上一次发布记下的已知缺口，现已填上（`circuit_open` 样本 18 → 19）。本次运行文件清单未变，**控制器不需要重建**。见 [本次发布回执](reviews/2026-10-18-messages-order-release/REPORT.md)。
+最近一次已记录的 AKS 发布：**2026-10-18，应用源码 `3464a78`**，维护 62.6 秒，11 个阶段一次通过，三协议业务探针、账本与清理验收通过。内容是 per-model 规则改为按**模型身份**匹配（同一模型的三种拼法共用一条规则）与 Messages 面可指定第二跳。身份匹配修掉的不只是「配了没用」：`/v1/messages` 的失败转移在调用池之前就把模型名改写成各 provider 的拼法，所以 `supports()` 看到的是 GHCP 拼法 —— 按 ADB 或 Foundry 拼法保存的 `copilot_accounts` 永远查不到那个 key，**这一层静默地不再做减法**。本次运行文件清单未变（仍 24 个），**控制器不需要重建**；无 DDL、无配置变更。见 [本次发布回执](reviews/2026-10-18-rule-identity-release/REPORT.md)。
 
 上一次（2026-10-17，`0a9f830`）是 Claude 三路径上线与 Foundry 凭据首次投产，当时**控制器必须重建**（新增运行文件让 `APP_FILES` 从 21 变 22，而 `validate_plan` 在控制器进程内断言文件集合完全相等）—— 新增运行时文件时记得这条，见 [上一次回执](reviews/2026-10-17-three-paths-release/REPORT.md)。
 

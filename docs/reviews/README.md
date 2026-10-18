@@ -6,6 +6,7 @@ Author: Zeno Ren
 
 | 日期 | 范围 | 入口 |
 |---|---|---|
+| 2026-10-18 | **AKS 发布** `3464a78`：per-model 规则改为按**模型身份**匹配（三种拼法共用一条）—— 这修掉的不只是「配了没用」，`/v1/messages` 的失败转移先改写模型名，所以按 ADB/Foundry 拼法保存的 GHCP 账户限定**静默地不再做减法**；同时 Messages 面可指定第二跳。维护 62.6 秒、11 阶段一次通过 | [发布回执](2026-10-18-rule-identity-release/REPORT.md) |
 | 2026-10-18 | **AKS 发布** `3afb3ac`：`/v1/messages` 优先序可逐模型设定（此前工作台唯一的「Foundry」是 gpt 那一面，对 Claude 无效），并补上 Foundry 的 `/stats`、`/metrics` 与看板入口；维护 58.0 秒、11 阶段一次通过。三个缺陷由真实浏览器实测抓到，fixture 全未覆盖 | [发布回执](2026-10-18-messages-order-release/REPORT.md) |
 | 2026-10-17 | **AKS 发布** `0a9f830`：Claude 三路径上线，并首次把 Foundry 凭据配进生产；维护 48.0 秒、11 阶段一次通过。本次控制器必须重建（`APP_FILES` 多一个文件，旧控制器会拒 plan），且 Foundry 不在 `/stats` 与 `/metrics` 里是已知缺口 | [发布回执](2026-10-17-three-paths-release/REPORT.md) |
 | 2026-10-17 | Claude 三路径（ADB / GHCP / Foundry）**接入完成**：三家都说 Anthropic Messages，合成器不需要；看板按协议面显示路径；实测抓到凭据进 repr、共享规整污染另外两家等四个真问题 | [接入回执](2026-10-17-claude-three-paths/REPORT.md)、[实测证据](2026-10-17-claude-three-paths/EVIDENCE.md) |

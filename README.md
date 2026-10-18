@@ -128,7 +128,7 @@ python -m operations.build_identity \
 
 AKS 操作从 [部署指南](docs/AKS.md) 和 [受控发布工具](docs/RELEASE_TOOL.md) 开始。`deploy/k8s/` 是示例形态，**不能整份 apply 覆盖现有生产环境**。单副本发布可能产生维护窗口；需要预先完成备份、排空、恢复材料和业务验收。
 
-最近一次已记录的 AKS 发布为 [2026-10-18 Messages 面优先序可设](docs/reviews/2026-10-18-messages-order-release/REPORT.md)，应用源码 `3afb3ac`，维护 58.0 秒，三协议业务探针、账本与清理验收通过。该次让 `/v1/messages` 的优先序可**逐模型**设定，并补上 Foundry 的 `/stats` 段、`azure_anthropic_endpoint_*` 指标与看板入口 —— 那是上一次发布记下的缺口。后续文档或代码提交不自动表示线上更新。历次验证与部署结果集中在 [验证索引](docs/reviews/README.md)。
+最近一次已记录的 AKS 发布为 [2026-10-18 规则按模型身份匹配](docs/reviews/2026-10-18-rule-identity-release/REPORT.md)，应用源码 `3464a78`，维护 62.6 秒，三协议业务探针、账本与清理验收通过。该次把 per-model 规则改为按**模型身份**匹配 ——同一模型的三种拼法共用一条规则；此前按 ADB/Foundry 拼法保存的 GHCP 账户限定在 `/v1/messages` 上**静默失效**，因为失败转移会先把模型名改写成各 provider 的拼法。同时 Messages 面可指定第二跳，`Foundry Claude → GHCP → ADB` 从此可表达。后续文档或代码提交不自动表示线上更新。历次验证与部署结果集中在 [验证索引](docs/reviews/README.md)。
 
 ## 开发
 
