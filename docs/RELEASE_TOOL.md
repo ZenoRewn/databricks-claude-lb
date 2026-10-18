@@ -119,7 +119,7 @@ python -m operations.release --context YOUR_CONTEXT --kubeconfig YOUR_KUBECONFIG
 
 预检还会使用不匹配业务 Service 的短期 Pod 验证新旧镜像可拉取及导入、目标运行文件/真实 Dashboard、配置和只读 MySQL schema。检查列宽、collation、索引与引擎，不执行 DDL。验证 Pod 保留目标资源 requests 和调度条件；没有调度余量会停在维护前。
 
-### 已知缺陷：首次拉取慢时，通过了的镜像预检会被读成硬失败
+### 已修（2026-10-18）：首次拉取慢时，通过了的镜像预检会被读成硬失败
 
 `_image_preflight` 的校验 Pod 带 `activeDeadlineSeconds=90`，而该函数在 preflight 阶段**每个 tick（1 秒）都被重新调用**，结论是从 `pod.status.phase` 现场推导的 —— 它不记住上一次的结果。于是 Pod 退出后、phase 尚未落到 `Succeeded` 期间若跨过 deadline，kubelet 会把它判成 `DeadlineExceeded` → `Failed`，下一个 tick 就抛 `image_preflight_failed`。
 
@@ -135,7 +135,9 @@ python -m operations.release --context YOUR_CONTEXT --kubeconfig YOUR_KUBECONFIG
 
 **后果有界**：失败发生在 preflight，**不进入维护窗口**（`maintenance_started_at: null`），版本、Pod、generation 全程不变，生产零影响。换一个 release ID 重跑即可通过 —— 此时镜像已缓存在节点上，预检远快于 deadline 窗口。
 
-修法是让 `_image_preflight` 把首次观察到的成功结果记进 `action_receipts`，后续 tick 不再重新推导，与工具里其他步骤的既有写法一致。**不要只调大 `activeDeadlineSeconds`**：那只是把同一枚时间炸弹的引线加长，首次拉取更慢时照样会炸。该修法尚未实施（要重建并重新部署协调器镜像）；现场证据见 [2026-10-16 事件回执](reviews/2026-10-16-ghcp-half-open/REPORT.md)。
+修法是让 `_image_preflight` 把首次观察到的成功结果记进 `action_receipts`，后续 tick 不再重新推导，与工具里其他步骤的既有写法一致。**不要只调大 `activeDeadlineSeconds`**：那只是把同一枚时间炸弹的引线加长，首次拉取更慢时照样会炸。现场证据见 [2026-10-16 事件回执](reviews/2026-10-16-ghcp-half-open/REPORT.md)。
+
+**2026-10-18 已实施**，并在那之上多加一条更早的成功判据：容器**以 exit code 0 终止**本身即视为通过。它在 `containerStatuses` 里出现的时刻**早于** phase 落定，也不会被后来的 `DeadlineExceeded` 改写 —— 正是上面那条时间线里 t+81 就已具备、而旧实现到 t+171 仍未采信的证据。两条判据任一成立即写入回执，后续 tick 直接返回且**不再读取 Pod**。回归由 `tests/release/test_image_preflight.py` 钉住：把判定还原成修复前的形态，其中 5 条会红。
 
 授权范围和具体计划明确后提交：
 
