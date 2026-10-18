@@ -6,6 +6,7 @@ Author: Zeno Ren
 
 | 日期 | 范围 | 入口 |
 |---|---|---|
+| 2026-10-17 | **AKS 发布** `0a9f830`：Claude 三路径上线，并首次把 Foundry 凭据配进生产；维护 48.0 秒、11 阶段一次通过。本次控制器必须重建（`APP_FILES` 多一个文件，旧控制器会拒 plan），且 Foundry 不在 `/stats` 与 `/metrics` 里是已知缺口 | [发布回执](2026-10-17-three-paths-release/REPORT.md) |
 | 2026-10-17 | Claude 三路径（ADB / GHCP / Foundry）**接入完成**：三家都说 Anthropic Messages，合成器不需要；看板按协议面显示路径；实测抓到凭据进 repr、共享规整污染另外两家等四个真问题 | [接入回执](2026-10-17-claude-three-paths/REPORT.md)、[实测证据](2026-10-17-claude-three-paths/EVIDENCE.md) |
 | 2026-10-17 | Claude 三路径实测证据：三家都说 Anthropic Messages，合成器不需要；推翻我自己两条文档推断，并发现已启用的 enterprise 账户 0 个 claude | [实测证据](2026-10-17-claude-three-paths/EVIDENCE.md) |
 | 2026-10-17 | **AKS 发布** `34acc39`：Dashboard 工作台与 h2 连接退休一次上线；维护 66.7 秒、11 阶段一次通过，三协议探针与账本验收通过 | [发布回执](2026-10-17-aks-release/REPORT.md) |
