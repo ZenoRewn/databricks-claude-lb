@@ -196,6 +196,18 @@ class UsageDataStore:
         # per-model 列求和重建的，于是 MySQL 后端重启即丢，JSON 后端不丢。
         return {"input_tokens": 0, "output_tokens": 0,
                 "cache_creation_tokens": 0, "cache_read_tokens": 0,
+                "requests": 0, "errors": 0,
+                # 同一个模型名可能来自不同上游，而它们的计价口径不可混用：
+                # Foundry 按 CCU、GHCP 按分档价、ADB 按 Anthropic 公开价。
+                # `claude-opus-5` 在 GHCP 与 Foundry **完全同名**，所以光靠
+                # 模型名连理论上都分不开。顶层仍是该模型的总量（看板读这一层），
+                # 分解放在这里供计价按各自口径结算。
+                "by_provider": {}}
+
+    @staticmethod
+    def _empty_provider() -> dict:
+        return {"input_tokens": 0, "output_tokens": 0,
+                "cache_creation_tokens": 0, "cache_read_tokens": 0,
                 "requests": 0, "errors": 0}
 
     async def _flush(self):
@@ -225,14 +237,18 @@ class UsageDataStore:
                         batch = self._empty_day(day)
                         batch.update(batch_id=str(uuid.uuid4()),schema_version=1,events=copy.deepcopy(events))
                         for event in events:
+                            provider = event.get('provider') or 'unknown'
                             for target in (batch,cumulative):
                                 m = target['models'].setdefault(event['model'],self._empty_model())
+                                # 旧批次（迁移前写入 ledger 的 payload）没有这一层，
+                                # 读回来继续累加时要补上而不是 KeyError。
+                                p = m.setdefault('by_provider',{}).setdefault(provider,self._empty_provider())
                                 totals = target['totals']
                                 for key in ('input_tokens','output_tokens','cache_creation_tokens','cache_read_tokens'):
-                                    m[key] += event[key];totals[key] += event[key]
-                                m['requests'] += 1;totals['requests'] += 1
+                                    m[key] += event[key];p[key] += event[key];totals[key] += event[key]
+                                m['requests'] += 1;p['requests'] += 1;totals['requests'] += 1
                                 if event.get('is_error'):
-                                    m['errors'] += 1;totals['errors'] += 1
+                                    m['errors'] += 1;p['errors'] += 1;totals['errors'] += 1
                         stamp = datetime.now().astimezone().isoformat()
                         batch['last_updated'] = cumulative['last_updated'] = stamp
                         self._inflight_batch = (day,batch,cumulative)
@@ -456,6 +472,10 @@ class MysqlUsageStore(UsageDataStore):
                     CREATE TABLE IF NOT EXISTS usage_daily (
                         date DATE NOT NULL,
                         model VARCHAR(128) NOT NULL,
+                        -- 计价口径按上游分，而模型名分不开它们：`claude-opus-5`
+                        -- 在 GHCP 与 Foundry 完全同名。DEFAULT 'unknown' 让
+                        -- 迁移前的行与不带该列的旧 INSERT 都仍然合法。
+                        provider VARCHAR(32) NOT NULL DEFAULT 'unknown',
                         input_tokens BIGINT NOT NULL DEFAULT 0,
                         output_tokens BIGINT NOT NULL DEFAULT 0,
                         cache_creation_tokens BIGINT NOT NULL DEFAULT 0,
@@ -463,7 +483,7 @@ class MysqlUsageStore(UsageDataStore):
                         requests INT NOT NULL DEFAULT 0,
                         errors INT NOT NULL DEFAULT 0,
                         last_updated TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                        PRIMARY KEY (date, model)
+                        PRIMARY KEY (date, model, provider)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
                 await cur.execute("""
@@ -529,10 +549,19 @@ class MysqlUsageStore(UsageDataStore):
                     # Stable lock ordering reduces multi-writer deadlock risk.
                     for model_name in sorted(models):
                         mstats = models[model_name]
-                        await cur.execute("""
-                        INSERT INTO usage_daily (date, model, input_tokens, output_tokens,
+                        # 一个模型可能有多个上游，各写一行 —— 合并成一行就再也
+                        # 分不开两家的量（同名模型上甚至无法事后推断）。缺 by_provider
+                        # 的旧 payload 退化为单行 'unknown'，与迁移前等价。
+                        breakdown = mstats.get("by_provider") or {
+                            "unknown": {k: mstats.get(k, 0) for k in
+                                        ("input_tokens", "output_tokens", "cache_creation_tokens",
+                                         "cache_read_tokens", "requests", "errors")}}
+                        for provider in sorted(breakdown):
+                            pstats = breakdown[provider]
+                            await cur.execute("""
+                        INSERT INTO usage_daily (date, model, provider, input_tokens, output_tokens,
                             cache_creation_tokens, cache_read_tokens, requests, errors)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON DUPLICATE KEY UPDATE
                             input_tokens = input_tokens + VALUES(input_tokens),
                             output_tokens = output_tokens + VALUES(output_tokens),
@@ -540,11 +569,11 @@ class MysqlUsageStore(UsageDataStore):
                             cache_read_tokens = cache_read_tokens + VALUES(cache_read_tokens),
                             requests = requests + VALUES(requests),
                             errors = errors + VALUES(errors)
-                        """, (d.isoformat(), model_name,
-                          mstats.get("input_tokens", 0), mstats.get("output_tokens", 0),
-                          mstats.get("cache_creation_tokens", 0), mstats.get("cache_read_tokens", 0),
-                          mstats.get("requests", 0),
-                              mstats.get("errors", 0)))
+                        """, (d.isoformat(), model_name, provider,
+                              pstats.get("input_tokens", 0), pstats.get("output_tokens", 0),
+                              pstats.get("cache_creation_tokens", 0), pstats.get("cache_read_tokens", 0),
+                              pstats.get("requests", 0),
+                              pstats.get("errors", 0)))
                 await conn.commit()
             except BaseException:
                 try:
@@ -562,24 +591,25 @@ class MysqlUsageStore(UsageDataStore):
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, requests, errors FROM usage_daily WHERE date = %s",
+                    "SELECT model, provider, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, requests, errors FROM usage_daily WHERE date = %s",
                     (d.isoformat(),))
                 rows = await cur.fetchall()
         if not rows:
             return {}
         models = {}
         totals = {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0, "requests": 0, "errors": 0}
-        for model, inp, out, cc, cr, reqs, errs in rows:
-            # 形状必须与 _empty_model() 一致，否则「进程内新建」与「从 DB 载入」
-            # 的 models[m] 键集不同，消费方一旦不用 .get() 就会 KeyError。
-            models[model] = {"input_tokens": inp, "output_tokens": out, "cache_creation_tokens": cc,
-                             "cache_read_tokens": cr, "requests": reqs, "errors": errs}
-            totals["input_tokens"] += inp
-            totals["output_tokens"] += out
-            totals["cache_creation_tokens"] += cc
-            totals["cache_read_tokens"] += cr
-            totals["requests"] += reqs
-            totals["errors"] += errs
+        for model, provider, inp, out, cc, cr, reqs, errs in rows:
+            # 一个模型现在可能有多行（每个上游一行）。形状必须与 _empty_model()
+            # 一致，否则「进程内新建」与「从 DB 载入」的 models[m] 键集不同，
+            # 消费方一旦不用 .get() 就会 KeyError。
+            m = models.setdefault(model, UsageDataStore._empty_model())
+            p = m["by_provider"].setdefault(provider or 'unknown', UsageDataStore._empty_provider())
+            for key, value in (("input_tokens", inp), ("output_tokens", out),
+                               ("cache_creation_tokens", cc), ("cache_read_tokens", cr),
+                               ("requests", reqs), ("errors", errs)):
+                m[key] += value
+                p[key] += value
+                totals[key] += value
         return {"date": d.isoformat(), "models": models, "totals": totals}
 
     async def get_day_data(self, d: date) -> Optional[dict]:

@@ -110,3 +110,71 @@ class HistoryAPITests(unittest.IsolatedAsyncioTestCase):
         day = (await self.call({'gpt-5.6-future': usage()}))['history'][0]
         self.assertEqual(day['pricing_status'], 'unknown')
         self.assertIsNone(day['models']['gpt-5.6-future']['estimated_cost_usd'])
+
+
+class ProviderAwarePricingTests(unittest.TestCase):
+    """历史计价必须按归因，而不是按名字猜渠道。
+
+    Foundry 在 `/v1/messages` 上记录的模型名是裸 `claude-opus-5-5`，而按名字
+    推断会把裸 `claude-*` 判成 Copilot，于是 Foundry 的量套上 GHCP 分档价并
+    报 `status=complete` —— 一个自信的错数字。Foundry 按 CCU 计量，既不是
+    Anthropic 公开价也不是 GHCP 分档价，所以必须是未知。
+    """
+
+    @staticmethod
+    def _stats(by_provider=None, **totals):
+        base = {'requests': 1, 'input_tokens': 1_000_000, 'output_tokens': 200_000,
+                'cache_creation_tokens': 0, 'cache_read_tokens': 0}
+        base.update(totals)
+        if by_provider is not None:
+            base['by_provider'] = by_provider
+        return base
+
+    def test_foundry_attributed_usage_is_unpriced(self):
+        row = main.historical_model_cost('claude-opus-5-5', self._stats(
+            {'azure_anthropic': self._stats()}))
+        self.assertIsNone(row['estimated_cost_usd'])
+        self.assertEqual(row['pricing_status'], 'unknown')
+        self.assertEqual(row['unpriced_requests'], 1)
+        self.assertEqual(row['known_cost_subtotal_usd'], 0)
+
+    def test_copilot_attributed_usage_keeps_the_copilot_basis(self):
+        row = main.historical_model_cost('claude-opus-5.5', self._stats(
+            {'copilot': self._stats()}))
+        self.assertEqual(row['pricing_basis'], 'current_copilot_reference')
+        self.assertIsNotNone(row['estimated_cost_usd'])
+
+    def test_databricks_attributed_usage_keeps_the_anthropic_basis(self):
+        row = main.historical_model_cost('databricks-claude-opus-5-5', self._stats(
+            {'databricks': self._stats()}))
+        self.assertEqual(row['pricing_basis'], 'legacy_model_reference')
+        self.assertIsNotNone(row['estimated_cost_usd'])
+
+    def test_a_row_without_attribution_keeps_the_legacy_name_based_behaviour(self):
+        # Rows written before the provider column exist and must not change
+        # basis retroactively.
+        named = main.historical_model_cost('claude-opus-5.5', self._stats())
+        self.assertEqual(named['pricing_basis'], 'current_copilot_reference')
+        legacy = main.historical_model_cost('databricks-claude-opus-5-5', self._stats())
+        self.assertEqual(legacy['pricing_basis'], 'legacy_model_reference')
+
+    def test_the_same_name_from_two_providers_is_priced_separately(self):
+        # `claude-opus-5` is spelled identically by GHCP and Foundry, so this
+        # is the case the name alone can never resolve.
+        row = main.historical_model_cost('claude-opus-5', self._stats(
+            {'copilot': self._stats(requests=1),
+             'azure_anthropic': self._stats(requests=1)},
+            requests=2, input_tokens=2_000_000, output_tokens=400_000))
+        self.assertEqual(row['pricing_status'], 'partial',
+                         'one half is priceable and the other is not')
+        self.assertEqual(row['priced_requests'], 1)
+        self.assertEqual(row['unpriced_requests'], 1)
+        self.assertGreater(row['known_cost_subtotal_usd'], 0,
+                           'the GHCP half keeps its subtotal')
+
+    def test_a_partial_row_does_not_claim_a_total(self):
+        summary = main.historical_cost_summary({'claude-opus-5': main.historical_model_cost(
+            'claude-opus-5', self._stats({'copilot': self._stats(),
+                                          'azure_anthropic': self._stats()}))})
+        self.assertIsNone(summary['estimated_total_cost_usd'])
+        self.assertEqual(summary['pricing_status'], 'partial')

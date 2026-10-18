@@ -106,6 +106,57 @@ class StatsSectionTests(unittest.TestCase):
         self.assertNotIn('azure_anthropic', self.stats())
 
 
+class UsageAttributionTests(unittest.TestCase):
+    """用量事件必须说出它真正来自哪个上游。
+
+    `ClaudeProxy` 的记录点曾硬编码 `provider='databricks'`，而三个
+    Anthropic Messages 池**都是** `ClaudeProxy`（`CopilotMessagesProxy` 直接
+    继承它，没有自己的记录逻辑）。于是 Foundry 与 GHCP-messages 的每一条用量
+    都被标成 Databricks —— 计价口径从源头就错了，加列也救不回来。
+    """
+
+    def setUp(self):
+        self.recorded = []
+        store = type('Store', (), {
+            'record': lambda _s, *a, **k: self.recorded.append(k.get('provider')),
+            'persistence_stats': lambda _s: {'pending_events': 0},
+        })()
+        patcher = patch.object(main, 'usage_store', store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _record_through(self, provider):
+        proxy = object.__new__(main.ClaudeProxy)
+        proxy.provider = provider
+        proxy.global_stats = main.GlobalStats()
+        proxy.today_model_stats = {}
+        proxy.today_date = '2026-10-18'
+        endpoint = _endpoint()
+        proxy.load_balancer = main.LoadBalancer(endpoints=[endpoint], strategy='least_requests')
+        proxy._record_usage(endpoint, 'claude-opus-5-5', 10, 5, 0, 0,
+                            generation_outcome='completed')
+        return self.recorded
+
+    def test_foundry_usage_is_attributed_to_foundry(self):
+        self.assertEqual(self._record_through('azure_anthropic'), ['azure_anthropic'])
+
+    def test_copilot_messages_usage_is_attributed_to_copilot(self):
+        self.assertEqual(self._record_through('copilot'), ['copilot'])
+
+    def test_databricks_remains_the_default_for_an_unset_provider(self):
+        proxy = object.__new__(main.ClaudeProxy)
+        proxy.global_stats = main.GlobalStats()
+        proxy.today_model_stats = {}
+        proxy.today_date = '2026-10-18'
+        endpoint = _endpoint()
+        proxy.load_balancer = main.LoadBalancer(endpoints=[endpoint], strategy='least_requests')
+        # Harnesses build proxies via object.__new__, so the attribute can be
+        # missing entirely; that must not crash the usage path.
+        proxy._record_usage(endpoint, 'databricks-claude-opus-5', 1, 1, 0, 0,
+                            generation_outcome='completed')
+        self.assertEqual(self.recorded, ['databricks'])
+
+
 class MetricsExportTests(unittest.TestCase):
     def setUp(self):
         self.endpoint = _endpoint()

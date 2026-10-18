@@ -1503,7 +1503,54 @@ def calculate_cost(model_name: str, input_tokens: int, output_tokens: int,
 
 
 def historical_model_cost(model, stats):
-    """Price a read-only aggregate view without claiming a provider or past tariff."""
+    """Price a read-only aggregate view, per attributed provider where known.
+
+    `by_provider` exists because the recorded name cannot always say which
+    upstream served the request: `claude-opus-5` is spelled **identically** by
+    GHCP and Foundry. Pricing them alike套 the wrong tariff on one of them, and
+    Foundry's CCU metering has no per-token price at all — so an attributed
+    Foundry segment stays unknown rather than borrowing GHCP's tiers.
+
+    Rows written before attribution existed carry no `by_provider` and keep the
+    original name-based behaviour exactly, so no stored row changes basis.
+    """
+    breakdown = stats.get('by_provider')
+    if not breakdown:
+        return _historical_cost_by_name(model, stats)
+    segments = []
+    for provider in sorted(breakdown):
+        pstats = breakdown[provider]
+        if provider in _PROVIDERS_WITHOUT_LIST_PRICING:
+            requests = pstats.get('requests', 0)
+            covered = requests if type(requests) is int and requests >= 0 else 0
+            segments.append({'known_cost_subtotal_usd': 0, 'known_cost_subtotal_max_usd': 0,
+                             'priced_requests': 0, 'unpriced_requests': covered,
+                             'pricing_status': 'unknown', 'pricing_basis': 'ccu_not_per_token',
+                             'estimate_kind': 'unknown', 'pricing_reason': 'ccu_metered_upstream'})
+        else:
+            segments.append(_historical_cost_by_name(model, pstats))
+    statuses = {s['pricing_status'] for s in segments}
+    complete = statuses == {'complete'}
+    bases = {s['pricing_basis'] for s in segments}
+    lower = sum(s['known_cost_subtotal_usd'] for s in segments)
+    upper = sum(s['known_cost_subtotal_max_usd'] for s in segments)
+    return {**stats,
+            'estimated_cost_usd': lower if complete and lower == upper else None,
+            'estimated_cost_min_usd': lower if complete else None,
+            'estimated_cost_max_usd': upper if complete else None,
+            'pricing_status': 'complete' if complete else
+                              'unknown' if statuses == {'unknown'} else 'partial',
+            'pricing_basis': bases.pop() if len(bases) == 1 else 'mixed_provider_basis',
+            'estimate_kind': 'point' if complete and lower == upper else
+                             'unknown' if statuses == {'unknown'} else 'partial',
+            'pricing_reason': 'per_provider_attribution',
+            'priced_requests': sum(s['priced_requests'] for s in segments),
+            'unpriced_requests': sum(s['unpriced_requests'] for s in segments),
+            'known_cost_subtotal_usd': lower, 'known_cost_subtotal_max_usd': upper}
+
+
+def _historical_cost_by_name(model, stats):
+    """The original name-based basis, unchanged — the fallback for legacy rows."""
     # Anthropic input excludes caches; the OpenAI-style adapters report inclusive
     # input. Daily storage has no provider column, so the recorded name is the
     # only signal — and the two channels use different names: Databricks records
@@ -1554,7 +1601,12 @@ def historical_model_cost(model, stats):
 def historical_cost_summary(models):
     rows = list(models.values())
     complete = all(s['pricing_status'] == 'complete' for s in rows)
-    known = any(s['pricing_status'] == 'complete' for s in rows)
+    # A per-provider row can be `partial` — half GHCP (priceable), half Foundry
+    # (CCU, unknown) — and it still carries a real known subtotal. Counting only
+    # `complete` would report the whole day as unknown and drop that subtotal,
+    # which is the opposite of «unknown stays unknown, partial keeps its known
+    # subtotal».
+    known = any(s['pricing_status'] in ('complete', 'partial') for s in rows)
     lower = sum(s['known_cost_subtotal_usd'] for s in rows)
     upper = sum(s['known_cost_subtotal_max_usd'] for s in rows)
     return {'estimated_total_cost_usd': lower if complete and lower == upper else None,
@@ -3554,9 +3606,14 @@ class ClaudeProxy:
         tm["cache_read_tokens"] += cache_read_tokens
         tm["requests"] += 1
         if usage_store and (usage_fields is None or usage_fields):
+            # 三个 Anthropic Messages 池**都是** ClaudeProxy（CopilotMessagesProxy
+            # 直接继承它），所以硬编码 'databricks' 会把 Foundry 与 GHCP-messages
+            # 的每一条用量都记成 Databricks —— 计价口径从源头就错，日聚合加列也
+            # 救不回来。getattr 兜住 object.__new__ 构造的测试替身。
             usage_store.record(model, input_tokens, output_tokens,
                                cache_creation_tokens, cache_read_tokens,
-                               provider='databricks', tenant=_CURRENT_TENANT.get(), request_id=telemetry_request_id(),
+                               provider=getattr(self, "provider", "databricks"),
+                               tenant=_CURRENT_TENANT.get(), request_id=telemetry_request_id(),
                                generation_outcome=generation_outcome,usage_fields=usage_fields,
                                is_error=generation_outcome != "completed")
 

@@ -114,9 +114,14 @@ def validate_schema(schema):
               'created_at':['timestamp','NO',None,None,6]}
     if any(schema['ledger_columns'].get(name)!=value for name,value in expected.items()):raise ValueError('usage_schema_columns_mismatch')
     expected={**{name:['bigint','NO',None] for name in ('input_tokens','output_tokens','cache_creation_tokens','cache_read_tokens')},
-              **{name:['int','NO',None] for name in ('requests','errors')},'date':['date','NO',None],'model':['varchar','NO',128]}
+              **{name:['int','NO',None] for name in ('requests','errors')},'date':['date','NO',None],'model':['varchar','NO',128],
+              # Attribution is required, not optional: this build's INSERT names
+              # the column, and `claude-opus-5` is spelled identically by GHCP
+              # and Foundry, so the model name alone cannot separate their
+              # tariffs. A pre-migration table must therefore fail the gate.
+              'provider':['varchar','NO',32]}
     if any(schema['daily_columns'].get(name)!=value for name,value in expected.items()):raise ValueError('daily_schema_columns_mismatch')
-    if schema['unique_indexes']!={'usage_batch_ledger':{'PRIMARY':['batch_id']},'usage_daily':{'PRIMARY':['date','model']}}:
+    if schema['unique_indexes']!={'usage_batch_ledger':{'PRIMARY':['batch_id']},'usage_daily':{'PRIMARY':['date','model','provider']}}:
         raise ValueError('usage_schema_unique_keys_mismatch')
     if schema['event_date_index']!=['event_date']:raise ValueError('usage_schema_retention_index_missing')
     # Absent is accepted (pre-introduction); present must match exactly. A
