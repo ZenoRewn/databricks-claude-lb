@@ -57,7 +57,7 @@ spec:
         prometheus.io/port: "8000"
         prometheus.io/path: "/metrics"
     spec:
-      terminationGracePeriodSeconds: 60
+      terminationGracePeriodSeconds: 90
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -95,9 +95,13 @@ spec:
             - name: COPILOT_STREAM_MONITOR_INTERVAL
               value: "5"
           envFrom:
-            # 注入所有 ${ENV_VAR} 占位的实际值（DATABRICKS_TOKEN_*, AZURE_KEY_*, LB_API_KEY 等）
+            # 注入 ConfigMap 里所有 ${ENV_VAR} 占位的实际值。键名按端点名生成
+            # （ADB_TOKEN_* / AZURE_OPENAI_KEY_* / AZURE_ANTHROPIC_KEY_* / LB_API_KEY …），
+            # 见 configmap.yaml 顶部的约定 —— 两侧由同一份映射生成，都不手敲。
+            # 注意 envFrom 会把该 Secret 的**每个键**都注入为环境变量，所以上游凭据
+            # 与面板密码 / LB_CREDENTIAL_KEY 分开放在两个 Secret 里（轮换节奏也不同）。
             - secretRef:
-                name: claude-lb-secrets
+                name: claude-lb-upstream-credentials
           volumeMounts:
             - name: config
               mountPath: /etc/claude-lb
@@ -146,14 +150,17 @@ spec:
           #   a) endpoints 变更传播完，新连接不再进来
           #   b) 已建立的流有时间自然结束
           # 之后 SIGTERM 才发给 uvicorn，触发它的 graceful shutdown。
-          # 时间预算：preStop 15s + uvicorn --timeout-graceful-shutdown 30s = 45s
-          # < terminationGracePeriodSeconds 60s，但仍需清理余量，不能保证
-          # 所有长流都自然结束或所有 cleanup 都在 grace 内完成。
+          # 用仓库自带的 `gateway_lifecycle.py` 而不是裸 `sleep`：它会落下 drain 标记，
+          # 使 /health/accepting 立刻转为「不接新流量」，并在等待期内有界地观察在途请求。
+          # 裸 sleep 只是等时间，不告诉进程正在排空 —— 线上用的是前者。
+          # 时间预算：preStop 45s + uvicorn --timeout-graceful-shutdown 30s = 75s
+          # < terminationGracePeriodSeconds 90s，仍留清理余量，但不能保证所有长流都
+          # 自然结束或所有 cleanup 都在 grace 内完成。
           # 注意 preStop 超时不单独计时，它占用的是 grace period 的额度。
           lifecycle:
             preStop:
               exec:
-                command: ["sleep", "15"]
+                command: ["python", "/app/gateway_lifecycle.py", "--wait-seconds", "45"]
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false   # tini 需要 /tmp，可以收紧后再开 RO root
@@ -177,6 +184,8 @@ spec:
         # key 对得上就把下面 secretName 改成它；对不上就按 secret.example.yaml
         # 重新生成一个 claude-lb-copilot-cache。详见 docs/AKS.md「live 与 repo 漂移」。
         - name: copilot-cache
+          # live 集群 zeno-apps 用的名字是 `claude-lb-copilot-auth`（卷名
+          # `copilot-auth-accounts`）。本文件以 secret.example.yaml 为准，换环境时两处要一致。
           secret:
             secretName: claude-lb-copilot-cache
             defaultMode: 0400

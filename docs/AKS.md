@@ -36,7 +36,7 @@ Author: Zeno Ren
 
 | 盲 apply 的动作 | 后果 |
 |---|---|
-| 覆盖 ConfigMap | repo 的占位符名与 live Secret 的键名**不保证相同** → 对不上的引用解析为空。**2026-10-18 起这会拒绝启动而不是静默 401**（`resolve_credential`），所以后果从「9 个 endpoint 悄悄全挂」变成「Pod 起不来」—— 更容易发现，但单副本下仍是停服。注意早先这里写的「拿到字面量 `${...}` 当 token」不准确：`expand_env_vars` 替换成的是**空串**，不是字面量 |
+| 覆盖 ConfigMap | 命名约定已对齐，但 **storage 档不同**：示例是 `usage_data_dir`（JSON 单写者），live 是 `usage_storage.type: mysql`。整份覆盖会把 MySQL 连接配置整段抹掉 → 用量落到容器内的本地文件，**且 provider 归因失效**（那个主键只有 MySQL 后端有）。引用对不上时自 2026-10-18 起会**拒绝启动**而不是静默 401（`resolve_credential`），更容易发现，但单副本下仍是停服。注意早先这里写的「拿到字面量 `${...}` 当 token」不准确：`expand_env_vars` 替换成的是**空串**，不是字面量 |
 | 覆盖 Deployment | config 挂载点从 live 的 `/app/config.yaml` 变成 repo 的 `/etc/claude-lb`，同时 `CONFIG_PATH` 被设成 `/etc/claude-lb/config.yaml` —— 二者自洽，但若只 apply 了 ConfigMap 没 apply Deployment（或反之）就找不到配置文件 |
 | 创建 PVC + usage-data 卷 | live 走的是 MySQL 后端（`usage_storage.type: mysql`），凭空多一个 RWO PVC 且 `Recreate` 策略被带回 |
 | 挂 copilot-cache | live 里那个 secret 叫 `claude-lb-copilot-auth` 而不是 repo 的 `claude-lb-copilot-cache`，直接 apply 会因 secret 不存在而 Pod Pending |
@@ -47,13 +47,14 @@ Author: Zeno Ren
 
 | 项 | repo（本仓库） | live（zeno-apps/claude-lb） |
 |---|---|---|
-| ConfigMap 敏感字段 | `${LB_API_KEY}` / `${DATABRICKS_TOKEN_*}` 占位符 | ✅ **已收敛（2026-10-18）**：17 个字段均为 `${ENV}` 引用，`last-applied` 注解里那份整份明文副本也已清除。变量名与 repo 占位符**不同名**（按端点名生成，如 `ADB_TOKEN_EASTUS2_ADB_WS`） |
-| `envFrom` | `secretRef: claude-lb-secrets` | ✅ `secretRef: claude-lb-upstream-credentials`（17 键）。**名字与 repo 示例不同**，所以整份 apply 仍然会错 |
-| config 挂载点 | `/etc/claude-lb`（配 `CONFIG_PATH`） | `/app/config.yaml`（未设 `CONFIG_PATH`，靠默认值恰好匹配） |
+| ConfigMap 敏感字段 | `${LB_API_KEY}` / `${ADB_TOKEN_<端点名>}` 占位符 | ✅ **已收敛（2026-10-18）**：17 个字段均为 `${ENV}` 引用，`last-applied` 注解里那份整份明文副本也已清除。repo 示例同日改用同一套**按端点名生成**的命名，两侧不再是两套约定 |
+| `envFrom` | `secretRef: claude-lb-upstream-credentials` | ✅ 同名（17 键） |
+| `azure_anthropic`（Foundry） | ✅ 已补（2026-10-18）；此前示例里**完全没有这一段**，照抄装出来的网关会少掉第三条 Claude 路径 | 1 个端点、4 个 deployment |
+| config 挂载点 | `/etc/claude-lb`（配 `CONFIG_PATH`） | `/app/config.yaml`，**`CONFIG_PATH` 已显式设置**（2026-10-18）。此前未设、靠 Dockerfile 的 `WORKDIR` 与挂载点恰好一致 —— 能用但是隐式依赖，`WORKDIR` 一改就断。两侧现在都是显式的，路径不同只是选择 |
 | usage 存储 | `usage_data_dir` + RWO PVC | `usage_storage.type: mysql`，**无 PVC** |
 | copilot-cache 卷 | `secret/claude-lb-copilot-cache`，挂 `/home/app/.config/databricks-claude-lb` | ✅ 已挂载，但 secret 名是 `claude-lb-copilot-auth`（卷名 `copilot-auth-accounts`）。5 个账户中 4 个的 token 来自这里，1 个（`ZenoRewn`）来自上面那个 Secret |
 | 发布策略 | `Recreate`（RWO PVC 所致） | `RollingUpdate` + `maxUnavailable=1` / `maxSurge=0`（等价于先杀后拉，**同样零可用**） |
-| preStop / grace | `sleep 15` / 60s | ✅ `python /app/gateway_lifecycle.py --wait-seconds 45` / 90s |
+| preStop / grace | ✅ 已对齐（2026-10-18）：`python /app/gateway_lifecycle.py --wait-seconds 45` / 90s。此前示例是裸 `sleep 15` —— 只是等时间，**不落 drain 标记**，`/health/accepting` 不会转为「不接新流量」 | 同左 |
 | PDB / HPA | 无（单副本不需要） | 无 |
 | live 独有 env | — | `COPILOT_STREAM_HIGH_WATERMARK` / `_OVERLOAD_GRACE` / `_DISCONNECT_GRACE` / `_MONITOR_INTERVAL` / `IMG_MAX_COUNT` |
 
@@ -80,8 +81,21 @@ Author: Zeno Ren
 变量没有任何引用去读 —— 而且这个顺序反而**消除了**原计划里那个窗口：「新配置已就位但
 `envFrom` 还没打上时 Pod 恰好自行重启」会触发闸门而停服。代价是多了一次滚动重启。
 
-**仍未做**：挂载点未对齐到 repo 的 `/etc/claude-lb`（live 用 `/app/config.yaml`，靠默认值
-恰好匹配，未设 `CONFIG_PATH`）。preStop 与 copilot 卷在此期间已经到位，见上表。
+**同日补完的收尾（2026-10-18）**：
+
+- live 的 `CONFIG_PATH` 已**显式**设为 `/app/config.yaml`（此前未设，靠 Dockerfile 的
+  `WORKDIR` 与挂载点恰好一致 —— 能用，但 `WORKDIR` 一改就断）。一次滚动重启，端点
+  9/4/1/5 与变更前一致、零 ERROR。挂载路径本身没有改：那是选择而不是缺陷，为它重启
+  单副本服务换不到任何东西。
+- `deploy/k8s/` 示例改用与线上**同一套**命名约定（按端点名生成）、同一个 Secret 名、
+  同样的 `gateway_lifecycle.py` preStop 与 90s grace，并补上**此前完全缺失的
+  `azure_anthropic`（Foundry）段**与 MySQL 账本档。示例此前教的是另一套约定，照抄装出来
+  的网关既少一条 Claude 路径、也拿不到 provider 归因。
+
+**仍然有意保留的差异**：示例是 `usage_data_dir`（JSON 单写者）+ RWO PVC + `Recreate`，
+那是一个合法的简单起点；线上是 MySQL + 无 PVC + `RollingUpdate`。所以
+**整份 apply 示例清单依然会出事** —— 现在的首要理由不再是名字对不上，而是会把 MySQL
+连接配置整段抹掉。
 
 **命名空间里还有一处明文**：`ghost-blog` 的 Deployment 把同一个 MySQL 的密码写成 `env`
 明文值。那是另一个工作负载，本次未动，所以 MySQL 密码在命名空间内**仍然可读**，且轮换
