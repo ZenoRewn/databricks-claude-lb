@@ -6,6 +6,7 @@ Author: Zeno Ren
 
 | 日期 | 范围 | 入口 |
 |---|---|---|
+| 2026-10-19 | **AKS 发布** `53615db`：Messages 面的候选判断**绕过了四层账户策略** —— 生产实测一次强制走 copilot 的 `/v1/messages` 落在运维**从未启用**的账户上，而诊断同时报它被排除。`select_endpoint` 只看 config 的 `models` 列表，而 Copilot 账户声明 `models: []`，谓词恒真。同一行代码还把 Foundry/GHCP-messages 的遥测归因写死成 databricks。维护 78.5 秒（首次提交在 preflight 403 中止，原因是迁移漏了一步 RBAC，生产未被触碰）| [发布回执](2026-10-19-messages-account-policy/REPORT.md) |
 | 2026-10-18 | **AKS 发布 + 运维变更** `1d00c58`：上游 17 条凭据从 ConfigMap 明文迁入 Secret。先发一道**行为无变化**的闸门 —— `${ENV}` 引用解析不出来就拒绝启动，因为此前缺失变量被静默替换成空串且没有任何一层拒绝空 token；再用校验 Pod 确认 `load_config` 退出码 0 才动生产。发布维护 55.4 秒；四条真实上游请求与 MySQL 账本读写均通过 | [迁移回执](2026-10-18-credential-secret-migration/REPORT.md) |
 | 2026-10-18 | **AKS 发布** `3464a78`：per-model 规则改为按**模型身份**匹配（三种拼法共用一条）—— 这修掉的不只是「配了没用」，`/v1/messages` 的失败转移先改写模型名，所以按 ADB/Foundry 拼法保存的 GHCP 账户限定**静默地不再做减法**；同时 Messages 面可指定第二跳。维护 62.6 秒、11 阶段一次通过 | [发布回执](2026-10-18-rule-identity-release/REPORT.md) |
 | 2026-10-18 | **AKS 发布** `3afb3ac`：`/v1/messages` 优先序可逐模型设定（此前工作台唯一的「Foundry」是 gpt 那一面，对 Claude 无效），并补上 Foundry 的 `/stats`、`/metrics` 与看板入口；维护 58.0 秒、11 阶段一次通过。三个缺陷由真实浏览器实测抓到，fixture 全未覆盖 | [发布回执](2026-10-18-messages-order-release/REPORT.md) |
