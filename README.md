@@ -128,7 +128,7 @@ python -m operations.build_identity \
 
 AKS 操作从 [部署指南](docs/AKS.md) 和 [受控发布工具](docs/RELEASE_TOOL.md) 开始。`deploy/k8s/` 是示例形态，**不能整份 apply 覆盖现有生产环境**。单副本发布可能产生维护窗口；需要预先完成备份、排空、恢复材料和业务验收。
 
-最近一次已记录的 AKS 发布为 [2026-10-18 凭据迁 Secret](docs/reviews/2026-10-18-credential-secret-migration/REPORT.md)，应用源码 `1d00c58`，维护 55.4 秒，三协议业务探针、账本与清理验收通过。该次先发一道**行为无变化**的闸门 ——配置里 `${ENV}` 形式的凭据引用解析不出来就拒绝启动（此前缺失变量被静默替换成空串，而没有任何一层拒绝空 token，唯一症状是上游 401）—— 再把上游 17 条凭据从 ConfigMap 明文迁入 Secret，动生产前用校验 Pod 确认 `load_config` 退出码 0。后续文档或代码提交不自动表示线上更新。历次验证与部署结果集中在 [验证索引](docs/reviews/README.md)。
+最近一次已记录的 AKS 发布为 [2026-10-19 Messages 面账户策略](docs/reviews/2026-10-19-messages-account-policy/REPORT.md)，应用源码 `53615db`，维护 78.5 秒，三协议业务探针、账本与清理验收通过。该次修的是一条**已经在生产发生过**的策略绕过：Anthropic Messages 面的候选判断只看 config 声明的 `models` 列表，而 Copilot 账户声明 `models: []`（= all），于是启用态、`allowed_models`、per-model 账户选择与已发现能力**四层全部被跳过** —— 实测一次请求落在运维从未启用的账户上，而诊断同时报它被排除。顺带把 Foundry 与 GHCP-messages 的遥测归因从写死的 databricks 改成各自的 provider。后续文档或代码提交不自动表示线上更新。历次验证与部署结果集中在 [验证索引](docs/reviews/README.md)。
 
 ## 开发
 

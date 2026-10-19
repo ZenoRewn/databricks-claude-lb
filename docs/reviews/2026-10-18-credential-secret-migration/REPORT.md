@@ -115,6 +115,27 @@ Secret 同样用 `kubectl create -f -` 走标准输入创建：值不进 argv、
 **残留扫描**：按那 17 个真实凭据值在 `configmap` / `deployment` / `replicaset` / `pod`
 四类对象里逐个搜，`claude-lb` 的全部对象结果为 **无**。
 
+## 补记（2026-10-19）：漏了一步 RBAC，下一次发布因此中止
+
+迁移给 Deployment 加了 `envFrom: claude-lb-upstream-credentials`，但**没有**把这个名字加进
+控制器在目标命名空间的 `Role/lb-release-controller-target` 的 `secrets.resourceNames`。
+preflight 的 `_verify_references()` 逐个读取模板引用的每个对象并比对摘要，漏一个就是 403
+—— 所以 2026-10-19 那次发布在 preflight 直接中止（`maintenance_started_at: null`，生产
+未被触碰）。
+
+**这一步 `docs/AKS.md` 里本来就写着**，连「2026-10-14 首轮发布就是这么中止的」都记着，
+而且同一处还写明 **`plan` 阶段不会暴露这个问题**（plan 用的是运维自己的身份，不是控制器的
+ServiceAccount）。本次完全复现了那句话。
+
+所以这一轮的真实代价不是「服务受影响」——它没有——而是**此后任何一次发布都会失败，
+直到补上这一条**。补法：
+
+    kubectl -n zeno-apps patch role lb-release-controller-target --type=json \
+      -p '[{"op":"add","path":"/rules/9/resourceNames/-","value":"claude-lb-upstream-credentials"}]'
+
+补后以控制器 SA 核验（`kubectl auth can-i get secret/... --as=system:serviceaccount:...`
+→ `yes`）。详见 [2026-10-19 回执](../2026-10-19-messages-account-policy/REPORT.md)。
+
 ## 五、一个本次未处理的发现
 
 命名空间级扫描时 MySQL 密码仍然命中，来源**不是** `claude-lb`：
