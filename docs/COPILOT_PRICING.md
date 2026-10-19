@@ -2,9 +2,15 @@
 
 Author: Zeno Ren
 
-随代码提供的基线核对日期：2026-10-01。来源：[GitHub Models and pricing](https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing)。官方表按 token 定价，1 AI credit = 0.01 USD。启用 Copilot 时，项目服务默认每 7 天后台获取、验证并更新官方价格。
+随代码提供的基线核对日期：**2026-10-19**。来源：[GitHub Models and pricing](https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing)。官方表按 token 定价，1 AI credit = 0.01 USD。启用 Copilot 时，项目服务默认每 7 天后台获取、验证并更新官方价格。
 
-`copilot_pricing.py` 基线收录当日官方表的 35 个模型、47 行档位，在上一版基础上补齐 GPT-6 Luna、GPT-6 Sol、GPT-6.1 Sol、Claude Opus 5.5、Claude Sonnet 5.5、Grok 4.7。官方 HTML 表格与脚注摘录位于 `tests/fixtures/copilot-pricing-20261001.html`；9 月 21 日 JSON 快照保留用于回归。后台获取与推理请求相互独立，不向 GitHub Docs 发送模型凭据、用户输入或用量记录。
+`copilot_pricing.py` 基线收录当日官方表的 **33 个模型、13 行长上下文档位**，摘录位于 `tests/fixtures/copilot-pricing-20261019.html`（10 月 1 日摘录与 9 月 21 日 JSON 快照保留用于回归）。相对 10-01 新增 **Claude Haiku 5.5** 与 **Gemini 4 Argon**，**下架** Claude Opus 4.7、Gemini 3.5/3.6 Flash、Kimi K2.7 Code。
+
+**刷新不是只增不减。** 官方会移除退役模型，而保留一个供应商已停止公布的费率等于自己编价 —— 所以退役模型的已记录用量回到「未知」。这一点由 `tests/test_copilot_pricing.py` 的显式退役清单钉住。
+
+**2026-10-19 修了一个让刷新从未成功过的缺陷。** 生产 `last_success_at` 一直是 `null`：官方页新增了一条促销脚注写作 「… **until** December 1, 2026」，而解析器只认 `through <date>`，于是整份快照被拒（按设计 fail-closed），目录停在内置基线、此后发布的模型全是未知。两个介词**语义不同**：`promotion_end` 是最后有效日（字段名就叫 `valid_through`），所以 `until December 1` 的最后有效日是 **11-30**，把它读成 12-01 会在那一天报出促销价。
+
+后台获取与推理请求相互独立，不向 GitHub Docs 发送模型凭据、用户输入或用量记录。
 
 ## 每周自动更新
 

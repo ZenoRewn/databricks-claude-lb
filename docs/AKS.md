@@ -257,6 +257,36 @@ kubectl create secret generic claude-lb-copilot-cache -n $NS \
 > 就是 403 —— 2026-10-14 首轮发布就是这么中止的。而 **`plan` 阶段不会暴露这个问题**，
 > 因为 plan 用的是运维自己的身份，不是控制器的 ServiceAccount。
 >
+> **别凭记忆核这份清单 —— 它可以算出来。** 安装命令里的 `--secret` / `--configmap`
+> 是命令行参数，所以「当次正确的集合」并不留在仓库里；2026-10-19 的发布就是因为
+> 2026-10-18 的凭据迁移加了一个 `envFrom` 而没同步 Role 才在 preflight 403 中止的。
+> 下面这条命令从 live Deployment 推导实际引用，再与 Role 允许的集合比对，**空输出 = 一致**：
+>
+> ```bash
+> kubectl -n YOUR_TARGET_NAMESPACE get deploy YOUR_DEPLOYMENT -o json \
+>   | python3 -c '
+> import sys,json
+> d=json.load(sys.stdin);sp=d["spec"]["template"]["spec"];c=sp["containers"][0]
+> cms=set();secs=set()
+> for v in sp.get("volumes") or []:
+>     if v.get("configMap"):cms.add(v["configMap"]["name"])
+>     if v.get("secret"):secs.add(v["secret"]["secretName"])
+> for e in c.get("env") or []:
+>     f=e.get("valueFrom") or {}
+>     if f.get("secretKeyRef"):secs.add(f["secretKeyRef"]["name"])
+>     if f.get("configMapKeyRef"):cms.add(f["configMapKeyRef"]["name"])
+> for e in c.get("envFrom") or []:
+>     if e.get("secretRef"):secs.add(e["secretRef"]["name"])
+>     if e.get("configMapRef"):cms.add(e["configMapRef"]["name"])
+> print(json.dumps({"configmaps":sorted(cms),"secrets":sorted(secs)}))'
+> ```
+>
+> 把结果与 `kubectl -n YOUR_TARGET_NAMESPACE get role lb-release-controller-target -o json`
+> 里对应规则的 `resourceNames` 逐项对照。**2026-10-19 实测两侧一致**：
+> configmaps `[claude-lb-config]`、secrets
+> `[claude-lb-copilot-auth, claude-lb-credential-key, claude-lb-upstream-credentials]`。
+> 改 Deployment 的引用之后、下一次发布之前跑一遍，比在 preflight 被 403 拦住便宜得多。
+>
 > 查法（`resourceNames` 必须一起打出来，否则 `can-i` 的结果看着自相矛盾）：
 >
 > ```bash

@@ -178,3 +178,82 @@ class ProviderAwarePricingTests(unittest.TestCase):
                                           'azure_anthropic': self._stats()}))})
         self.assertIsNone(summary['estimated_total_cost_usd'])
         self.assertEqual(summary['pricing_status'], 'partial')
+
+class CopilotMessagesBasisTests(unittest.TestCase):
+    """GHCP serving Claude over /v1/messages is a **fourth** accounting basis.
+
+    Reported by the operator on 2026-10-19: «GHCP 里针对 opus5.5 的成本是看不到的».
+    The rate was never missing — `copilot_pricing` has `claude-opus-5.5` at
+    4/20/0.2/5 — the *basis* was. `estimate_history_reference` validates the
+    OpenAI-style **inclusive-input** convention (`cache_write + cache_read <=
+    input`), which held while Copilot traffic only arrived through
+    /v1/responses and /chat/completions. The Anthropic Messages protocol reports
+    `input_tokens` **excluding** cache, so a real production day —
+    input 1.33M against 2.58M of cache — was rejected as `invalid_usage_totals`
+    and priced «unknown», while the same numbers on the Databricks path priced
+    fine. Subtracting the caches would have given a negative input of -1,249,528.
+
+    So the basis cannot be a property of the provider alone any more: it is
+    (provider, protocol). The daily ledger has no `api_type` column, so the
+    model's identity stands in for it — a Claude model on Copilot is served by
+    the messages pool, since the OpenAI-style entries reject `claude-*` unless
+    an operator explicitly opts that model in.
+    """
+
+    # The exact production numbers, so the expected figure is arithmetic and not
+    # whatever the implementation happens to return.
+    DAY = {'input_tokens': 1327056, 'output_tokens': 33279,
+           'cache_creation_tokens': 343094, 'cache_read_tokens': 2233490,
+           'requests': 63, 'errors': 0}
+    EXPECTED = (1327056 * 4 + 33279 * 20 + 343094 * 5 + 2233490 * 0.2) / 1e6
+
+    def test_a_copilot_claude_day_is_priced_on_the_anthropic_basis(self):
+        row = main.historical_model_cost('claude-opus-5.5',
+                                         {**self.DAY, 'by_provider': {'copilot': self.DAY}})
+        self.assertEqual(row['pricing_status'], 'complete',
+                         'the rate exists; only the basis was wrong')
+        self.assertAlmostEqual(row['estimated_cost_usd'], self.EXPECTED, places=6)
+
+    def test_the_inclusive_basis_would_have_rejected_it(self):
+        # Pins *why* it was unknown, so a future refactor cannot quietly restore
+        # the old behaviour and call it a simplification.
+        self.assertLess(self.DAY['input_tokens'],
+                        self.DAY['cache_creation_tokens'] + self.DAY['cache_read_tokens'])
+
+    def test_a_copilot_non_claude_day_keeps_the_inclusive_basis(self):
+        # Unchanged path, pinned by its real shape: gpt-5.4 has a long-context
+        # tier, so a multi-request day returns conservative **bounds** rather
+        # than a point (the day's tier mix is unknowable without request
+        # boundaries). The fix must not collapse that into a single number.
+        day = {'input_tokens': 1000000, 'output_tokens': 10000,
+               'cache_creation_tokens': 100000, 'cache_read_tokens': 400000,
+               'requests': 5, 'errors': 0}
+        row = main.historical_model_cost('gpt-5.4', {**day, 'by_provider': {'copilot': day}})
+        self.assertEqual(row['pricing_status'], 'complete')
+        self.assertEqual(row['pricing_basis'], 'current_copilot_reference')
+        self.assertIsNone(row['estimated_cost_usd'], 'a range has no point value')
+        self.assertAlmostEqual(row['estimated_cost_min_usd'], 1.75, places=6)
+        self.assertAlmostEqual(row['estimated_cost_max_usd'], 3.425, places=6)
+
+    def test_a_databricks_claude_day_is_unchanged(self):
+        row = main.historical_model_cost('databricks-claude-opus-5-5',
+                                         {**self.DAY, 'by_provider': {'databricks': self.DAY}})
+        self.assertEqual(row['pricing_status'], 'complete')
+        self.assertEqual(row['pricing_basis'], 'legacy_model_reference')
+        # Same figure as the Copilot segment above — for *this* model the two
+        # tables publish identical rates. That is a coincidence of opus-5.5, not
+        # a reason to price Copilot traffic from the Anthropic table.
+        self.assertAlmostEqual(row['estimated_cost_usd'], self.EXPECTED, places=6)
+
+    def test_a_foundry_claude_day_stays_unknown(self):
+        row = main.historical_model_cost('claude-opus-5-5',
+                                         {**self.DAY, 'by_provider': {'azure_anthropic': self.DAY}})
+        self.assertEqual(row['pricing_status'], 'unknown')
+        self.assertEqual(row['pricing_basis'], 'ccu_not_per_token')
+
+    def test_a_mixed_day_keeps_the_known_subtotal(self):
+        row = main.historical_model_cost('claude-opus-5.5', {
+            **self.DAY, 'by_provider': {'copilot': self.DAY, 'azure_anthropic': self.DAY}})
+        self.assertEqual(row['pricing_status'], 'partial')
+        self.assertAlmostEqual(row['known_cost_subtotal_usd'], self.EXPECTED, places=6)
+
