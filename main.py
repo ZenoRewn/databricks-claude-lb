@@ -3052,6 +3052,36 @@ class ModelAPICircuit:
         return self.owner.name
 
 
+def endpoint_permits_model(endpoint, model) -> bool:
+    """Whether this endpoint may serve `model` — the one predicate for候选判断.
+
+    `CopilotEndpoint.supports()` is the single choke point for every candidate
+    decision: account enablement, `allowed_models`, the per-model account
+    selection and the discovered capability all live behind it. Asking only the
+    config-declared `models` list skipped all four for the Anthropic Messages
+    pool, because Copilot accounts declare `models: []` (= all) and the
+    predicate was therefore vacuously true. Observed in production on
+    2026-10-19: a forced `copilot` messages request landed on an account the
+    operator had left inert, while `/admin/model-routing/{model}` reported that
+    account as excluded — the diagnostic and the runtime disagreeing, which is
+    worse than having no diagnostic.
+
+    `supports()` is called **without** `api_type`: Copilot's `api_types` can
+    only name `responses`/`chat`, so passing one here would exclude every
+    account from a surface it does serve. That matches what
+    `_messages_path_views` already asks.
+
+    Endpoints without `supports()` (Databricks and Foundry `WorkspaceEndpoint`)
+    keep the existing `models`-list behaviour unchanged.
+    """
+    if model is None:
+        return True
+    if hasattr(endpoint, 'supports'):
+        return endpoint.supports(model)
+    models = getattr(endpoint, 'models', []) or []
+    return not models or model in models
+
+
 class LoadBalancer:
     def __init__(
         self,
@@ -3263,7 +3293,7 @@ class LoadBalancer:
 
     def select_endpoint(self, *, model=None, tried=None) -> Optional[WorkspaceEndpoint]:
         compatible = [ep for ep in self.get_available_endpoints()
-                      if model is None or not getattr(ep, 'models', []) or model in ep.models]
+                      if endpoint_permits_model(ep, model)]
         available = self._prefer_untried(self._prefer_html_fresh(compatible), tried)
         if not available:
             logger.error("No available endpoints!")
@@ -3788,9 +3818,14 @@ class ClaudeProxy:
         for attempt in range(max_retries):
             endpoint = self.load_balancer.select_endpoint(model=model, tried=tried)
             if not endpoint:
-                if self.load_balancer.endpoints and not any(not ep.models or model in ep.models for ep in self.load_balancer.endpoints):
+                if self.load_balancer.endpoints and not any(
+                        endpoint_permits_model(ep, model) for ep in self.load_balancer.endpoints):
+                    # 404 unsupported_model（而不是 unavailable）是**有意**的：它在
+                    # `_messages_failover_allowed` 的白名单里，所以「这个 provider 的账户
+                    # 一个都不合格」会交给下一条路径，而不是变成客户端看到的终局错误。
                     raise HTTPException(status_code=404, detail={'error': {'code': 'unsupported_model',
-                        'message': 'No configured Databricks endpoint permits this model'}})
+                        'message': f'No configured {getattr(self, "provider", "databricks")} '
+                                   'endpoint permits this model'}})
                 raise self.load_balancer.unavailable()
             tried.add(endpoint.name)
 
@@ -3887,7 +3922,11 @@ class ClaudeProxy:
     async def _normal_request(self, endpoint, url, body, headers, model: str = "unknown", start_time: float = 0,
                                 request_id: Optional[str] = None) -> JSONResponse:
         """非流式请求 - 直接透传"""
-        response = await inference_call(self.client.post(url, json=body, headers=headers), 'databricks', 'messages', model=model, endpoint=endpoint.name)
+        # getattr 与同一函数里的 observe_route_budget 一致：真正的 __init__ 一定设了
+        # provider，但测试里有用 object.__new__ 手搭的 proxy，硬取会变成 AttributeError。
+        response = await inference_call(self.client.post(url, json=body, headers=headers),
+                                        getattr(self, 'provider', 'databricks'), 'messages',
+                                        model=model, endpoint=endpoint.name)
         response.raise_for_status()
 
         return _buffered_result(self,endpoint,response,model,'messages',start_time,effort_response_headers(body))
@@ -3943,7 +3982,9 @@ class ClaudeProxy:
                 try:
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
                     async with aclosing(_await_with_heartbeat(
-                        inference_call(proxy_self.client.send(req, stream=True), 'databricks', 'messages', model=model, endpoint=current_endpoint.name, stream=True), HEARTBEAT
+                        inference_call(proxy_self.client.send(req, stream=True),
+                                       getattr(proxy_self, 'provider', 'databricks'),
+                                       'messages', model=model, endpoint=current_endpoint.name, stream=True), HEARTBEAT
                     )) as pending_headers:
                         async for kind, payload in pending_headers:
                             if kind == "heartbeat":

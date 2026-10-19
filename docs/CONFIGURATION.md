@@ -416,7 +416,7 @@ OpenAI 风格面只有两个 provider，所以指定首位就是完整排序。M
 
 `claude-*` 默认仍被 OpenAI 风格入口拒绝（400）。给**某个具体模型**配置指向 `copilot`/`azure_openai` 的偏好后，该模型在这些入口放行 —— Copilot 原生服务它的 Responses/Chat 形状。这是逐模型开关，不是整族开闸：开放 `claude-opus-5.5` 不会同时开放 `claude-sonnet-5.5`。清除偏好即恢复拒绝。
 
-**作用范围限制：`/v1/messages` 仍然只走 Databricks。** 从 Copilot 提供 Anthropic Messages 协议需要双向适配器 —— 本仓库能解析 Anthropic SSE（`main.py` 的流观测与 `release_probe`），但没有合成器，`chat_adapter` 是 Chat→Responses 的 OpenAI 内部转换。所以通过 Claude Code 这类走 `/v1/messages` 的客户端**用不到**这条通路；它面向 OpenAI 风格客户端（Codex、OpenAI SDK）。
+**作用范围：这一段只放开 OpenAI 风格入口。** 这里早先写着「`/v1/messages` 仍然只走 Databricks，需要双向适配器，所以 Claude Code 这类客户端用不到这条通路」—— 2026-10-17 的实测把它**推翻**了：GHCP 自己的 `/models` 对每个 claude 条目声明 `supported_endpoints: ["/v1/messages", ...]`，Foundry 的 `POST /anthropic/v1/messages` 返回标准 `type: "message"`，所以**不需要合成器**，而走 `/v1/messages` 的客户端恰恰是三条路径的主要受益者。本段讲的 opt-in 与那件事无关：它只决定一个 `claude-*` 模型能不能从 `/v1/responses`、`/v1/chat/completions` 进来。messages 面的优先序见上面「一份偏好，两个协议面各自过滤」。
 
 **计价必须分渠道**，否则费用会算错。区分依据是记录的模型名：Databricks 记映射后的 `databricks-claude-*`，Copilot 记自己的 id（裸 `claude-*`）。前者按 Anthropic 公开 API 价与「input 不含 cache」口径，后者按 `copilot_pricing` 分档价与 inclusive-input 口径。2026-10-12 核对生产 `usage_daily`：14 条 Claude 行全部带 `databricks-` 前缀、零条裸 `claude-*`，所以这项修正不改变任何既有行的计价基准。
 
