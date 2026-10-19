@@ -1538,7 +1538,7 @@ def historical_model_cost(model, stats):
                              'pricing_status': 'unknown', 'pricing_basis': 'ccu_not_per_token',
                              'estimate_kind': 'unknown', 'pricing_reason': 'ccu_metered_upstream'})
         else:
-            segments.append(_historical_cost_by_name(model, pstats))
+            segments.append(_historical_cost_by_name(model, pstats, provider=provider))
     statuses = {s['pricing_status'] for s in segments}
     complete = statuses == {'complete'}
     bases = {s['pricing_basis'] for s in segments}
@@ -1559,8 +1559,26 @@ def historical_model_cost(model, stats):
             'known_cost_subtotal_usd': lower, 'known_cost_subtotal_max_usd': upper}
 
 
-def _historical_cost_by_name(model, stats):
-    """The original name-based basis, unchanged — the fallback for legacy rows."""
+def _historical_cost_by_name(model, stats, *, provider=None):
+    """The original name-based basis — the fallback for legacy rows.
+
+    `provider` is only used to pick how `input_tokens` counts cache. Copilot
+    speaks **two** protocols: the OpenAI-style entries report inclusive input,
+    while `/v1/messages` (served since 2026-10-17) reports the Anthropic shape
+    where input excludes cache. The daily ledger has no `api_type` column, so
+    the model's **identity** stands in for it: a Claude model attributed to
+    Copilot was served by the messages pool, because the OpenAI-style entries
+    reject `claude-*` unless an operator opts that one model in.
+
+    That opt-in is the stated boundary: such a row reports inclusive input and
+    would be priced on the exclusive basis, overstating it by the cached
+    portion. It is a narrow, explicitly-configured case, and the alternative —
+    pricing every GHCP messages day as «unknown», which is what happened until
+    2026-10-19 — is worse than a documented edge.
+    """
+    messages_basis = (provider == 'copilot'
+                      and claude_identity.canonical(model) is not None)
+    basis = 'exclusive_input' if messages_basis else 'inclusive_input'
     # Anthropic input excludes caches; the OpenAI-style adapters report inclusive
     # input. Daily storage has no provider column, so the recorded name is the
     # only signal — and the two channels use different names: Databricks records
@@ -1573,7 +1591,7 @@ def _historical_cost_by_name(model, stats):
     # changes basis here. Bare family names (opus-/sonnet-/…) stay on the
     # Anthropic basis — those are legacy Databricks aliases, not Copilot ids.
     anthropic = model.lower().startswith(('databricks-', 'opus-', 'sonnet-', 'haiku-', 'fable-'))
-    quote = None if anthropic else estimate_history_reference(model, stats)
+    quote = None if anthropic else estimate_history_reference(model, stats, basis=basis)
     requests = stats.get('requests', 0)
     if quote is None:
         normalized = re.sub(r'(?<=\d)\.(?=\d)', '-', model.lower())

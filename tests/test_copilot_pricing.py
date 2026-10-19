@@ -11,8 +11,16 @@ import copilot_pricing as pricing
 
 
 class CopilotPricingTests(unittest.TestCase):
+    # Models GitHub has since removed from the published table. Replaying an old
+    # snapshot has to allow for retirement, and the honest outcome is **unknown**
+    # rather than a rate the vendor stopped publishing — so they are listed here
+    # explicitly instead of the assertion being loosened.
+    RETIRED_SINCE_20260921 = {'claude-opus-4.7', 'gemini-3.5-flash',
+                              'gemini-3.6-flash', 'kimi-k2.7-code'}
+
     def test_all_observed_official_rows_match(self):
         snapshot=json.loads((Path(__file__).parent/'fixtures/copilot-pricing-20260921.json').read_text())
+        seen_retired=set()
         for row in snapshot['rows']:
             name=row['Model'].replace(' (fast mode) (preview)','-fast').replace(' Flash1',' Flash')
             name=name.lower().replace(' ','-')
@@ -20,10 +28,16 @@ class CopilotPricingTests(unittest.TestCase):
             tokens=int(threshold[2:-1])*1000+1 if row.get('Tier')=='Long context' else 0
             with self.subTest(model=name,tier=row.get('Tier')):
                 result=pricing.get_pricing(name,tokens,at=date(2026,9,21))
+                if name in self.RETIRED_SINCE_20260921:
+                    seen_retired.add(name)
+                    self.assertIsNone(result, f'{name} is no longer published; it must be unknown')
+                    continue
                 self.assertIsNotNone(result)
                 for field,column in [('input','Input'),('output','Output'),('cache_read','Cached input'),('cache_write','Cache write')]:
                     raw=row.get(column,'Not applicable')
                     self.assertEqual(result[field],0 if raw=='Not applicable' else float(raw[1:]))
+        self.assertEqual(seen_retired, self.RETIRED_SINCE_20260921,
+                         'the retirement list must describe this snapshot, not grow stale')
 
     def test_aliases_are_explicit_and_unknown_variants_do_not_fall_back(self):
         self.assertEqual(pricing.get_pricing('claude-fable-5.1'),pricing.get_pricing('CLAUDE-FABLE-5-1'))

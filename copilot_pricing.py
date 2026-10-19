@@ -19,7 +19,7 @@ import tempfile
 import httpx
 
 SOURCE_URL = 'https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing'
-CHECKED_ON = '2026-10-01'
+CHECKED_ON = '2026-10-19'
 AI_CREDIT_USD = 0.01
 
 
@@ -28,57 +28,60 @@ def _rates(input_price, output_price, cached_input, cache_write=0):
 
 
 MODELS = {
-    'gpt-5-mini': _rates(.25,2,.025),
-    'gpt-5.3-codex': _rates(1.75,14,.175),
-    'gpt-5.4': _rates(2.5,15,.25),
-    'gpt-5.4-mini': _rates(.75,4.5,.075),
-    'gpt-5.4-nano': _rates(.2,1.25,.02),
-    'gpt-5.5': _rates(5,30,.5),
-    'gpt-5.6-luna': _rates(.2,1.2,.02,.25),
-    'gpt-5.6-sol': _rates(4,20,.4,5),
-    'gpt-5.6-terra': _rates(2,12,.2,2.5),
+    'gpt-5-mini': _rates(0.25,2,0.025),
+    'gpt-5.3-codex': _rates(1.75,14,0.175),
+    'gpt-5.4': _rates(2.5,15,0.25),
+    'gpt-5.4-mini': _rates(0.75,4.5,0.075),
+    'gpt-5.4-nano': _rates(0.2,1.25,0.02),
+    'gpt-5.5': _rates(5,30,0.5),
+    'gpt-5.6-luna': _rates(0.2,1.2,0.02,0.25),
+    'gpt-5.6-sol': _rates(4,20,0.4,5),
+    'gpt-5.6-terra': _rates(2,12,0.2,2.5),
     'gpt-6-astra': _rates(10,50,1,12.5),
-    'gpt-6-luna': _rates(.1,.5,.01,.125),
-    'gpt-6-sol': _rates(2,10,.2,2.5),
-    'gpt-6.1-sol': _rates(2,10,.1,2.5),
-    'claude-haiku-4.5': _rates(1,5,.1,1.25),
-    'claude-sonnet-4': _rates(3,15,.3,3.75),
-    'claude-sonnet-4.6': _rates(3,15,.3,3.75),
-    'claude-opus-4.7': _rates(5,25,.5,6.25),
-    'claude-opus-4.8': _rates(5,25,.5,6.25),
-    'claude-opus-5': _rates(5,25,.5,6.25),
-    'claude-opus-5.5': _rates(4,20,.2,5),
-    'claude-sonnet-5': _rates(2,10,.2,2.5),
-    'claude-sonnet-5.5': _rates(2,10,.2,2.5),
+    'gpt-6-luna': _rates(0.1,0.5,0.01,0.125),
+    'gpt-6-sol': _rates(2,10,0.2,2.5),
+    'gpt-6.1-sol': _rates(2,10,0.1,2.5),
+    'claude-haiku-4.5': _rates(1,5,0.1,1.25),
+    'claude-haiku-5.5': _rates(0.1,0.5,0.01,0.125),
+    'claude-sonnet-4': _rates(3,15,0.3,3.75),
+    'claude-sonnet-4.6': _rates(3,15,0.3,3.75),
+    'claude-opus-4.8': _rates(5,25,0.5,6.25),
+    'claude-opus-5': _rates(5,25,0.5,6.25),
+    'claude-opus-5.5': _rates(4,20,0.2,5),
+    'claude-sonnet-5': _rates(2,10,0.2,2.5),
+    'claude-sonnet-5.5': _rates(2,10,0.1,2.5),
     'claude-opus-4.8-fast': _rates(10,50,1,12.5),
     'claude-fable-5': _rates(10,50,1,12.5),
-    'claude-fable-5.1': _rates(10,50,.25,12.5),
-    'gemini-3.5-flash': _rates(1.5,9,.15),
-    'gemini-3.6-flash': _rates(.75,3.75,.075),
-    'gemini-3.7-flash': _rates(.75,3.75,.075),
-    'gemini-3.8-flash': _rates(.75,3.75,.075),
-    'mai-code-1.1-flash': _rates(.2,1.2,.02),
-    'grok-4.5': _rates(2,6,.5),
-    'grok-4.6': _rates(2,6,.5),
-    'grok-4.7': _rates(2,6,.5),
-    'kimi-k2.7-code': _rates(.95,4,.19),
-    'kimi-k3': _rates(3,15,.3),
+    'claude-fable-5.1': _rates(10,50,0.25,12.5),
+    'gemini-3.7-flash': _rates(0.75,3.75,0.075),
+    'gemini-3.8-flash': _rates(0.75,3.75,0.075),
+    'gemini-4-argon': _rates(2,10,0.1),
+    'mai-code-1.1-flash': _rates(0.2,1.2,0.02),
+    'grok-4.5': _rates(2,6,0.5),
+    'grok-4.6': _rates(2,6,0.5),
+    'grok-4.7': _rates(2,6,0.5),
+    'kimi-k3': _rates(3,15,0.3),
 }
 LONG_CONTEXT = {
-    'gpt-5.4': (272000,_rates(5,22.5,.5)),
+    'gpt-5.4': (272000,_rates(5,22.5,0.5)),
     'gpt-5.5': (272000,_rates(10,45,1)),
-    'gpt-5.6-luna': (200000,_rates(.4,1.8,.04,.5)),
-    'gpt-5.6-sol': (272000,_rates(8,30,.8,10)),
-    'gpt-5.6-terra': (272000,_rates(4,18,.4,5)),
+    'gpt-5.6-luna': (200000,_rates(0.4,1.8,0.04,0.5)),
+    'gpt-5.6-sol': (272000,_rates(8,30,0.8,10)),
+    'gpt-5.6-terra': (272000,_rates(4,18,0.4,5)),
     'gpt-6-astra': (272000,_rates(20,75,2,25)),
-    'gpt-6-luna': (272000,_rates(.2,.75,.02,.25)),
-    'gpt-6-sol': (272000,_rates(4,15,.4,5)),
-    'gpt-6.1-sol': (272000,_rates(4,15,.2,5)),
+    'gpt-6-luna': (272000,_rates(0.2,0.75,0.02,0.25)),
+    'gpt-6-sol': (272000,_rates(4,15,0.4,5)),
+    'gpt-6.1-sol': (272000,_rates(4,15,0.2,5)),
+    'claude-haiku-5.5': (100000,_rates(0.5,2.5,0.05,0.625)),
     'grok-4.5': (200000,_rates(4,12,1)),
     'grok-4.6': (200000,_rates(4,12,1)),
     'grok-4.7': (200000,_rates(4,12,1)),
 }
-PROMOTION_END = {m:date(2026,12,31) for m in ('gemini-3.6-flash','gemini-3.7-flash','gemini-3.8-flash')}
+PROMOTION_END = {
+    'gemini-3.7-flash': date(2026,12,31),
+    'gemini-3.8-flash': date(2026,12,31),
+    'gemini-4-argon': date(2026,11,30),
+}
 
 
 def _normalize(name):
@@ -124,12 +127,29 @@ def estimate_request(model,input_tokens,output_tokens,cache_creation_tokens=0,ca
     return {**pricing,'estimated_cost_usd':cost,'estimated_ai_credits':cost/AI_CREDIT_USD}
 
 
-def estimate_history_reference(model, stats, *, at=None):
-    """Current-rate reference for daily inclusive-input totals, not a past invoice.
+def estimate_history_reference(model, stats, *, at=None, basis='inclusive_input'):
+    """Current-rate reference for a day's totals, not a past invoice.
 
     A day can contain short and long requests. Without request boundaries, return
     conservative component-wise price bounds rather than tiering the whole day.
     None means the model is absent; an expired/invalid known model stays unknown.
+
+    `basis` says how the caller's `input_tokens` counts cache, and it has to be
+    told rather than guessed:
+
+    * `inclusive_input` - the OpenAI-style shape (Responses / Chat), where
+      `input_tokens` **contains** the cached and cache-written tokens. They are
+      subtracted out before pricing, and a row claiming more cache than input is
+      impossible, so it is rejected.
+    * `exclusive_input` - the Anthropic Messages shape, where `input_tokens`
+      counts only the uncached part and the cache figures stand beside it. No
+      subtraction, and no inequality to check.
+
+    Copilot speaks **both**: it served only the OpenAI-style entries when this
+    function was written, and has served `/v1/messages` since 2026-10-17. A real
+    production day on that path (input 1.33M against 2.58M of cache) was
+    therefore rejected as `invalid_usage_totals` and priced "unknown" -
+    subtracting would have given a negative input of -1,249,528.
     """
     aliases = _active['aliases'] if _active else ALIASES
     if _normalize(model) not in aliases:
@@ -139,9 +159,13 @@ def estimate_history_reference(model, stats, *, at=None):
                'pricing_basis': 'current_copilot_reference', 'pricing_source_url': SOURCE_URL}
     counts = tuple(stats.get(k, 0) for k in ('input_tokens', 'output_tokens', 'cache_creation_tokens', 'cache_read_tokens'))
     requests = stats.get('requests', 0)
+    if basis not in ('inclusive_input', 'exclusive_input'):
+        raise ValueError(f'unknown pricing basis {basis!r}')
+    inclusive = basis == 'inclusive_input'
     if (not {'input_tokens', 'output_tokens'}.issubset(stats)
             or not all(type(v) is int and 0 <= v < 2**63 for v in (*counts, requests))
-            or (not requests and any(counts)) or counts[2] + counts[3] > counts[0]):
+            or (not requests and any(counts))
+            or (inclusive and counts[2] + counts[3] > counts[0])):
         return {**unknown, 'pricing_reason': 'invalid_usage_totals'}
     default = get_pricing(model, 0, at=at)
     if default is None:
@@ -151,11 +175,12 @@ def estimate_history_reference(model, stats, *, at=None):
     choices = [default, aggregate] if uncertain else [aggregate]
     # N/A cache write is billed as normal input, including when bounding tiers.
     rates = [{**r, 'cache_write': r['cache_write'] or r['input']} for r in choices]
+    billable_input = counts[0] - counts[2] - counts[3] if inclusive else counts[0]
     weights = dict(zip(('input', 'output', 'cache_write', 'cache_read'),
-                       (counts[0] - counts[2] - counts[3], *counts[1:])))
+                       (billable_input, *counts[1:])))
     lower = sum(v * min(r[k] for r in rates) for k, v in weights.items()) / 1000000
     upper = sum(v * max(r[k] for r in rates) for k, v in weights.items()) / 1000000
-    return {**unknown, 'pricing_status': 'complete',
+    return {**unknown, 'pricing_status': 'complete', 'pricing_input_basis': basis,
             'estimated_cost_usd': lower if lower == upper else None,
             'estimated_cost_min_usd': lower, 'estimated_cost_max_usd': upper,
             'estimate_kind': 'range' if lower != upper else 'point',
@@ -291,17 +316,27 @@ def _price(text, *, optional=False):
 def _promotion(note, name, rates):
     # Recognize the complete published rule, not just a date somewhere in a footnote.
     note = ' '.join(re.sub(r'↩\d*', '', note).split())
+    # `is/are available`: the published wording varies with the number of models
+    # named, and a single-model footnote is not a new billing rule.
+    #
+    # `through <date>` vs `until <date>` are **not** synonyms. The value returned
+    # here is the **last day the promotion applies** (`get_pricing` drops it when
+    # `at > promotion_end`, and it is published as `valid_through`), so «until
+    # December 1» ends on November 30. Reading `until` as inclusive would quote
+    # the promotional rate on exactly one day it no longer applies — which is why
+    # the preposition is captured and acted on rather than alternated away.
     match = re.fullmatch(
-        r'(.+) are available at the promotional pricing of (\$[\d.]+) per 1M input tokens, '
+        r'(.+) (?:is|are) available at the promotional pricing of (\$[\d.]+) per 1M input tokens, '
         r'(\$[\d.]+) per 1M cached input tokens, and (\$[\d.]+) per 1M output tokens '
-        r'through ([A-Za-z]+ \d{1,2}, \d{4})\.', note)
+        r'(through|until) ([A-Za-z]+ \d{1,2}, \d{4})\.', note)
     if not match:
         raise ValueError('Unrecognized pricing footnote')
-    models, inp, cached, output, end = match.groups()
+    models, inp, cached, output, preposition, end = match.groups()
     names = {_model_id(x.strip()) for x in models.replace(', and ', ', ').replace(' and ', ', ').split(',')}
     if name not in names or (rates['input'], rates['cache_read'], rates['output']) != tuple(map(_price, (inp, cached, output))):
         raise ValueError('Promotion does not match price row')
-    return datetime.strptime(end, '%B %d, %Y').date()
+    last_day = datetime.strptime(end, '%B %d, %Y').date()
+    return last_day if preposition == 'through' else last_day - timedelta(days=1)
 
 
 def parse_pricing_html(html, checked_on):

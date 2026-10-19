@@ -12,7 +12,12 @@ import pytest
 import copilot_pricing as p
 
 HTML = (Path(__file__).parent / 'fixtures/copilot-pricing-20261001.html').read_text()
-NOW = datetime(2026, 10, 1, 9, tzinfo=timezone.utc)
+LIVE = (Path(__file__).parent / 'fixtures/copilot-pricing-20261019.html').read_text()
+# Worker scenarios run on the **current** snapshot: a fetched page older than
+# the bundled baseline is refused by design, so feeding the 2026-10-01 excerpt
+# to a worker would exercise the rejection path, not the schedule.
+PAGE = LIVE
+NOW = datetime(2026, 10, 19, 9, tzinfo=timezone.utc)
 
 
 def async_test(fn):
@@ -28,13 +33,20 @@ def isolate_catalog():
         yield
 
 
-def test_official_snapshot_adds_six_models_and_preserves_boundaries():
-    catalog = p.parse_pricing_html(HTML, '2026-10-01')
-    assert len(catalog['models']) == 35
-    assert len(catalog['long_context']) == 12
+def test_the_bundled_baseline_is_a_parsed_snapshot_not_a_hand_list():
+    # The baseline must stay exactly what the parser reads off the page it was
+    # cut from — that is what keeps it from drifting into hand-typed numbers.
+    catalog = p.parse_pricing_html(LIVE, '2026-10-19')
     assert catalog['models'] == p.MODELS
     assert catalog['long_context'] == p.LONG_CONTEXT
     assert catalog['promotion_end'] == p.PROMOTION_END
+    assert p.CHECKED_ON == '2026-10-19'
+
+
+def test_the_previous_snapshot_still_parses_and_differs_as_measured():
+    catalog = p.parse_pricing_html(HTML, '2026-10-01')
+    assert len(catalog['models']) == 35
+    assert len(catalog['long_context']) == 12
     p.install_catalog(catalog)
     for name in ('gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'claude-opus-5.5', 'claude-sonnet-5.5', 'grok-4.7'):
         assert p.get_pricing(name)
@@ -88,7 +100,7 @@ async def test_refresh_persists_and_new_instance_waits_until_seven_days(tmp_path
         calls.append(request)
         assert str(request.url) == p.SOURCE_URL
         assert 'authorization' not in request.headers
-        return httpx.Response(200, text=HTML, headers={'content-type': 'text/html'})
+        return httpx.Response(200, text=PAGE, headers={'content-type': 'text/html'})
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         worker = p.PricingRefresh(tmp_path / 'prices.json', clock=lambda: NOW)
         assert await worker.refresh_once(client)
@@ -99,7 +111,7 @@ async def test_refresh_persists_and_new_instance_waits_until_seven_days(tmp_path
         again = p.PricingRefresh(worker.cache_path, clock=lambda: NOW + timedelta(days=1))
         await again.load_cache()
         assert again.next_due == NOW + timedelta(days=7)
-        assert p.get_metadata()['checked_on'] == '2026-10-01'
+        assert p.get_metadata()['checked_on'] == '2026-10-19'
         assert p.get_metadata()['refresh']['last_success_at'] == NOW.isoformat()
         assert p.get_metadata()['refresh']['stale'] is False
 
@@ -108,13 +120,13 @@ async def test_refresh_persists_and_new_instance_waits_until_seven_days(tmp_path
 @pytest.mark.parametrize('failure', ['http', 'html', 'disk', 'oversize', 'redirect'])
 async def test_refresh_failure_retains_memory_and_cache(tmp_path, failure):
     worker = p.PricingRefresh(tmp_path / 'prices.json', clock=lambda: NOW)
-    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, text=HTML))) as client:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, text=PAGE))) as client:
         assert await worker.refresh_once(client)
     old = worker.cache_path.read_bytes()
     old_price = p.get_pricing('gpt-6.1-sol')
     response = {
         'http': httpx.Response(503), 'html': httpx.Response(200, text='broken'),
-        'disk': httpx.Response(200, text=HTML.replace('$0.125', '$0.130')),
+        'disk': httpx.Response(200, text=PAGE.replace('$0.125', '$0.130')),
         'oversize': httpx.Response(200, content=b'x' * (p.MAX_PRICING_BYTES + 1)),
         'redirect': httpx.Response(302, headers={'location': 'https://example.invalid'}),
     }[failure]
@@ -135,7 +147,7 @@ async def test_refresh_failure_retains_memory_and_cache(tmp_path, failure):
 @pytest.mark.parametrize('bad', ['broken', 'future', 'source', 'hash'])
 async def test_invalid_cache_is_not_installed(tmp_path, bad):
     worker = p.PricingRefresh(tmp_path / 'prices.json', clock=lambda: NOW)
-    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, text=HTML))) as client:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, text=PAGE))) as client:
         await worker.refresh_once(client)
     value = json.loads(worker.cache_path.read_text())
     if bad == 'future': value['fetched_at'] = (NOW + timedelta(days=1)).isoformat()
@@ -182,7 +194,7 @@ async def test_run_waits_for_weekly_schedule_and_recovers_after_failure(tmp_path
     calls, sleeps = [], []
     def response(request):
         calls.append(request)
-        return httpx.Response(503) if len(calls) == 2 else httpx.Response(200, text=HTML)
+        return httpx.Response(503) if len(calls) == 2 else httpx.Response(200, text=PAGE)
     async def sleep(seconds):
         nonlocal now
         sleeps.append(seconds)
@@ -200,7 +212,7 @@ async def test_run_waits_for_weekly_schedule_and_recovers_after_failure(tmp_path
 @async_test
 async def test_stale_cache_is_used_while_refresh_is_due(tmp_path):
     worker = p.PricingRefresh(tmp_path / 'prices.json', clock=lambda: NOW)
-    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, text=HTML))) as client:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, text=PAGE))) as client:
         await worker.refresh_once(client)
     old = p.PricingRefresh(worker.cache_path, clock=lambda: NOW + timedelta(days=8))
     await old.load_cache()
@@ -235,3 +247,84 @@ async def test_runtime_owns_and_cancels_pricing_worker(tmp_path):
             factory.assert_called_once_with(str(tmp_path / 'prices.json'), enabled=True)
         assert stopped.is_set()
         cp.close.assert_awaited_once()
+
+# ---- the 2026-10-19 page: a one-word footnote change blocked every refresh ----
+#
+# Production had `last_success_at: null` since the feature shipped — the weekly
+# refresh never once succeeded, so the catalog sat on the bundled 2026-10-01
+# baseline and every model published after it was priced «unknown». The cause
+# was a single word: a new promotion footnote reads «... **until** December 1,
+# 2026» where the parser only accepted «through <date>». Failing closed on an
+# unfamiliar billing rule is correct; staying closed for three weeks without
+# anyone noticing is what `stale: true` is for, and it was true.
+#
+# «until» and «through» are **not** synonyms here. `promotion_end` is the last
+# day the promotional rate applies (`get_pricing` drops the promotion when
+# `at > promotion_end`, and the field is published as `valid_through`), so
+# «until December 1» ends on **November 30**. Reading it as December 1 would
+# quote the promotional rate on exactly one day it no longer applies.
+
+def test_the_live_page_parses_and_brings_in_the_newer_models():
+    catalog = p.parse_pricing_html(LIVE, '2026-10-19')
+    # Exact published rates, not «some number appeared». claude-haiku-5.5 is the
+    # one that mattered: it is in every business account's capability and was
+    # priced «unknown» for as long as the refresh was blocked.
+    assert catalog['models']['claude-haiku-5.5'] == {
+        'input': 0.1, 'output': 0.5, 'cache_read': 0.01, 'cache_write': 0.125}
+    assert catalog['models']['gemini-4-argon'] == {
+        'input': 2.0, 'output': 10.0, 'cache_read': 0.1, 'cache_write': 0.0}
+
+
+def test_a_refresh_retires_models_the_page_no_longer_lists():
+    # A refresh is **not** append-only — an assumption worth stating because it
+    # is tempting and wrong. GitHub retires models from the table, and keeping a
+    # rate the vendor stopped publishing would be inventing one. The cost is
+    # real: recorded usage for a retired model goes back to «unknown», which is
+    # the honest answer rather than a stale quote.
+    previous = p.parse_pricing_html(HTML, '2026-10-01')['models']
+    catalog = p.parse_pricing_html(LIVE, '2026-10-19')
+    for retired in ('claude-opus-4.7', 'gemini-3.5-flash', 'gemini-3.6-flash', 'kimi-k2.7-code'):
+        assert retired in previous, 'the 2026-10-01 page listed it'
+        assert retired not in catalog['models'], f'{retired} is no longer published'
+
+
+def test_models_the_page_does_not_list_stay_unpriced():
+    # Present in GHCP capability, absent from the pricing page: `gpt-5.6-sol-fast`
+    # and `mai-code-1-flash-4th` are served but carry no published per-token rate.
+    # Unknown is the only defensible answer — a guessed rate reads as a fact.
+    catalog = p.parse_pricing_html(LIVE, '2026-10-19')
+    p.install_catalog(catalog)
+    for served_but_unpriced in ('gpt-5.6-sol-fast', 'mai-code-1-flash-4th'):
+        assert served_but_unpriced not in catalog['models']
+        assert p.get_pricing(served_but_unpriced) is None
+
+
+def test_until_ends_the_day_before_while_through_includes_it():
+    catalog = p.parse_pricing_html(LIVE, '2026-10-19')
+    ends = catalog['promotion_end']
+    assert ends['gemini-4-argon'] == date(2026, 11, 30), \
+        '«until December 1» must not quote the promotion on December 1'
+    assert ends['gemini-3.8-flash'] == date(2026, 12, 31), \
+        '«through December 31» stays inclusive'
+
+
+def test_the_promotional_rate_stops_applying_after_the_until_date():
+    catalog = p.parse_pricing_html(LIVE, '2026-10-19')
+    p.install_catalog(catalog)
+    assert p.get_pricing('gemini-4-argon', at=date(2026, 11, 30)) is not None
+    assert p.get_pricing('gemini-4-argon', at=date(2026, 12, 1)) is None
+
+
+@pytest.mark.parametrize('note', [
+    'Gemini 4 Argon is available at the promotional pricing of $2.00 per 1M input tokens, '
+    '$0.10 per 1M cached input tokens, and $10.00 per 1M output tokens starting December 1, 2026.',
+    'Gemini 4 Argon is available at the promotional pricing of $2.00 per 1M input tokens, '
+    '$0.10 per 1M cached input tokens, and $10.00 per 1M output tokens for a limited time.',
+])
+def test_an_unfamiliar_footnote_still_rejects_the_whole_snapshot(note):
+    # Fail-closed is the point: a billing rule nobody taught the parser must not
+    # be guessed at. Only «through»/«until» + an explicit date are understood.
+    broken = LIVE.replace('until December 1, 2026.', 'xx')
+    assert 'until December 1, 2026.' not in broken
+    with pytest.raises(ValueError):
+        p.parse_pricing_html(broken, '2026-10-19')
