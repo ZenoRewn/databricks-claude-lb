@@ -4,7 +4,7 @@ Author: Zeno Ren
 
 ## 当前运行版本
 
-最近一次已记录的 AKS 发布：**2026-10-18，应用源码 `3464a78`**，维护 62.6 秒，11 个阶段一次通过，三协议业务探针、账本与清理验收通过。内容是 per-model 规则改为按**模型身份**匹配（同一模型的三种拼法共用一条规则）与 Messages 面可指定第二跳。身份匹配修掉的不只是「配了没用」：`/v1/messages` 的失败转移在调用池之前就把模型名改写成各 provider 的拼法，所以 `supports()` 看到的是 GHCP 拼法 —— 按 ADB 或 Foundry 拼法保存的 `copilot_accounts` 永远查不到那个 key，**这一层静默地不再做减法**。本次运行文件清单未变（仍 24 个），**控制器不需要重建**；无 DDL、无配置变更。见 [本次发布回执](reviews/2026-10-18-rule-identity-release/REPORT.md)。
+最近一次已记录的 AKS 发布：**2026-10-18，应用源码 `1d00c58`**，维护 55.4 秒，11 个阶段一次通过，三协议业务探针、账本与清理验收通过。内容是一道**行为无变化**的闸门：配置里 `${ENV}` 形式的凭据引用解析不出来就拒绝启动。它必须先于凭据迁移上线 —— 此前缺失变量被静默替换成空串，而没有任何一层拒绝空 token，端点照常构建、照常打 `Loaded`，唯一症状是上游 401。发布后把上游 **17 条凭据从 ConfigMap 明文迁入 Secret** `claude-lb-upstream-credentials`（含清除 `last-applied` 注解里那份整份明文副本），动生产前用校验 Pod 确认 `load_config` 退出码 0。注意单副本 + `maxSurge:0/maxUnavailable:1` 意味着拒绝启动就是停服直到回滚，所以校验 Pod 不是可选步骤；回滚两条命令见 `.release-private/cm-backup/ROLLBACK.md`。本次运行文件清单未变（仍 24 个），**控制器不需要重建**。见 [本次回执](reviews/2026-10-18-credential-secret-migration/REPORT.md)。
 
 上一次（2026-10-17，`0a9f830`）是 Claude 三路径上线与 Foundry 凭据首次投产，当时**控制器必须重建**（新增运行文件让 `APP_FILES` 从 21 变 22，而 `validate_plan` 在控制器进程内断言文件集合完全相等）—— 新增运行时文件时记得这条，见 [上一次回执](reviews/2026-10-17-three-paths-release/REPORT.md)。
 
@@ -36,7 +36,7 @@ Author: Zeno Ren
 
 | 盲 apply 的动作 | 后果 |
 |---|---|
-| 覆盖 ConfigMap | repo 里敏感字段是 `${DATABRICKS_TOKEN_*}` 占位符，而 live Deployment 的 `envFrom` 是空的 → 占位符无处展开 → `expand_env_vars()` 拿到字面量 `${...}` 当 token → **9 个 Databricks endpoint 全部 401** |
+| 覆盖 ConfigMap | repo 的占位符名与 live Secret 的键名**不保证相同** → 对不上的引用解析为空。**2026-10-18 起这会拒绝启动而不是静默 401**（`resolve_credential`），所以后果从「9 个 endpoint 悄悄全挂」变成「Pod 起不来」—— 更容易发现，但单副本下仍是停服。注意早先这里写的「拿到字面量 `${...}` 当 token」不准确：`expand_env_vars` 替换成的是**空串**，不是字面量 |
 | 覆盖 Deployment | config 挂载点从 live 的 `/app/config.yaml` 变成 repo 的 `/etc/claude-lb`，同时 `CONFIG_PATH` 被设成 `/etc/claude-lb/config.yaml` —— 二者自洽，但若只 apply 了 ConfigMap 没 apply Deployment（或反之）就找不到配置文件 |
 | 创建 PVC + usage-data 卷 | live 走的是 MySQL 后端（`usage_storage.type: mysql`），凭空多一个 RWO PVC 且 `Recreate` 策略被带回 |
 | 挂 copilot-cache | live 里那个 secret 叫 `claude-lb-copilot-auth` 而不是 repo 的 `claude-lb-copilot-cache`，直接 apply 会因 secret 不存在而 Pod Pending |
@@ -47,29 +47,45 @@ Author: Zeno Ren
 
 | 项 | repo（本仓库） | live（zeno-apps/claude-lb） |
 |---|---|---|
-| ConfigMap 敏感字段 | `${LB_API_KEY}` / `${DATABRICKS_TOKEN_*}` 占位符 | ❌ **16 个字段明文**（LB key、9 ADB PAT、4 Azure key、MySQL 密码、GH token） |
-| `envFrom` | `secretRef: claude-lb-secrets` | ❌ 空；`claude-lb-secrets` 不存在 |
+| ConfigMap 敏感字段 | `${LB_API_KEY}` / `${DATABRICKS_TOKEN_*}` 占位符 | ✅ **已收敛（2026-10-18）**：17 个字段均为 `${ENV}` 引用，`last-applied` 注解里那份整份明文副本也已清除。变量名与 repo 占位符**不同名**（按端点名生成，如 `ADB_TOKEN_EASTUS2_ADB_WS`） |
+| `envFrom` | `secretRef: claude-lb-secrets` | ✅ `secretRef: claude-lb-upstream-credentials`（17 键）。**名字与 repo 示例不同**，所以整份 apply 仍然会错 |
 | config 挂载点 | `/etc/claude-lb`（配 `CONFIG_PATH`） | `/app/config.yaml`（未设 `CONFIG_PATH`，靠默认值恰好匹配） |
 | usage 存储 | `usage_data_dir` + RWO PVC | `usage_storage.type: mysql`，**无 PVC** |
-| copilot-cache 卷 | `secret/claude-lb-copilot-cache`，挂 `/home/app/.config/databricks-claude-lb` | ❌ 未挂载；namespace 里另有 `secret/claude-lb-copilot-auth` 但无卷引用 |
+| copilot-cache 卷 | `secret/claude-lb-copilot-cache`，挂 `/home/app/.config/databricks-claude-lb` | ✅ 已挂载，但 secret 名是 `claude-lb-copilot-auth`（卷名 `copilot-auth-accounts`）。5 个账户中 4 个的 token 来自这里，1 个（`ZenoRewn`）来自上面那个 Secret |
 | 发布策略 | `Recreate`（RWO PVC 所致） | `RollingUpdate` + `maxUnavailable=1` / `maxSurge=0`（等价于先杀后拉，**同样零可用**） |
-| preStop / grace | `sleep 15` / 60s | ❌ 无 preStop / 30s |
+| preStop / grace | `sleep 15` / 60s | ✅ `python /app/gateway_lifecycle.py --wait-seconds 45` / 90s |
 | PDB / HPA | 无（单副本不需要） | 无 |
 | live 独有 env | — | `COPILOT_STREAM_HIGH_WATERMARK` / `_OVERLOAD_GRACE` / `_DISCONNECT_GRACE` / `_MONITOR_INTERVAL` / `IMG_MAX_COUNT` |
 
-### 收敛步骤（需在有集群网络的机器上执行，动的是认证路径，务必留回滚锚点）
+### 收敛步骤 —— 认证路径部分**已完成（2026-10-18）**
 
-1. **记回滚锚点**：`kubectl -n zeno-apps get deploy claude-lb -o yaml > /tmp/rollback-deploy.yaml`，同时记下当前镜像 digest
-2. **建 Secret**：从 live ConfigMap 提出那 16 个值生成 `claude-lb-secrets`（用 `--from-env-file` 走临时文件后立即 shred，避免值进 shell history）
-3. **核 copilot secret 的 key**（别凭名字猜）：
-   ```bash
-   kubectl -n zeno-apps get secret claude-lb-copilot-auth \
-     -o jsonpath='{range $k,$v := .data}{$k}{"\n"}{end}'
-   ```
-   key 必须是 `copilot-auth-gh-account-1.json`（= ConfigMap 里 endpoint 的 name）。不匹配就按 `deploy/k8s/secret.example.yaml` 重新生成
-4. **换 ConfigMap 为占位符版** + **Deployment 加 `envFrom`**，两者必须**同一次** rollout，中间不能有只改一半的中间态
-5. **验证不能只看 Ready**：`/health/ready` 200 + 启动日志 14 个 endpoint 全载（9 ADB + 4 Azure + 1 Copilot）+ 真实推理各打一次。**缺任何一个 env 会让对应 endpoint 拿到字面量 `${...}` 而静默失败，Ready 仍是绿的**
-6. 顺带把挂载点对齐、挂上 copilot-cache、按需加 preStop
+实际怎么做的、实测了什么、留了哪些边界，见
+[凭据迁 Secret 回执](reviews/2026-10-18-credential-secret-migration/REPORT.md)。与这里
+2026-09-08 写下的计划相比，有四处是执行时才看清的：
+
+1. **必须先上一道代码闸门。** 原计划第 5 步说「缺任何一个 env 会让对应 endpoint 静默失败，
+   Ready 仍是绿的」—— 这是对的，而且比描述的更糟：没有任何一层拒绝空 token，端点照常构建、
+   照常打 `Loaded`、照常进 `/config/effective`。所以先发布 `resolve_credential`（引用解析
+   为空就拒绝启动），它对当时全内联的配置是**行为无变化的空操作**，因此可以单独先发。
+2. **`last-applied-configuration` 注解里是整份明文的副本。** 只换 `data` 不够，凭据仍然可读。
+   用 `kubectl replace`（不写该注解），不是 `apply`。
+3. **变量名两侧都由脚本从一份映射生成，不手敲。** 「任何一个名字拼错就是启动失败」的解法
+   不是小心，是让 config 的 `${X}` 与 Secret 的键名出自同一份 `env-mapping.json`。
+4. **动生产前先跑校验 Pod**：生产同一镜像 + 新 ConfigMap（临时名）+ 新 Secret 的 `envFrom`，
+   跑 `load_config` 并断言无空凭据，退出码 0 才继续。单副本 + `maxSurge:0/maxUnavailable:1`
+   意味着拒绝启动就是停服，所以这一步是关卡不是可选项 —— 与镜像预检同一种性质。
+
+原计划第 4 步要求「换 ConfigMap 与加 `envFrom` 必须同一次 rollout」。执行时因一处命令失误
+变成了两次（先 `envFrom`、后 ConfigMap）。那个中间态是安全的 —— 配置仍全内联，多出的环境
+变量没有任何引用去读 —— 而且这个顺序反而**消除了**原计划里那个窗口：「新配置已就位但
+`envFrom` 还没打上时 Pod 恰好自行重启」会触发闸门而停服。代价是多了一次滚动重启。
+
+**仍未做**：挂载点未对齐到 repo 的 `/etc/claude-lb`（live 用 `/app/config.yaml`，靠默认值
+恰好匹配，未设 `CONFIG_PATH`）。preStop 与 copilot 卷在此期间已经到位，见上表。
+
+**命名空间里还有一处明文**：`ghost-blog` 的 Deployment 把同一个 MySQL 的密码写成 `env`
+明文值。那是另一个工作负载，本次未动，所以 MySQL 密码在命名空间内**仍然可读**，且轮换
+它现在要两处一起改。
 
 ### 关于「每次发布必然断服」
 
