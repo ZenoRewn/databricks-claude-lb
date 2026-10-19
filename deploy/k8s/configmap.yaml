@@ -5,7 +5,19 @@ metadata:
   labels:
     app: claude-lb
 data:
-  # 这里的所有敏感字段都用 ${ENV_VAR} 占位，实际值在 Secret 里 envFrom 进容器后被 expand_env_vars() 解析
+  # 敏感字段一律用 ${ENV_VAR} 占位，实际值由 Secret 经 envFrom 注入后解析。
+  #
+  # **变量名是按端点名生成的**，不是随手起的：`<前缀>_<端点名大写，非字母数字转下划线>`
+  #   endpoints[*].token            -> ADB_TOKEN_<名>
+  #   azure_openai[*].api_key       -> AZURE_OPENAI_KEY_<名>
+  #   azure_anthropic[*].api_key    -> AZURE_ANTHROPIC_KEY_<名>
+  #   github_copilot[*].github_token-> GITHUB_COPILOT_TOKEN_<名>
+  #   auth.api_key / usage_storage.password -> LB_API_KEY / MYSQL_PASSWORD
+  # 这样 config 这一侧与 Secret 的键名可以由同一份映射生成，两边都不用手敲 ——
+  # 「名字拼错」是这套注入方式的首要失败模式，而消除它的办法是不手敲，不是小心。
+  #
+  # **引用解析不出来会拒绝启动**（`resolve_credential`）：缺失变量曾被静默替换成空串，
+  # 而没有任何一层拒绝空 token，唯一症状是上游 401。详见 docs/CONFIGURATION.md。
   config.yaml: |
     load_balancer:
       strategy: least_requests
@@ -18,39 +30,39 @@ data:
     endpoints:
       - name: centralus-adb-ws
         api_base: https://adb-7405606560645390.10.azuredatabricks.net/serving-endpoints
-        token: ${DATABRICKS_TOKEN_CENTRALUS}
+        token: ${ADB_TOKEN_CENTRALUS_ADB_WS}
         weight: 1
       - name: eastus-adb-ws
         api_base: https://adb-7405618277982494.14.azuredatabricks.net/serving-endpoints
-        token: ${DATABRICKS_TOKEN_EASTUS}
+        token: ${ADB_TOKEN_EASTUS_ADB_WS}
         weight: 1
       - name: eastus2-adb-ws
         api_base: https://adb-7405611375100611.11.azuredatabricks.net/serving-endpoints
-        token: ${DATABRICKS_TOKEN_EASTUS2}
+        token: ${ADB_TOKEN_EASTUS2_ADB_WS}
         weight: 1
       - name: northcentralus-adb-ws
         api_base: https://adb-7405612144831526.6.azuredatabricks.net/serving-endpoints
-        token: ${DATABRICKS_TOKEN_NORTHCENTRALUS}
+        token: ${ADB_TOKEN_NORTHCENTRALUS_ADB_WS}
         weight: 1
       - name: southcentralus-adb-ws
         api_base: https://adb-7405615615815862.2.azuredatabricks.net/serving-endpoints
-        token: ${DATABRICKS_TOKEN_SOUTHCENTRALUS}
+        token: ${ADB_TOKEN_SOUTHCENTRALUS_ADB_WS}
         weight: 1
       - name: westus-adb-ws
         api_base: https://adb-7405614949147436.16.azuredatabricks.net/serving-endpoints
-        token: ${DATABRICKS_TOKEN_WESTUS}
+        token: ${ADB_TOKEN_WESTUS_ADB_WS}
         weight: 1
       - name: australiaeast-adb-ws
         api_base: https://adb-7405606772229870.10.azuredatabricks.net/serving-endpoints
-        token: ${DATABRICKS_TOKEN_AUSTRALIAEAST}
+        token: ${ADB_TOKEN_AUSTRALIAEAST_ADB_WS}
         weight: 1
       - name: canadacentral-adb-ws
         api_base: https://adb-7405612250023143.3.azuredatabricks.net/serving-endpoints
-        token: ${DATABRICKS_TOKEN_CANADACENTRAL}
+        token: ${ADB_TOKEN_CANADACENTRAL_ADB_WS}
         weight: 1
       - name: japaneast-adb-ws
         api_base: https://adb-7405613397936662.2.azuredatabricks.net/serving-endpoints
-        token: ${DATABRICKS_TOKEN_JAPANEAST}
+        token: ${ADB_TOKEN_JAPANEAST_ADB_WS}
         weight: 1
 
       # eastasia-adb-ws intentionally excluded: endpoint is control-plane READY,
@@ -60,37 +72,68 @@ data:
       endpoints:
         - name: eastus2-azure-ai
           endpoint: https://eastus2-azureai-service.cognitiveservices.azure.com
-          api_key: ${AZURE_KEY_EASTUS2}
+          api_key: ${AZURE_OPENAI_KEY_EASTUS2_AZURE_AI}
           deployments: [gpt-5.4]
           weight: 1
         - name: swedencentral-azure-ai
           endpoint: https://swedencentral-azureai-service.services.ai.azure.com
-          api_key: ${AZURE_KEY_SWEDENCENTRAL}
+          api_key: ${AZURE_OPENAI_KEY_SWEDENCENTRAL_AZURE_AI}
           deployments: [gpt-5.4]
           weight: 1
         - name: polandcentral-azureai-service
           endpoint: https://polandcentral-azureai-service.services.ai.azure.com
-          api_key: ${AZURE_KEY_POLANDCENTRAL}
+          api_key: ${AZURE_OPENAI_KEY_POLANDCENTRAL_AZUREAI_SERVICE}
           deployments: [gpt-5.4]
           weight: 1
         - name: southcentralus-azureai-service
           endpoint: https://southcentralus-azureai-service.services.ai.azure.com
-          api_key: ${AZURE_KEY_SOUTHCENTRALUS}
+          api_key: ${AZURE_OPENAI_KEY_SOUTHCENTRALUS_AZUREAI_SERVICE}
           deployments: [gpt-5.4]
           weight: 1
 
+    # Microsoft Foundry 的 Anthropic 面。与 azure_openai 是**同一个资源的两个面**，
+    # 必须分开写：协议、鉴权头、模型 id、计费单位全不同（见 CLAUDE.md 不变量）。
+    #   - auth_style 默认 x-api-key。实测官方也列的 `api-key` 头回 401
+    #   - deployments 用 Foundry 自己的拼法（短横：claude-opus-5-5，点号会 404
+    #     DeploymentNotFound）；Foundry 没有 Models API，这份清单是运维声明的唯一来源
+    #   - 用量按 CCU 计量，不进 per-token 费用合计（/stats 该段 pricing.status=unknown）
+    azure_anthropic:
+      endpoints:
+        - name: eastus2-foundry
+          api_base: https://YOUR_FOUNDRY_RESOURCE.services.ai.azure.com
+          api_key: ${AZURE_ANTHROPIC_KEY_EASTUS2_FOUNDRY}
+          deployments: [claude-opus-5-5, claude-opus-5, claude-sonnet-5-5, claude-haiku-5-5]
+          weight: 1
+
     # GitHub Copilot：long-lived token 走两种来源中的任一种
-    #   1) 推荐：env var GITHUB_COPILOT_TOKEN_1（来自 Secret claude-lb-secrets）
+    #   1) 推荐：env var GITHUB_COPILOT_TOKEN_<账户名>（来自 Secret claude-lb-upstream-credentials）
     #      env 方式 K8s 重启 Pod 后才生效；适合"换一次 token 就 rollout"的运维流程
     #   2) 推荐：从 mounted secret file 读
     #      file 方式配合 kubelet 的 secret 自动同步（约 1min），运维 kubectl apply 新 secret
     #      Pod 内 reload_github_token() 自动 pick up，零重启
     # 这里默认使用 file（方式 2）。如果你希望 env 优先，把下行改为:
-    #   github_token: ${GITHUB_COPILOT_TOKEN_1}
+    #   github_token: ${GITHUB_COPILOT_TOKEN_GH_ACCOUNT_1}
     github_copilot:
       endpoints:
         - name: gh-account-1
           weight: 1
           models: []
 
+    # 用量存储二选一。
+    #
+    # (a) JSON 单写者（配套 pvc.yaml 与 Recreate 策略）—— 简单起点：
     usage_data_dir: /app/usage_data
+    #
+    # (b) MySQL 账本（线上用的是这个；**按 provider 归因需要它**）。
+    #     `usage_daily` 的主键是 (date, model, provider) —— 模型名分不开渠道：
+    #     claude-opus-5 与 claude-sonnet-5 在 GHCP 与 Foundry 完全同名。
+    #     换到 (b) 时删掉上面那行、去掉 pvc.yaml 与 Recreate 策略：
+    # usage_storage:
+    #   type: mysql
+    #   host: YOUR_MYSQL_HOST
+    #   port: 3306
+    #   user: YOUR_MYSQL_USER
+    #   password: ${MYSQL_PASSWORD}
+    #   database: YOUR_DATABASE
+    #   pool_size: 5
+    #   retention_days: 90
