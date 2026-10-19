@@ -386,7 +386,17 @@ MESSAGES_ENTRY_POINT = "/v1/messages"
 # gpt-5 / gpt-5-nano / gpt-5-pro / gpt-5.1 / gpt-5.2 / gpt-5-codex / gpt-5.1-codex /
 # o3 / o3-mini / o3-pro / o4-mini / gemini-2.5-pro / gemini-2.5-flash 均 404
 # "rejected model"；gpt-5.6-cyber 是 integrator 限制（400，与模型不存在不同）。
-# gpt-6-astra、kimi-k3 同样被上游拒绝，gpt-5.4-nano 受 integrator 限制，均未收录。
+# gpt-5.4-nano 受 integrator 限制，未收录。
+#
+# **gpt-6-astra 与 kimi-k3 不是「被上游拒绝」** —— 这里曾经那么写，但那一轮核验是在
+# enterprise seat（ZenoRewn）上做的，而这两个模型是 **business seat 独有**，所以得到的
+# 404 是「这个账户没有」而不是「这个模型不存在」。把按账户的事实记成全局的，会让人以为
+# 模型不可用。2026-10-19 实测：business seat（zenoren-icloud）上 `gpt-6-astra` 经
+# `/v1/responses` 正常返回 `completed`，而 `/chat/completions` 回
+# 400 `unsupported_api_for_model`（«not accessible via the /chat/completions endpoint»）
+# —— 它是 Responses-only，不是不可用。两者仍不收录进本表：本表只在**从未发现过能力**的
+# 通配端点上作为上限使用，而它们的可用性按 SKU 分化，拿一张账户无关的表去断言会把
+# enterprise seat 也宣传成能服务它们。
 #
 # 入口差异是实测出来的，不是推断：仅 Responses 的模型在 /chat/completions 上报
 # "not accessible via the /chat/completions endpoint"，gemini-3.8-flash 在
