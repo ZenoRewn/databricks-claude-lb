@@ -36,6 +36,8 @@ Author: Zeno Ren
 
 独立 QA 发现并推动修复了未知事件中 `item` 字段遮蔽 `item_id`、以及诊断摘要异常时仍须独立关闭映射的边界。相关失败已补回归，最终没有剩余代码阻塞。首轮全量测试曾在并行修复过程中失败 1 项，以上最终全量结果来自代码冻结后的重跑。
 
+GitHub 交付补充：[首次 CI](https://github.com/ZenoRewn/databricks-claude-lb/actions/runs/39387430225) 的 Docker 构建/运行 smoke 与隔离 MySQL 8.0/8.4 检查均通过；三个 Python 作业唯一失败项是新回执未加入评审索引。该检查只枚举已跟踪文件，本地生成回执时尚未覆盖此目录；提交后已复现并补齐索引，未修改测试断言。最新完整 CI 状态以 [PR #65](https://github.com/ZenoRewn/databricks-claude-lb/pull/65) 的检查为准。
+
 有界容量 smoke（Python 3.14，tracemalloc，非 RSS）：4096 项加到 16384 个 ID 用时 0.662 秒，映射字符串 249856 B、跟踪分配峰值 2560741 B，关闭后映射归零；8 KiB 单 ID 和 2 MiB 映射字符串上限触发正确。128 个 64 KiB 文本增量（累计 8 MiB）仅保留 9 B 身份字符串，未保存完整回答。这些本地合成测量不能代表生产负载或整进程内存上限。
 
 ## 启用与真实边界
