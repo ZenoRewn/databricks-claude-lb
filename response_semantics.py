@@ -10,7 +10,8 @@ REASONS = ('none', 'context_window_exceeded', 'invalid_input', 'rate_limited',
            'startup_timeout', 'read_timeout', 'write_timeout', 'connection_error',
            'pool_timeout', 'upstream_truncated', 'request_deadline_exceeded',
            'client_disconnected', 'cancelled', 'local_resource_limit',
-           'local_observer_error', 'internal_error', 'local_overload', 'request_body_timeout', 'recovery_preference')
+           'local_observer_error', 'internal_error', 'local_overload', 'request_body_timeout', 'recovery_preference',
+           'identity_conflict', 'identity_mapping_limit', 'identity_transform_error')
 
 
 def exception_reason(exc):

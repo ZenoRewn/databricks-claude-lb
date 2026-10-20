@@ -8,7 +8,7 @@ This contract extends [RESILIENCE.md](RESILIENCE.md). It does not diagnose any o
 
 All three native streaming providers use one complete-frame framer. It recognizes WHATWG CRLF, CR and LF, preserves complete wire frames, parses UTF-8 with replacement semantics and ignores one initial BOM. It retains only the unfinished frame, not the entire response. A final CR is a valid line ending; an unfinished event at EOF is discarded without appending a delimiter. Independent local errors are emitted only at known frame boundaries. No completed/Anthropic message_stop event is manufactured to hide a missing terminal. Empty and comment-only EOF are not success.
 
-A complete frame is offered promptly once its blank-line delimiter arrives. CR at a chunk boundary waits for the following byte or EOF so a split CRLF remains intact. This is intentionally different from immediate arbitrary HTTP chunk forwarding: clients receive no partial event. Heartbeats remain independent SSE comments. If a local heartbeat precedes the first upstream BOM, that BOM is removed from the first forwarded frame because it would no longer be at stream offset zero. Without that exception, complete frames remain byte-identical. No additional buffering of completed events is introduced beyond the existing bounded pump and downstream backpressure.
+A complete frame is offered promptly once its blank-line delimiter arrives. CR at a chunk boundary waits for the following byte or EOF so a split CRLF remains intact. This is intentionally different from immediate arbitrary HTTP chunk forwarding: clients receive no partial event. Heartbeats remain independent SSE comments. If a local heartbeat precedes the first upstream BOM, that BOM is removed from the first forwarded frame because it would no longer be at stream offset zero. Complete frames otherwise remain byte-identical, except for the explicitly enabled Copilot message-ID normalization below. No additional buffering of completed events is introduced beyond the existing bounded pump and downstream backpressure.
 
 The first recognized valid API terminal settles the attempt before being offered downstream. The remaining upstream transport is closed, not drained indefinitely. Bytes after that terminal are not forwarded. A later transport EOF/reset/close cannot override a terminal generation outcome or cause a second settlement. This also accommodates clients that stop reading at completion. Actual failures before a valid terminal remain conservative; no automatic POST replay is allowed after receiving response headers/body, including when a partial event has not yet been forwarded.
 
@@ -24,6 +24,47 @@ WHATWG specifies framing, **not** the application JSON schema. For Responses, th
 - A local observer exception is `local_observer_error`: neutral/inconclusive, with no automatic POST replay.
 
 Failed/incomplete/error terminals and local limits release the same exactly-once admission lease. A local-pressure HALF_OPEN trial rearms cooldown once without endpoint-error increments. HTTP 401/403, 429 and 5xx remain health evidence; the existing one-time Copilot 401 session repair is retained, but an unrepaired/second rejection is a real failure. A streaming 401 repair keeps the same admission across its single auth retry, avoiding opening the inference breaker before that repair can run. Token exchange itself never resets inference health/history.
+
+## Opt-in Copilot Responses message identity
+
+`responses_item_identity.py` provides an attempt-local compatibility transform for native Copilot/GHCP Responses streams. Its purpose is to keep one message's ID consistent when upstream IDs drift between added, delta, done and terminal snapshots. It never compares or deduplicates text: two messages containing the same words remain two messages. Reasoning and tool item IDs are outside this first implementation; their content, `call_id`, arguments and encrypted state are preserved. Foundry Responses, Messages, Chat, non-streaming Responses and the buffered Chat→Responses adapter retain their existing behavior.
+
+These environment variables are read at startup/import; they are not YAML fields or hot switches:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `COPILOT_RESPONSES_ITEM_ID_MODE` | `off` | `off`, `observe` or `stabilize` |
+| `COPILOT_RESPONSES_ITEM_ID_MODELS` | empty | Comma-separated exact model allowlist; empty enables no models, with no wildcard or prefix matching |
+| `COPILOT_STRIP_INPUT_ITEM_IDS` | `true` | Existing next-turn input-ID stripping; must remain enabled when mode is `stabilize` |
+
+Mode is trimmed and lowercased; CSV model entries are trimmed and deduplicated, with case-sensitive exact matching. Unknown modes and `stabilize` with input-ID stripping disabled reject startup, even if the model allowlist is empty. `off` and nonmatching models retain the original path. `observe` tracks ID drift and mapping capacity while returning the original frame bytes; an observer failure stops observation for that attempt and does not change output, retry, terminal or account-health behavior. `stabilize` applies only the supported message references below. Mode and model selection are frozen for the request, and each upstream attempt gets fresh mappings, including the existing authorized 401-repair attempt. No mapping crosses requests or persists in a database/cache.
+
+The first valid `response.output_item.added` binds a nonnegative integer `output_index`, item type and nonempty canonical `item.id`. Booleans are not valid indices. A later ID for the same message is an alias of the first ID. A missing added event is not synthesized: that unbound event is forwarded unchanged and recorded as `missing_added`, so that identity is not claimed as repaired. The transform runs after complete-frame parsing and before downstream semantic observation and successful settlement; it does not buffer a full answer or generate extra terminal events.
+
+| Supported event | Field that may change for an established message |
+|---|---|
+| `response.output_item.added`, `response.output_item.done` | `item.id` |
+| `response.content_part.added`, `response.content_part.done` | Top-level `item_id` |
+| `response.output_text.delta`, `response.output_text.done` | Top-level `item_id` |
+| `response.refusal.delta`, `response.refusal.done` | Top-level `item_id` |
+| `response.output_text.annotation.added` | Top-level `item_id` |
+| `response.completed`, `response.failed`, `response.incomplete` | Established message IDs in `response.output`, only when the snapshot can be safely correlated |
+
+The official annotation event includes `output_index`, `content_index` and `annotation_index`; its nested annotation is preserved. Official text delta/done events carry a `logprobs` array, which is preserved with their text; no speculative standalone logprob event is accepted by name. Top-level `response.id`, text/refusal content, phase, role, content/sequence indices, tool data, usage, status and error details are never rewritten. There is no recursive ID substitution.
+
+Unchanged frames keep their original bytes. A changed frame replaces only its JSON data payload, preserving the relative order and bytes of SSE `event`, `id`, `retry`, comment and other non-data lines. Multiple data lines are assembled using SSE rules and rebuilt as valid data; SSE `id:` is never a JSON item ID. Invalid JSON, duplicate identity keys, nonfinite numbers and invalid Unicode are not repaired by serialization. Unknown events without an affected identity retain the existing forwarding contract.
+
+Conflicting types/indices, duplicate added events, ambiguous terminal snapshots or unsupported events that require rewriting an already normalized identity cannot silently fall back to mixed IDs. A snapshot must match the complete contiguous set of observed indices, list length and item types; a known ID at another index is a conflict. After any drift, an absent snapshot is also a conflict. Stabilize reports a bounded compatibility error and ends that attempt; it never replays the inference POST. `identity_conflict`, `identity_mapping_limit` and `identity_transform_error` distinguish protocol conflict, mapping capacity and local transformation failure. Local transform/resource failures do not penalize the upstream account. If upstream usage was already available, the existing idempotent usage path preserves that fact even when local delivery fails; this is not a completed downstream generation.
+
+When every snapshot ID is new and several slots have the same item type, correlation relies on the Responses schema's ordered `output` array contract. An arbitrary upstream reorder of those unknown IDs cannot be independently detected from identity/type information alone. The checks above detect observable alias/type conflicts, not every possible upstream ordering violation; real GHCP snapshot ordering remains part of live acceptance.
+
+Per-attempt mapping limits are 4,096 output items, 16,384 ID aliases (including canonical IDs), 8 KiB per ID and 2 MiB of retained mapping strings measured in UTF-8 bytes, including the per-index item type. Active mappings are not evicted to continue a stream. These are local engineering limits, not provider API limits or a total RSS guarantee. A rewritten frame must fit `PER_PENDING_EVENT`; its bytes also reserve the existing retained-stream budget while offered downstream. Completion, error and cancellation release mappings and byte reservations.
+
+Diagnostics record bounded counts and reasons without prompts, answer text, raw item IDs, encrypted state or credentials. Drift counts are per output item; rewritten frames are counted per frame. `copilot_response_identity_{requests,drift_items,rewritten_frames,rewritten_requests,unsupported_requests}_total` uses only `mode` labels (`observe` or `stabilize`). `copilot_response_identity_failures_total` adds the finite `reason` label above. `copilot_response_identity_mapping_bytes` measures current mapping strings across active attempts; `copilot_response_identity_peak_mapping_bytes{mode}` is the maximum per-attempt mapping size observed among finished attempts, not RSS.
+
+One safe request summary uses `kind=copilot_response_identity`, mode/model/request context, drift items, rewritten frames, mapped items, aliases, peak mapping bytes and unsupported events/reasons. Request summaries may correlate with the LB request ID, but IDs, hashes and output indices are not metric labels. Observation or rewrite counts alone do not prove client acceptance: full terminal semantics, single desktop rendering and multi-turn/tool behavior require separate verification.
+
+To disable normalization, set mode to `off` and use the controlled restart/rollout procedure; an in-flight request keeps its frozen mode until it ends. This returns new requests to original forwarding and can re-expose the original duplicate-display symptom. Do not discard an active mapping midway through a stream, replay a request, or roll back usage data. Clients using `item_reference` or item retrieval need separate compatibility validation; the current scope assumes full-history input replay with the existing input-ID stripping.
 
 ## Explicit operational resource policy
 
@@ -80,5 +121,6 @@ The prior resilience policy changes remain: no ambiguous/5xx POST replay, retain
 - WHATWG SSE parsing/interpretation: https://html.spec.whatwg.org/multipage/server-sent-events.html#parsing-an-event-stream
 - Codex pinned `5ecb3afd1bf405149e2159bfda50093b0c1b5fab`, event/usage/terminal handling: https://github.com/openai/codex/blob/5ecb3afd1bf405149e2159bfda50093b0c1b5fab/codex-rs/codex-api/src/sse/responses.rs (112–181, 417–507, 575–677).
 - Same pinned `ResponseUsageMetadata`: https://github.com/openai/codex/blob/5ecb3afd1bf405149e2159bfda50093b0c1b5fab/codex-rs/protocol/src/response_usage.rs.
+- Official OpenAI Responses event schemas, checked 2026-10-20: [text delta](https://developers.openai.com/api/reference/resources/responses/streaming-events#response.output_text.delta), [text done](https://developers.openai.com/api/reference/resources/responses/streaming-events#response.output_text.done), [annotation added](https://developers.openai.com/api/reference/resources/responses/streaming-events#response.output_text.annotation.added).
 
 These references are not proof of any installed Mac client version, actual upstream framing of an old request, client/account entitlement parity, model context limit, or original root cause. Local tests do not replace the parent’s independent review and separately authorized combined deployment.

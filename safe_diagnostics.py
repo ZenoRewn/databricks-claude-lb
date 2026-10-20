@@ -70,12 +70,17 @@ EVENT_NAMES = set('error ping message_start message_delta message_stop content_b
     'response.refusal.done response.reasoning_summary_part.added response.reasoning_summary_part.done '
     'response.reasoning_summary_text.delta response.reasoning_summary_text.done -'.split())
 ENUM_FIELDS = {
+    'identity_mode': {'off', 'observe', 'stabilize'},
     'http_version': {'HTTP/1.0', 'HTTP/1.1', 'HTTP/2', 'HTTP/3', 'unknown'},
     'protocol_error_kind': {'http2_stream_reset', 'http2_goaway', 'remote_protocol_error', 'unknown'},
     'protocol_scope': {'stream', 'connection', 'unknown'},
     'circuit_scope': {'endpoint', 'model_api'},
     'context_advice': {'none', 'large_input', 'elevated_input', 'estimated_near_limit', 'estimated_over_limit'},
 }
+IDENTIFIERS.update(('identity_mode', 'identity_unsupported_reason'))
+NUMBERS.update('identity_drift_items identity_rewritten_frames identity_mapped_items identity_aliases '
+               'identity_peak_mapping_bytes identity_unsupported_events'.split())
+REASON_VALUES.update(('identity_conflict', 'identity_mapping_limit', 'identity_transform_error'))
 
 
 def transport_details(exc, *, http_version='unknown'):

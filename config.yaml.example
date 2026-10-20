@@ -12,6 +12,11 @@
 # LB_MODEL_CAPABILITIES_PATH                 # 可选本地 JSON；参见 model-capabilities.example.json
 # 新监控契约显式请求 /metrics?schema=lb-metrics-v3，默认仍为 v2。
 # 当前行为与采用步骤：docs/OBSERVABILITY_AND_CONTEXT.md
+# GHCP 原生 Responses 流式 message ID 兼容开关（环境变量，启动时读取）：
+# COPILOT_RESPONSES_ITEM_ID_MODE=off          # off/observe/stabilize；默认 off
+# COPILOT_RESPONSES_ITEM_ID_MODELS=           # 逗号分隔的精确模型 allowlist；空=不启用任何模型
+# COPILOT_STRIP_INPUT_ITEM_IDS=true          # stabilize 的必要前提；保留既有默认值
+# 例如先在已授权测试环境 observe + 精确模型；协议与禁用方式见 docs/STREAM_PROTOCOL.md。
 
 load_balancer:
   strategy: least_requests        # 负载均衡策略: least_requests, round_robin, random

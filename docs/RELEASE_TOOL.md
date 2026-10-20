@@ -42,7 +42,11 @@ preflight → gating → pausing → draining → stopping → starting
 
 ## 安装材料
 
-协调器使用独立镜像及 [独立依赖锁](../operations/release/requirements.lock)。构建：
+协调器使用独立镜像及 [独立依赖锁](../operations/release/requirements.lock)。
+
+应用新增运行模块时，CLI 与协调器必须使用相同的 `operations/release/model.py` 文件清单；`validate_plan` 要求 `source_hashes` 与 `APP_FILES` 严格集合相等。`responses_item_identity.py` 已加入应用镜像、运行来源清单和 `APP_FILES`，所以后续发布该版本前需要重建并受控更新协调器镜像。协调器 Dockerfile 已复制整个 `operations/release` 目录，无须把应用模块另行复制到协调器；旧协调器不能验证新清单。此依赖不代表本次本地修改已经构建、安装或部署了协调器。
+
+构建命令：
 
 ```bash
 docker build --platform linux/amd64 -f deploy/release/Dockerfile \

@@ -258,11 +258,14 @@ def note_local_terminal(code):
     if record is None:
         return
     mapping = {'upstream_truncated': 'upstream_truncated', 'pool_acquire_timeout': 'pool_timeout',
+               'identity_conflict': 'identity_conflict', 'identity_mapping_limit': 'identity_mapping_limit',
+               'identity_transform_error': 'identity_transform_error',
                'protocol_buffer_limit': 'local_resource_limit', 'local_observer_error': 'local_observer_error',
                'request_deadline_exceeded': 'request_deadline_exceeded'}
     reason = mapping.get(code)
     if reason:
         note_failure(reason, origin='local' if reason in ('local_resource_limit', 'local_observer_error',
+                                                        'identity_conflict', 'identity_mapping_limit', 'identity_transform_error',
                                                         'request_deadline_exceeded') else 'transport')
     elif record.failure_reason == 'none':
         note_failure('unknown')

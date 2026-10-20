@@ -42,6 +42,7 @@ from provider_credentials import (CredentialKeyError, CredentialStore, DeviceFlo
 from response_semantics import assess_json, reported_usage, failure_reason, enrich_error, decode_json_response, invalid_stream_type, is_html as is_html_content_type
 from request_telemetry import note_reason
 from cleanup_observability import CLEANUP
+from responses_item_identity import ResponsesItemIdentity, IdentityNormalizationError
 """
 Databricks Claude Load Balancer Proxy for Claude Code
 使用 Databricks 原生 Anthropic 端点 (/anthropic/v1/messages)
@@ -163,6 +164,9 @@ class LBSettings:
     # COPILOT_STRIP_INPUT_ITEM_IDS default true —— 设 false 恢复原样透传，
     # 仅用于排查「怀疑剥离本身造成问题」的场景。
     copilot_strip_input_item_ids: bool
+    # Native Responses message identity compatibility; exact model opt-in.
+    copilot_responses_item_id_mode: str
+    copilot_responses_item_id_models: tuple[str, ...]
     # ---- Copilot 上游 401 的熔断归属 ----
     # COPILOT_STATEFUL_401_NEUTRAL default true —— 携带 opaque state 的请求收到
     # 401 时视为 request-scoped（中性，不计入 endpoint consecutive_errors）。
@@ -207,6 +211,10 @@ class LBSettings:
     otel_exporter_otlp_endpoint: str   # empty = ConsoleSpanExporter
 
     def __post_init__(self):
+        if self.copilot_responses_item_id_mode not in ('off', 'observe', 'stabilize'):
+            raise ValueError('COPILOT_RESPONSES_ITEM_ID_MODE must be off, observe or stabilize')
+        if self.copilot_responses_item_id_mode == 'stabilize' and not self.copilot_strip_input_item_ids:
+            raise ValueError('COPILOT_RESPONSES_ITEM_ID_MODE=stabilize requires COPILOT_STRIP_INPUT_ITEM_IDS=true')
         if not 1 <= self.copilot_recovery_small_input_bytes <= 4 * 1024 * 1024:
             raise ValueError('COPILOT_RECOVERY_SMALL_INPUT_BYTES must be between 1 and 4194304')
         if not math.isfinite(self.copilot_recovery_preference_seconds) or not 0 <= self.copilot_recovery_preference_seconds <= 60:
@@ -251,6 +259,9 @@ class LBSettings:
             copilot_user_agent=_env_str("COPILOT_USER_AGENT", "GitHubCopilotChat/0.30.0"),
             copilot_html_soft_cooldown=_env_float("COPILOT_HTML_SOFT_COOLDOWN", 30.0),
             copilot_strip_input_item_ids=_env_bool("COPILOT_STRIP_INPUT_ITEM_IDS", True),
+            copilot_responses_item_id_mode=_env_str("COPILOT_RESPONSES_ITEM_ID_MODE", "off").strip().lower(),
+            copilot_responses_item_id_models=tuple(dict.fromkeys(
+                value.strip() for value in _env_str("COPILOT_RESPONSES_ITEM_ID_MODELS", "").split(',') if value.strip())),
             copilot_stateful_401_neutral=_env_bool("COPILOT_STATEFUL_401_NEUTRAL", True),
             copilot_opaque_state_recovery=_env_bool("COPILOT_OPAQUE_STATE_RECOVERY", True),
             copilot_session_affinity=_env_bool("COPILOT_SESSION_AFFINITY", True),
@@ -908,6 +919,44 @@ class _RetainedStreamBudget:
 
 _STREAM_BUFFER_BUDGET = _RetainedStreamBudget(PER_PROCESS_TOTAL_RETAINED_STREAM_BUFFER)
 _SSE_NEWLINE = re.compile(rb"[\r\n]")
+
+
+def _record_identity_summary(proxy, mode, summary, model, request_id):
+    """One bounded summary per enabled request; IDs and payloads never enter it."""
+    stats = getattr(proxy, 'responses_item_identity_stats', None)
+    if stats is None:
+        stats = proxy.responses_item_identity_stats = {}
+    totals = stats.setdefault(mode, {})
+    values = {key: summary.get(key, 0) for key in ('drift_items', 'rewritten_frames')}
+    values.update(requests=1, rewritten_requests=int(summary.get('rewritten_frames', 0) > 0),
+                  unsupported_requests=int(summary.get('unsupported_events', 0) > 0))
+    for key, value in values.items():
+        totals[key] = totals.get(key, 0) + value
+    reason = summary.get('failure_reason')
+    if reason:
+        totals[reason] = totals.get(reason, 0) + 1
+    totals['peak_mapping_bytes'] = max(totals.get('peak_mapping_bytes', 0), summary.get('peak_mapping_bytes', 0))
+    log_event({'kind': 'copilot_response_identity', 'provider': 'copilot', 'api_type': 'responses',
+               'model': model, 'request_id': request_id, 'identity_mode': mode,
+               'reason': reason or 'none', 'identity_unsupported_reason': summary.get('unsupported_reason'),
+               **{f'identity_{key}': summary.get(key, 0) for key in
+                  ('drift_items', 'rewritten_frames', 'mapped_items', 'aliases',
+                   'peak_mapping_bytes', 'unsupported_events')}})
+
+
+def _preserve_identity_failure_usage(observation, frame):
+    """Retain reported terminal usage without offering/settling a successful terminal."""
+    if observation is None:
+        return
+    try:
+        _, data, _ = _parse_sse_event_block(frame.decode('utf-8-sig', errors='replace'), responses=True)
+        if data and data.get('type') in ('response.completed', 'response.failed', 'response.incomplete'):
+            response = data.get('response')
+            if isinstance(response, dict):
+                observation._usage(response.get('usage'))
+    except Exception:
+        # Usage observation must not mask the original local compatibility error.
+        log_event({'kind': 'copilot_response_identity_usage_error', 'reason': 'identity_transform_error'})
 
 
 class _SSEFramer:
@@ -6757,6 +6806,13 @@ class CopilotProxy:
                                 recovery: Optional["_OpaqueStateRecovery"] = None) -> StreamingResponse:
         """流式请求，复用 AzureOpenAIProxy._stream_response 同款 pump + heartbeat + sent_any_chunk 守卫架构"""
         proxy_self = self
+        # Freeze rollout selection before iteration; later settings changes cannot
+        # switch an in-flight stream back to incompatible upstream IDs.
+        identity_mode = (LB_SETTINGS.copilot_responses_item_id_mode
+                         if api_type == 'responses' and model in LB_SETTINGS.copilot_responses_item_id_models
+                         else 'off')
+        identity_summary = {}
+        identity_reported = False
         tried = {endpoint.name}
         if recovery is None:  # 直接调用（测试 / 低层调用者）也要有预算
             recovery = _OpaqueStateRecovery(self, api_type)
@@ -6828,6 +6884,15 @@ class CopilotProxy:
                 proxy_self._stream_connections[connection_id]["endpoint"] = current.name
 
         async def release_abandoned_request():
+            nonlocal identity_reported
+            if identity_mode != 'off' and not identity_reported:
+                identity_reported = True
+                try:
+                    _record_identity_summary(proxy_self, identity_mode, identity_summary, model, request_id)
+                except Exception:
+                    # A diagnostic bug must not strand the active lease/response.
+                    log_event({'kind': 'copilot_response_identity', 'identity_mode': identity_mode,
+                               'reason': 'identity_transform_error'})
             # Client disconnect / generator close is local, not endpoint health evidence.
             await end_current_request(success=False, is_client_error=True, cancelled=True)
             proxy_self._unregister_stream(connection_id)
@@ -6932,6 +6997,8 @@ class CopilotProxy:
                 stream_state["attempt"] = attempt
                 response = None
                 observation = None
+                identity = None
+                identity_current_bytes = 0
                 pump_task = None
                 protocol_metrics.clear()
                 last_upstream_activity = None
@@ -6941,7 +7008,33 @@ class CopilotProxy:
                     last_upstream_activity = time.monotonic()
                     proxy_self._touch_stream(connection_id)
 
+                def track_identity_bytes():
+                    nonlocal identity_current_bytes, identity
+                    try:
+                        size = identity.summary()['mapping_bytes'] if identity is not None else 0
+                    except Exception:
+                        identity_summary['failure_reason'] = 'identity_transform_error'
+                        if identity_mode == 'stabilize':
+                            raise IdentityNormalizationError('identity_transform_error') from None
+                        # Observation must fail open, including its diagnostics.
+                        try:
+                            identity.close()
+                        except Exception:
+                            pass
+                        identity = None
+                        size = 0
+                    proxy_self.responses_item_identity_mapping_bytes = (
+                        getattr(proxy_self, 'responses_item_identity_mapping_bytes', 0) + size - identity_current_bytes)
+                    identity_current_bytes = size
+
                 try:
+                    if identity_mode != 'off':
+                        try:
+                            identity = ResponsesItemIdentity(mode=identity_mode, max_frame_bytes=PER_PENDING_EVENT)
+                        except Exception:
+                            identity_summary['failure_reason'] = 'identity_transform_error'
+                            if identity_mode == 'stabilize':
+                                raise IdentityNormalizationError('identity_transform_error') from None
                     req = proxy_self.client.build_request("POST", current_url, json=body, headers=current_headers)
                     body_bytes_size = len(req.content)
                     async with aclosing(_await_with_heartbeat(
@@ -7141,37 +7234,68 @@ class CopilotProxy:
                             sent_any_chunk = True
                             chunks_yielded_count += 1
                             proxy_self._note_stream_content(connection_id)
-                            observation.observe(frame)
-                            first_event_name = observation.first_event
-                            last_event_name = observation.last_event
-                            saw_completion = observation.terminal is not None
-                            input_tokens = observation.input_tokens
-                            output_tokens = observation.output_tokens
-                            stream_state.update(
-                                chunks_yielded=chunks_yielded_count,
-                                first_event=first_event_name, last_event=last_event_name,
-                                saw_completion=saw_completion, sent_any_chunk=sent_any_chunk,
-                                input_tokens=input_tokens, output_tokens=output_tokens,
-                            )
-                            if observation.terminal:
-                                success = observation.outcome == "completed"
-                                # Settle before offering the terminal: clients may stop
-                                # immediately at it. Later transport close is cleanup,
-                                # not a second generation outcome or replay trigger.
-                                await end_current_request(success=success, is_client_error=observation.neutral or observation.outcome == "incomplete")
-                                if success:
-                                    # 恢复只有走到合法终端事件才算成功：上游接受了改写
-                                    # 后的请求但流仍被截断，不能记 succeeded（否则
-                                    # succeeded 会变成「上游收下了」而不是「用户拿到了」）。
-                                    recovery.note_succeeded()
-                                _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
-                                _emit_stream_end(observation.terminal, logging.INFO if success else logging.WARNING,
-                                                 terminal_valid=True, account_neutral=observation.neutral)
+                            output_frame = frame
+                            rewritten_size = 0
+                            if identity is not None:
+                                try:
+                                    output_frame = identity.transform(frame)
+                                    track_identity_bytes()
+                                except Exception as exc:
+                                    _preserve_identity_failure_usage(observation, frame)
+                                    if identity_mode == 'stabilize':
+                                        if isinstance(exc, IdentityNormalizationError):
+                                            raise
+                                        raise IdentityNormalizationError('identity_transform_error') from None
+                                    # An observer implementation failure must not change serving.
+                                    identity_summary['failure_reason'] = 'identity_transform_error'
+                                    try:
+                                        identity.close()
+                                    except Exception:
+                                        pass
+                                    identity = None
+                                    track_identity_bytes()
+                            if output_frame is not frame:
+                                rewritten_size = len(output_frame)
+                                try:
+                                    _STREAM_BUFFER_BUDGET.acquire(rewritten_size)
+                                except _LocalStreamLimit:
+                                    _preserve_identity_failure_usage(observation, frame)
+                                    raise IdentityNormalizationError('identity_mapping_limit') from None
+                            try:
+                                observation.observe(output_frame)
+                                first_event_name = observation.first_event
+                                last_event_name = observation.last_event
+                                saw_completion = observation.terminal is not None
+                                input_tokens = observation.input_tokens
+                                output_tokens = observation.output_tokens
+                                stream_state.update(
+                                    chunks_yielded=chunks_yielded_count,
+                                    first_event=first_event_name, last_event=last_event_name,
+                                    saw_completion=saw_completion, sent_any_chunk=sent_any_chunk,
+                                    input_tokens=input_tokens, output_tokens=output_tokens,
+                                )
+                                if observation.terminal:
+                                    success = observation.outcome == "completed"
+                                    # Settle before offering the terminal: clients may stop
+                                    # immediately at it. Later transport close is cleanup,
+                                    # not a second generation outcome or replay trigger.
+                                    await end_current_request(success=success, is_client_error=observation.neutral or observation.outcome == "incomplete")
+                                    if success:
+                                        # 恢复只有走到合法终端事件才算成功：上游接受了改写
+                                        # 后的请求但流仍被截断，不能记 succeeded（否则
+                                        # succeeded 会变成「上游收下了」而不是「用户拿到了」）。
+                                        recovery.note_succeeded()
+                                    _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
+                                    _emit_stream_end(observation.terminal, logging.INFO if success else logging.WARNING,
+                                                     terminal_valid=True, account_neutral=observation.neutral)
+                                    note_content_offered(observation.frame_has_content)
+                                    yield wire_output.frame(output_frame)
+                                    return
                                 note_content_offered(observation.frame_has_content)
-                                yield wire_output.frame(frame)
-                                return
-                            note_content_offered(observation.frame_has_content)
-                            yield wire_output.frame(frame)
+                                yield wire_output.frame(output_frame)
+                            finally:
+                                if rewritten_size:
+                                    _STREAM_BUFFER_BUDGET.release(rewritten_size)
                     proxy_self.stream_truncated_no_completion_total += 1
                     proxy_self._record_truncation(model, api_type)
                     await end_current_request(success=False)
@@ -7179,6 +7303,15 @@ class CopilotProxy:
                         api_type, "upstream_truncated", "Upstream ended without a valid terminal; cause undetermined",
                         metadata=_sse_error_metadata())
                     _emit_stream_end("truncated", logging.ERROR, terminal_valid=False)
+                    return
+
+                except IdentityNormalizationError as e:
+                    identity_summary['failure_reason'] = e.reason
+                    await end_current_request(success=False, is_client_error=True)
+                    yield _sse_terminal_error(api_type, e.reason,
+                        "Response message identity could not be safely normalized; generation was not replayed.",
+                        metadata=_sse_error_metadata())
+                    _emit_stream_end(e.reason, logging.WARNING, account_neutral=True, terminal_valid=False)
                     return
 
                 except (_LocalStreamLimit, _LocalObserverError) as e:
@@ -7368,6 +7501,27 @@ class CopilotProxy:
                     return
 
                 finally:
+                    try:
+                        if identity is not None:
+                            summary = identity.summary()
+                            for key in ('drift_items', 'rewritten_frames', 'mapped_items', 'aliases', 'unsupported_events'):
+                                identity_summary[key] = identity_summary.get(key, 0) + summary.get(key, 0)
+                            identity_summary['peak_mapping_bytes'] = max(
+                                identity_summary.get('peak_mapping_bytes', 0), summary.get('peak_mapping_bytes', 0))
+                            for key in ('failure_reason', 'unsupported_reason'):
+                                if summary.get(key):
+                                    identity_summary[key] = summary[key]
+                    except Exception:
+                        identity_summary['failure_reason'] = 'identity_transform_error'
+                    finally:
+                        try:
+                            if identity is not None:
+                                identity.close()
+                        except Exception:
+                            identity_summary['failure_reason'] = 'identity_transform_error'
+                        proxy_self.responses_item_identity_mapping_bytes = (
+                            getattr(proxy_self, 'responses_item_identity_mapping_bytes', 0) - identity_current_bytes)
+                        identity_current_bytes = 0
                     timing_end_stream()
                     note_stream_end(observation)
                     _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
@@ -9588,6 +9742,30 @@ async def metrics(schema: str = 'lb-metrics-v2'):
              _labeled_counter_samples("copilot_session_affinity_total", "outcome",
                                       copilot_proxy.session_affinity_events,
                                       _SESSION_AFFINITY_OUTCOMES))
+        identity_stats = getattr(copilot_proxy, 'responses_item_identity_stats', {})
+        for field_name, help_text in (
+            ('requests', 'Native Responses requests selected for identity compatibility'),
+            ('drift_items', 'Message items with changed upstream IDs, counted once per item'),
+            ('rewritten_frames', 'SSE frames rewritten by message identity compatibility'),
+            ('rewritten_requests', 'Requests with at least one rewritten identity frame'),
+            ('unsupported_requests', 'Requests containing identities without a safe binding'),
+        ):
+            name = f'copilot_response_identity_{field_name}_total'
+            emit(name, help_text, 'counter', [
+                f'{name}{{mode="{mode}"}} {identity_stats.get(mode, {}).get(field_name, 0)}'
+                for mode in ('observe', 'stabilize')])
+        name = 'copilot_response_identity_failures_total'
+        emit(name, 'Requests with identity compatibility errors; no inference replay', 'counter', [
+            f'{name}{{mode="{mode}",reason="{reason}"}} {identity_stats.get(mode, {}).get(reason, 0)}'
+            for mode in ('observe', 'stabilize')
+            for reason in ('identity_conflict', 'identity_mapping_limit', 'identity_transform_error')])
+        name = 'copilot_response_identity_mapping_bytes'
+        emit(name, 'Current cached identity string bytes; excludes Python object overhead', 'gauge', [
+            f'{name} {getattr(copilot_proxy, "responses_item_identity_mapping_bytes", 0)}'])
+        name = 'copilot_response_identity_peak_mapping_bytes'
+        emit(name, 'Largest per-attempt cached identity string bytes from finished attempts', 'gauge', [
+            f'{name}{{mode="{mode}"}} {identity_stats.get(mode, {}).get("peak_mapping_bytes", 0)}'
+            for mode in ('observe', 'stabilize')])
         emit("copilot_opaque_state_recovery_total",
              "Bounded opaque-state recovery ladder outcomes (succeeded counts only after a "
              "valid terminal event)",
