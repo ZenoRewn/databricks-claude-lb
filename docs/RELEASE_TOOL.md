@@ -36,6 +36,8 @@ preflight → gating → pausing → draining → stopping → starting
 
 可选的 `target_env` 仅允许两个 Responses 身份配置：`COPILOT_RESPONSES_ITEM_ID_MODE` 和 `COPILOT_RESPONSES_ITEM_ID_MODELS`。它们与镜像、源码注解共用一次条件模板补丁，不支持任意环境变量、凭据修改或单独的环境滚动。旧镜像必须对应私有快照中的完整原环境；目标镜像必须对应计划的完整目标环境。其他 `env`、`envFrom` 和配置引用仍受保护。实际写入同时校验原模板、UID、resourceVersion、发布所有权和执行代次；任何其他环境状态均要求停止处理。
 
+JSON Patch 在 Kubernetes SDK 完成序列化后，对字面 `<`、`>`、`&` 使用语义等价的 `\u003c`、`\u003e`、`\u0026` 转义。2026-10-21 的 AKS 维护前 dry-run 已验证：同一 UID/resourceVersion 和完整模板，默认编码在含这些字符的 initContainer 多行命令上返回 422，等价转义后返回 200。适配器仅包装当前客户端已有的连接池，不修改全局 JSON 编码器、认证、TLS、超时、其他请求类型或原值检查；存在 Content-Length 时同步更新长度。完整模板 CAS 和目标读回检查均保留。真实 SDK 编码回归由 CI 的 Python 3.12 任务安装既有协调器依赖锁后执行；未安装该 SDK 的其他应用测试任务只会显式跳过 SDK 专属用例，其余编码测试照常执行。
+
 带非空 `target_env` 的计划使用 `lb-release-plan-v2`，使旧版协调器明确拒绝，而不会静默忽略环境变更。新协调器继续接受无环境变更的 v1 历史计划；非空环境变更不能塞进 v1。提交 v2 前必须确认两个协调器都已更新为支持它的镜像。回滚恢复整个原 `env` 列表，包括顺序、`valueFrom`、空值及字段缺失状态，不把原来不存在的配置留在旧镜像上。目标仍须使用不同的不可变镜像引用。
 
 新镜像预检 Pod 使用计划环境，旧镜像预检 Pod 使用原环境；二者在接受成功前都读回核对镜像、`env` 和 `envFrom`。实际新 Pod 和回滚 Pod 在恢复路由前也需通过对应环境检查。预检的历史成功回执仍按原机制持久化，不因后续 deadline 改写而反复运行。配置在应用启动时加载，以上流程不提供在途请求的热切换。

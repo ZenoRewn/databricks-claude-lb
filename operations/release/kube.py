@@ -28,6 +28,38 @@ def conditional_conflict(error,method,body,readback):
     return current is None or any(current['metadata'].get(key)!=value for key,value in expected.items())
 
 
+class _JSONPatchPool:
+    """Use equivalent HTML escapes after SDK JSON serialization, per client.
+
+    AKS rejected a full-template JSON Patch test on an unchanged init command
+    containing < and >, while the same SDK request with these JSON escapes passed.
+    Keep the original configured pool, TLS, auth, timeouts and CAS operations;
+    only the serialized representation of JSON-Patch strings changes.
+    """
+    def __init__(self,pool):self._pool=pool
+    def __getattr__(self,name):return getattr(self._pool,name)
+    def request(self,method,url,*args,**kwargs):
+        headers=kwargs.get('headers') or {}
+        content_type=next((value for key,value in headers.items() if key.lower()=='content-type'),'')
+        if method.upper()=='PATCH' and content_type.split(';',1)[0].strip().lower()=='application/json-patch+json':
+            body=kwargs.get('body')
+            if not isinstance(body,(str,bytes)):raise TypeError('json_patch_body_must_be_serialized')
+            if isinstance(body,bytes):body.decode('utf-8')  # Reject invalid wire encoding before transport.
+            encoded=body
+            for character,escaped in (('<',r'\u003c'),('>',r'\u003e'),('&',r'\u0026')):
+                encoded=encoded.replace(character.encode() if isinstance(body,bytes) else character,
+                                        escaped.encode() if isinstance(body,bytes) else escaped)
+            if encoded!=body:
+                kwargs['body']=encoded
+                lengths=[key for key in headers if key.lower()=='content-length']
+                if lengths:
+                    headers=headers.copy()
+                    size=len(encoded if isinstance(encoded,bytes) else encoded.encode('utf-8'))
+                    for key in lengths:headers[key]=str(size)
+                    kwargs['headers']=headers
+        return self._pool.request(method,url,*args,**kwargs)
+
+
 class KubeAPI:
     def __init__(self,*,context=None,kubeconfig=None,in_cluster=False):
         from kubernetes import client,config
@@ -37,6 +69,7 @@ class KubeAPI:
             if not context or not kubeconfig:raise ValueError('Explicit context and kubeconfig required')
             config.load_kube_config(config_file=kubeconfig,context=context,client_configuration=configuration,persist_config=False)
         self.client=client.ApiClient(configuration)
+        self.client.rest_client.pool_manager=_JSONPatchPool(self.client.rest_client.pool_manager)
         self.core=client.CoreV1Api(self.client)
     def path(self,kind,namespace,name=None):
         prefix,plural=RESOURCES[kind]
