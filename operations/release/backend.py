@@ -7,7 +7,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from .engine import OwnershipLost,PendingOperation,UnsafeState
-from .model import CONTROL,EPOCH,FINALIZER,GATE,RECOVER,SPEC,SOURCE,digest,target_pod_spec,source_annotations,verify_target_template
+from .model import CONTROL,EPOCH,FINALIZER,GATE,RECOVER,SPEC,SOURCE,digest,target_pod_spec,source_annotations,verify_target_template,verify_pod_environment
 from .snapshot import protected_spec,matches,verify_pod_image
 
 def escape(value):return value.replace('~','~0').replace('/','~1')
@@ -29,6 +29,10 @@ class Backend:
         try:
             verify_pod_image(self.snapshot['old_pods'][0],image,self.plan['container'])
             if pod is not None:verify_pod_image(pod,image,self.plan['container'])
+            if self.plan.get('target_env'):
+                original=self.snapshot['deployment']['spec']['template']['spec']['containers'][0]
+                verify_pod_environment(self.snapshot['old_pods'][0],original)
+                if pod is not None:verify_pod_environment(pod,original)
         except ValueError as exc:raise UnsafeState(str(exc)) from None
         return image
     def _annotations(self,obj):return obj['metadata'].get('annotations',{})
@@ -52,7 +56,8 @@ class Backend:
                 {'op':'test','path':'/metadata/annotations/'+escape(EPOCH),'value':str(self.epoch)}]
         if kind=='deployment' and any(op['path'].startswith('/spec/') for op in operations):
             preview=self.api.request('PATCH',kind,self.namespace,obj['metadata']['name'],
-                [{'op':'test','path':'/metadata/resourceVersion','value':obj['metadata']['resourceVersion']}]+guards+operations,
+                [{'op':'test','path':'/metadata/uid','value':obj['metadata']['uid']},
+                 {'op':'test','path':'/metadata/resourceVersion','value':obj['metadata']['resourceVersion']}]+guards+operations,
                 query={'dryRun':'All'},patch=True)
             if expected_template is not None:verify_target_template(preview,*expected_template)
             operations=operations+[{'op':'add','path':'/metadata/annotations/'+escape(SPEC),'value':digest(preview['spec'])}]
@@ -74,6 +79,10 @@ class Backend:
         if len(pods)!=1:raise PendingOperation('new_pod_not_unique')
         p=pods[0]
         if p['spec']['containers'][0]['image']!=self.plan['image']:raise UnsafeState('unexpected_new_image')
+        if self.plan.get('target_env'):
+            expected=target_pod_spec(self.snapshot['deployment'],self.plan)['containers'][0]
+            try:verify_pod_environment(p,expected)
+            except ValueError as exc:raise UnsafeState(str(exc)) from None
         return p
     def _old_pod(self):
         saved=self.snapshot['old_pods'][0]
@@ -142,14 +151,18 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
                 self._claim('service',current)
         self.routes_gated=gated_all
         return restored
-    def _guard_spec(self):
-        current=self.deployment_object();saved=self.snapshot['deployment']
-        if current['metadata']['uid']!=saved['metadata']['uid'] or protected_spec(current,self.plan['container'])!=protected_spec(saved,self.plan['container']):
+    def _guard_spec(self,current=None):
+        current=self.deployment_object() if current is None else current;saved=self.snapshot['deployment']
+        image=current['spec']['template']['spec']['containers'][0]['image']
+        original=saved['spec']['template']['spec']['containers'][0]['image']
+        if image not in (self.plan['image'],original):raise UnsafeState('unexpected_image_drift')
+        if self.plan.get('target_env') and original==self.plan['image']:
+            raise UnsafeState('environment_change_requires_new_image')
+        expected=self.plan if image==self.plan['image'] and self.plan.get('target_env') else None
+        if current['metadata']['uid']!=saved['metadata']['uid'] or protected_spec(current,self.plan['container'])!=protected_spec(saved,self.plan['container'],expected):
             raise UnsafeState('protected_deployment_drift')
         expected=self._annotations(current).get(SPEC)
         if expected and expected!=digest(current['spec']):raise UnsafeState('controlled_spec_changed_outside_release')
-        if current['spec']['template']['spec']['containers'][0]['image'] not in (self.plan['image'],saved['spec']['template']['spec']['containers'][0]['image']):
-            raise UnsafeState('unexpected_image_drift')
         return current
     def observe(self,record):
         current=self._guard_spec();routes=self._routes();old=self._old_pod()
@@ -230,7 +243,8 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
         if receipts is not None and receipts.get(suffix)=='verified':return
         pod=self.api.optional('pod',self.namespace,name)
         if pod is None:
-            spec=copy.deepcopy(self.snapshot['deployment']['spec']['template']['spec'])
+            spec=(target_pod_spec(self.snapshot['deployment'],self.plan) if suffix=='new' and self.plan.get('target_env')
+                  else copy.deepcopy(self.snapshot['deployment']['spec']['template']['spec']))
             spec.pop('nodeName',None)
             # Validation is read-only; it must never mount a usage writer's PVC.
             removed={v['name'] for v in spec.get('volumes',[]) if 'persistentVolumeClaim' in v}
@@ -245,6 +259,12 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
                 'labels':{'app':'lb-release-preflight'},'annotations':{CONTROL:self.release_id,EPOCH:str(self.epoch)}},'spec':spec})
             raise PendingOperation('image_preflight_created')
         if self._annotations(pod).get(CONTROL)!=self.release_id:raise UnsafeState('preflight_pod_owner_changed')
+        if self.plan.get('target_env'):
+            expected=(target_pod_spec(self.snapshot['deployment'],self.plan)['containers'][0] if suffix=='new'
+                      else self.snapshot['deployment']['spec']['template']['spec']['containers'][0])
+            try:verify_pod_environment(pod,expected)
+            except ValueError as exc:raise UnsafeState(str(exc)) from None
+            if pod['spec']['containers'][0].get('image')!=image:raise UnsafeState('preflight_pod_image_changed')
         phase=pod['status'].get('phase')
         # Exit code first: it is set when the container terminates, which is
         # strictly earlier than the phase settling, and it survives a later
@@ -295,13 +315,18 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
         current=self._owned('pod',name)
         self._patch('pod',current,[{'op':'replace','path':'/metadata/finalizers','value':[x for x in current['metadata'].get('finalizers',[]) if x!=FINALIZER]}])
     def _set_image(self,image,*,rollback=False):
-        d=self._owned('deployment',self.deployment);pod=copy.deepcopy(d['spec']['template']['spec']);c=pod['containers'][0]
+        d=self._owned('deployment',self.deployment)
+        if self.plan.get('target_env'):self._guard_spec(current=d)
+        pod=copy.deepcopy(d['spec']['template']['spec']);c=pod['containers'][0]
         if rollback:
             saved=self.snapshot['deployment']['spec']['template']['spec'];original=saved['containers'][0]
             revision=(self.snapshot['deployment']['spec']['template'].get('metadata',{}).get('annotations') or {}).get(SOURCE)
             for key in ('image','livenessProbe','readinessProbe','startupProbe','lifecycle'):
                 if key in original:c[key]=copy.deepcopy(original[key])
                 else:c.pop(key,None)
+            if self.plan.get('target_env'):
+                if 'env' in original:c['env']=copy.deepcopy(original['env'])
+                else:c.pop('env',None)
             pod['terminationGracePeriodSeconds']=saved.get('terminationGracePeriodSeconds',30)
         else:
             pod=target_pod_spec(d,self.plan)
@@ -309,7 +334,8 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
         annotations=source_annotations(d,revision)
         if (d['spec']['template']['spec']==pod and d['spec'].get('replicas')==1
                 and (d['spec']['template'].get('metadata',{}).get('annotations') or {})==annotations):return
-        updated=self._patch('deployment',d,[{'op':'replace','path':'/spec/template/spec','value':pod},
+        updated=self._patch('deployment',d,[{'op':'test','path':'/spec/template','value':d['spec']['template']},
+                                   {'op':'replace','path':'/spec/template/spec','value':pod},
                                    {'op':'replace','path':'/spec/replicas','value':1},
                                    {'op':'add','path':'/spec/template/metadata/annotations','value':annotations}],
                             expected_template=(pod,annotations))
@@ -341,10 +367,11 @@ print(json.dumps({'accepting_status':status,'accepting':json.loads(body),'metric
             preview=self.api.request('PATCH','deployment',self.namespace,self.deployment,
                 [{'op':'test','path':'/metadata/uid','value':d['metadata']['uid']},
                  {'op':'test','path':'/metadata/resourceVersion','value':d['metadata']['resourceVersion']},
+                 {'op':'test','path':'/spec/template','value':d['spec']['template']},
                  {'op':'replace','path':'/spec/template/spec','value':target_pod_spec(d,self.plan)},
                  {'op':'add','path':'/spec/template/metadata/annotations','value':source_annotations(d,self.plan['source_revision'])}],query={'dryRun':'All'},patch=True)
             verify_target_template(preview,target_pod_spec(d,self.plan),source_annotations(d,self.plan['source_revision']))
-            if protected_spec(preview,self.plan['container'])!=protected_spec(d,self.plan['container']):
+            if protected_spec(preview,self.plan['container'])!=protected_spec(d,self.plan['container'],self.plan):
                 raise UnsafeState('server_dry_run_changed_protected_fields')
             if any(h.get('spec',{}).get('scaleTargetRef',{}).get('name')==self.deployment for h in self.api.list('hpa',self.namespace)):
                 raise UnsafeState('hpa_controlled_workload_requires_separate_strategy')

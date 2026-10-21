@@ -34,6 +34,12 @@ preflight → gating → pausing → draining → stopping → starting
 
 镜像与 `lb.zeno.ink/source-revision` Pod template 注解在同一次条件补丁中更新；回滚恢复原注解值或其缺失状态，保留无关注解。计划、集群预检和每次实际切换前的 server dry-run 均核对返回的完整目标 Pod spec/注解，正常 ACK 也读回核对；admission 改写不能被当成已应用。ACK 丢失仍先读回，不为补注解重复滚动。注解不替代 runtime hash 或 registry digest 证明。修复与验证见 [源码身份回执](reviews/2026-09-30-release-source-identity/REPORT.md)。
 
+可选的 `target_env` 仅允许两个 Responses 身份配置：`COPILOT_RESPONSES_ITEM_ID_MODE` 和 `COPILOT_RESPONSES_ITEM_ID_MODELS`。它们与镜像、源码注解共用一次条件模板补丁，不支持任意环境变量、凭据修改或单独的环境滚动。旧镜像必须对应私有快照中的完整原环境；目标镜像必须对应计划的完整目标环境。其他 `env`、`envFrom` 和配置引用仍受保护。实际写入同时校验原模板、UID、resourceVersion、发布所有权和执行代次；任何其他环境状态均要求停止处理。
+
+带非空 `target_env` 的计划使用 `lb-release-plan-v2`，使旧版协调器明确拒绝，而不会静默忽略环境变更。新协调器继续接受无环境变更的 v1 历史计划；非空环境变更不能塞进 v1。提交 v2 前必须确认两个协调器都已更新为支持它的镜像。回滚恢复整个原 `env` 列表，包括顺序、`valueFrom`、空值及字段缺失状态，不把原来不存在的配置留在旧镜像上。目标仍须使用不同的不可变镜像引用。
+
+新镜像预检 Pod 使用计划环境，旧镜像预检 Pod 使用原环境；二者在接受成功前都读回核对镜像、`env` 和 `envFrom`。实际新 Pod 和回滚 Pod 在恢复路由前也需通过对应环境检查。预检的历史成功回执仍按原机制持久化，不因后续 deadline 改写而反复运行。配置在应用启动时加载，以上流程不提供在途请求的热切换。
+
 单写者停止使用受控 Pod finalizer 保留容器终止证据，再允许启动替代实例；不通过 force delete 应用 Pod 冒充排空。未调度且已进入删除的 Pod 单独记录“未分配运行节点”的证据。节点失联而没有终止证据时不会启动另一 writer。
 
 默认维护预算为 300 秒，前向切换最多 150 秒、排空最多 60 秒，至少保留 150 秒恢复时间。回滚到已经接过流量的新版之前，同样先暂停、排空并确认退出。预算是自动化恢复目标，不能保证控制平面或节点故障时仍在五分钟内恢复，也不授权强杀长请求。
@@ -110,6 +116,16 @@ business_probes:
     stream: true
     max_tokens: 64
 ```
+
+需要一并调整身份配置时，可向 profile 增加以下可选块；模型名须替换为当次发现并批准的精确清单：
+
+```yaml
+target_env:
+  COPILOT_RESPONSES_ITEM_ID_MODE: stabilize
+  COPILOT_RESPONSES_ITEM_ID_MODELS: gpt-6-astra,gpt-6-sol
+```
+
+模式只能为 `off`、`observe`、`stabilize`。模型 CSV 不允许通配符、空成员、空白或重复项，每个名称最多 128 个 ASCII 字符、最多 128 个名称、总长最多 16384 字符；空字符串表示没有命中的模型。名称允许字母、数字、点、下划线、冒号、斜杠和连字符，并以字母或数字开头。仅接受字面字符串，不能传入 `valueFrom` 或脚本。所选键在原环境中重复时拒绝猜测其优先级。`review.json` 明示这两个允许公开的目标值；私有完整原环境仍仅留在私有快照中。
 
 公开探针目标必须属于实际指向目标 Service 的 Ingress host；不向任意配置 URL 发送 LB 凭据，不跟随推理请求重定向。计划限制 1～8 个固定合成探针，每个最多 512 输出 token、合计最多 2048；`max_tokens` 是输出限制，不是供应商费用报价。
 
