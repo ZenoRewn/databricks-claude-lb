@@ -6,6 +6,7 @@ Author: Zeno Ren
 
 | 日期 | 范围 | 入口 |
 |---|---|---|
+| 2026-10-22 | **AKS 发布** `51507c5`：GHCP 在**每个 delta** 换一个 message ID，按原始字符串保存 alias 使约 5000 delta 的长回答撞 2 MiB 上限而中断（48h 内 10 次，全是 `identity_mapping_limit`）。alias 改存每 attempt 加 key 的 16 字节摘要，`max_aliases` 调到 131072；发布一次通过（首次 submit 因 shell 参数未拆分而未执行，生产未触碰） | [修复与发布回执](2026-10-22-ghcp-identity-digest/REPORT.md) |
 | 2026-10-20 | GHCP 原生 Responses 的 message ID 稳定化：默认关闭、按模型启用，保留协议终态/工具字段/用量；本地与独立 QA 已通过，真实桌面与生产另行验收 | [实现与验证](2026-10-20-ghcp-response-identity/REPORT.md) |
 | 2026-10-19 | **AKS 发布** `53615db`：Messages 面的候选判断**绕过了四层账户策略** —— 生产实测一次强制走 copilot 的 `/v1/messages` 落在运维**从未启用**的账户上，而诊断同时报它被排除。`select_endpoint` 只看 config 的 `models` 列表，而 Copilot 账户声明 `models: []`，谓词恒真。同一行代码还把 Foundry/GHCP-messages 的遥测归因写死成 databricks。维护 78.5 秒（首次提交在 preflight 403 中止，原因是迁移漏了一步 RBAC，生产未被触碰）| [发布回执](2026-10-19-messages-account-policy/REPORT.md) |
 | 2026-10-18 | **AKS 发布 + 运维变更** `1d00c58`：上游 17 条凭据从 ConfigMap 明文迁入 Secret。先发一道**行为无变化**的闸门 —— `${ENV}` 引用解析不出来就拒绝启动，因为此前缺失变量被静默替换成空串且没有任何一层拒绝空 token；再用校验 Pod 确认 `load_config` 退出码 0 才动生产。发布维护 55.4 秒；四条真实上游请求与 MySQL 账本读写均通过 | [迁移回执](2026-10-18-credential-secret-migration/REPORT.md) |
