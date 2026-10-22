@@ -37,7 +37,7 @@ NUMBERS = set('schema_version upstream_status upstream_http_status http_status d
               'eligible_count tried_count untried_count remaining_loop_attempts remaining_seconds retry_after_seconds '
               'pool_saturated upstream_stall httpx_active httpx_total max_attempts attempts error_count '
               'startup_budget_seconds total_budget_seconds diagnostic_dropped_events source_line estimated_input_tokens '
-              'reserved_output_tokens input_limit context_limit output_limit age_seconds text_bytes image_count started_at_unix '
+              'reserved_output_tokens input_limit context_limit output_limit age_seconds text_bytes image_count image_limit started_at_unix '
               'circuit_generation consecutive_errors'.split())
 NUMBERS.update(('http2_error_code', 'http2_stream_id', 'http2_last_stream_id', 'upstream_idle_seconds',
                 'seconds_since_headers', 'threshold_seconds'))

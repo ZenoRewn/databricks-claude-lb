@@ -2044,7 +2044,7 @@ def trim_excess_images(payload, max_count: Optional[int] = None) -> int:
 
     if len(image_locations) <= max_count:
         return 0
-    require_image_trim_consent()
+    require_image_trim_consent(len(image_locations), max_count)
 
     # Remove oldest (earliest in traversal), keep the last max_count
     to_remove = image_locations[:-max_count]

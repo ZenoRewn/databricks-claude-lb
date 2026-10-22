@@ -87,3 +87,20 @@ class UpstreamErrorDetailTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ImageTrimRejectionEvidenceTests(unittest.TestCase):
+    def test_rejection_records_image_count_and_limit(self):
+        import request_telemetry as rt
+        record = rt.RequestRecord('responses', rt.RequestTelemetry())
+        token = rt.CURRENT.set(record)
+        try:
+            payload = {'input': [{'type': 'input_image', 'image_url': 'data:image/png;base64,AA'}] * 3}
+            with self.assertRaises(main.HTTPException) as ctx:
+                main.trim_excess_images(payload, max_count=2)
+            self.assertEqual(ctx.exception.status_code, 413)
+        finally:
+            rt.CURRENT.reset(token)
+        self.assertEqual((record.image_count, record.image_limit), (3, 2))
+        out = safe_diagnostics.safe_fields({'image_count': 3, 'image_limit': 2})
+        self.assertEqual(out['image_limit'], 2)
