@@ -8,8 +8,10 @@ Only a message's first valid output_item.added establishes its downstream ID.
 """
 
 from dataclasses import dataclass
+import hashlib
 import json
 import math
+import os
 import re
 
 
@@ -31,6 +33,7 @@ _TERMINAL_EVENTS = frozenset({
 })
 _LINE_ENDING = re.compile(rb"\r\n|\r|\n")
 _BOM = b"\xef\xbb\xbf"
+_DIGEST_BYTES = 16
 
 
 class IdentityNormalizationError(Exception):
@@ -121,14 +124,17 @@ class _Frame:
 class ResponsesItemIdentity:
     """Bounded per-attempt message ID mappings; observe is serving-neutral.
 
-    aliases counts distinct retained IDs, including canonical IDs. Item types
-    and IDs contribute UTF-8 bytes to mapping_bytes; Python object overhead is
-    not covered. Counters/peaks survive close(), while current mappings do not.
+    aliases counts distinct observed IDs, including canonical IDs. GHCP can
+    issue a fresh ID on every delta, so aliases are retained as fixed-size
+    keyed digests rather than raw strings: retained bytes grow with the delta
+    count, not with upstream ID length. Canonical IDs (which are written back
+    downstream) and item types are kept raw. mapping_bytes counts digest,
+    canonical-ID and type bytes; Python object overhead is not covered. Counters/peaks survive close(), while current mappings do not.
     The caller accounts rewritten frame bytes in its retained-buffer budget;
     max_frame_bytes also prevents growth beyond its per-event policy.
     """
 
-    def __init__(self, mode="stabilize", *, max_items=4096, max_aliases=16384,
+    def __init__(self, mode="stabilize", *, max_items=4096, max_aliases=131072,
                  max_id_bytes=8192, max_mapping_bytes=2 * 1024 * 1024,
                  max_frame_bytes=8 * 1024 * 1024):
         if mode not in ("off", "observe", "stabilize"):
@@ -144,6 +150,8 @@ class ResponsesItemIdentity:
         self.max_frame_bytes = max_frame_bytes
         self._bindings = {}
         self._aliases = {}
+        # Per-attempt key: digests are never comparable across attempts/logs.
+        self._digest_key = os.urandom(16)
         self._first_frame = True
         self._stopped = False
         self._mapped_items = 0
@@ -219,17 +227,24 @@ class ResponsesItemIdentity:
         self._mapping_bytes += amount
         self._peak_mapping_bytes = max(self._peak_mapping_bytes, self._mapping_bytes)
 
+    def _key(self, ident):
+        return hashlib.blake2b(ident.encode("utf-8", "surrogatepass"), digest_size=_DIGEST_BYTES,
+                               key=self._digest_key).digest()
+
+    def _lookup(self, ident):
+        return self._aliases.get(self._key(ident)) if isinstance(ident, str) else None
+
     def _alias(self, ident, index):
-        existing = self._aliases.get(ident)
+        key = self._key(ident)
+        existing = self._aliases.get(key)
         if existing is not None:
             if existing != index:
                 self._fail()
             return
-        size = len(ident.encode("utf-8"))
-        if size > self.max_id_bytes or len(self._aliases) >= self.max_aliases:
+        if len(ident.encode("utf-8", "surrogatepass")) > self.max_id_bytes or len(self._aliases) >= self.max_aliases:
             self._fail("identity_mapping_limit")
-        self._reserve_strings(size)
-        self._aliases[ident] = index
+        self._reserve_strings(_DIGEST_BYTES)
+        self._aliases[key] = index
         self._alias_count += 1
 
     def _binding(self, index, ident):
@@ -239,7 +254,7 @@ class ResponsesItemIdentity:
                 self._fail()
             self._unsupported("invalid_identity")
             return None
-        other_index = self._aliases.get(ident)
+        other_index = self._lookup(ident)
         if other_index is not None and other_index != index:
             self._fail()
         binding = self._bindings.get(index)
@@ -270,7 +285,7 @@ class ResponsesItemIdentity:
             if binding is not None and binding.kind == "message" and ident != binding.canonical:
                 return True
             if isinstance(ident, str):
-                alias_index = self._aliases.get(ident)
+                alias_index = self._lookup(ident)
                 if alias_index is not None:
                     known = self._bindings[alias_index]
                     if known.kind == "message" and ident != known.canonical:
@@ -345,7 +360,7 @@ class ResponsesItemIdentity:
         if len(self._bindings) >= self.max_items:
             self._fail("identity_mapping_limit")
         self._alias(item["id"], index)
-        self._reserve_strings(len(item["type"].encode("utf-8")))
+        self._reserve_strings(len(item["type"].encode("utf-8")) + len(item["id"].encode("utf-8", "surrogatepass")))
         self._bindings[index] = _Binding(item["type"], item["id"])
         self._tracked_items += 1
         self._mapped_items += item["type"] == "message"
@@ -404,7 +419,7 @@ class ResponsesItemIdentity:
             binding = self._bindings[index]
             if not isinstance(item, dict) or item.get("type") != binding.kind or not self._id(item.get("id")):
                 self._fail()
-            existing = self._aliases.get(item["id"])
+            existing = self._lookup(item["id"])
             if existing is not None and existing != index:
                 self._fail()
         changed = False

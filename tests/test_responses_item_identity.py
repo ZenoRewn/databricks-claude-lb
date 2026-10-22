@@ -313,7 +313,7 @@ def test_invalid_json_without_rewrite_keeps_previous_wire_contract():
     ({"max_items": 1}, added(), added(index=1, ident="B")),
     ({"max_aliases": 1}, added(), reference()),
     ({"max_id_bytes": 2}, added(), reference("汉")),
-    ({"max_mapping_bytes": 9}, added(), reference("BCD")),
+    ({"max_mapping_bytes": 30}, added(), reference("BCD")),
     ({"max_frame_bytes": 130}, added(ident="A" * 100), reference("B")),
 ])
 def test_mapping_and_rebuilt_frame_limits_fail_without_eviction(kwargs, first, next_frame):
@@ -374,3 +374,41 @@ def test_off_is_noop_even_for_conflicts():
     for wire in [added(), added(), reference()]:
         assert normalizer.transform(wire) is wire
     assert normalizer.summary()["mapped_items"] == 0
+
+
+def test_per_delta_id_drift_on_long_stream_completes_with_one_message_id():
+    # 2026-10-21 production: GHCP sent a fresh item_id on every delta, so a
+    # ~5000-delta answer exhausted the 2 MiB mapping budget with 416-byte IDs.
+    normalizer = ResponsesItemIdentity()
+    normalizer.transform(added(ident="A" * 400))
+    seen = set()
+    for n in range(20000):
+        out = normalizer.transform(reference(f"{n:0400d}"))
+        seen.add(payload(out)["item_id"])
+    done = normalizer.transform(frame({"type": "response.output_item.done", "output_index": 0,
+                                       "item": {"type": "message", "id": "Z" * 400}}))
+    final = normalizer.transform(terminal([{"type": "message", "id": "Y" * 400}]))
+    assert seen == {"A" * 400}
+    assert payload(done)["item"]["id"] == "A" * 400
+    assert payload(final)["response"]["output"][0]["id"] == "A" * 400
+    summary = normalizer.summary()
+    assert summary["failure_reason"] is None
+    assert summary["aliases"] == 20003
+    # Retained mapping no longer scales with upstream ID length.
+    assert summary["mapping_bytes"] == 20003 * 16 + 400 + len("message")
+
+
+def test_digest_aliases_still_detect_cross_index_reuse_after_long_drift():
+    normalizer = ResponsesItemIdentity()
+    normalizer.transform(added())
+    normalizer.transform(added(index=1, ident="M2"))
+    for n in range(1000):
+        normalizer.transform(reference(f"drift-{n}"))
+    assert_failure(normalizer, reference("drift-7", index=1))
+
+
+def test_alias_keys_are_not_the_raw_upstream_ids():
+    normalizer = ResponsesItemIdentity()
+    normalizer.transform(added())
+    normalizer.transform(reference("secret-upstream-id"))
+    assert all(not isinstance(key, str) for key in normalizer._aliases)
