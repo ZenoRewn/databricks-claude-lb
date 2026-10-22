@@ -11,7 +11,7 @@ import yaml
 
 from .engine import new_record,TERMINAL
 from .kube import KubeAPI
-from .model import APP_FILES,SCHEMA,encoded,digest,validate_plan,public_snapshot,default_target_settings,target_pod_spec,source_annotations,verify_target_template
+from .model import APP_FILES,SCHEMA,ENV_SCHEMA,encoded,digest,validate_plan,public_snapshot,default_target_settings,target_pod_spec,source_annotations,verify_target_template
 from .snapshot import capture
 
 
@@ -27,7 +27,7 @@ def plan_release(api,profile,output,source_root):
         raise ValueError('Target image is already deployed; no maintenance needed')
     discovered=sorted(snapshot['services'])
     if 'services' in profile and sorted(profile['services'])!=discovered:raise ValueError('Configured services differ from discovery')
-    profile['services']=discovered;profile['schema_version']=SCHEMA;profile['snapshot_sha256']=digest(snapshot)
+    profile['services']=discovered;profile['schema_version']=ENV_SCHEMA if profile.get('target_env') else SCHEMA;profile['snapshot_sha256']=digest(snapshot)
     profile.setdefault('target_settings',default_target_settings())
     if not profile.get('lab'):
         import hashlib
@@ -41,12 +41,13 @@ def plan_release(api,profile,output,source_root):
     deployment=snapshot['deployment']
     operations=[{'op':'test','path':'/metadata/uid','value':deployment['metadata']['uid']},
                 {'op':'test','path':'/metadata/resourceVersion','value':deployment['metadata']['resourceVersion']},
+                {'op':'test','path':'/spec/template','value':deployment['spec']['template']},
                 {'op':'replace','path':'/spec/template/spec','value':target_pod_spec(deployment,profile)},
                 {'op':'add','path':'/spec/template/metadata/annotations','value':source_annotations(deployment,profile['source_revision'])}]
     preview=api.request('PATCH','deployment',profile['namespace'],profile['deployment'],operations,query={'dryRun':'All'},patch=True)
     verify_target_template(preview,target_pod_spec(deployment,profile),source_annotations(deployment,profile['source_revision']))
     from .snapshot import protected_spec
-    if protected_spec(preview,profile['container'])!=protected_spec(deployment,profile['container']):
+    if protected_spec(preview,profile['container'])!=protected_spec(deployment,profile['container'],profile):
         raise ValueError('Server dry-run changed protected fields')
     output=Path(output);output.mkdir(mode=0o700,parents=True,exist_ok=False)
     private_write(output/'snapshot.json',encoded(snapshot))
@@ -55,6 +56,7 @@ def plan_release(api,profile,output,source_root):
         'target_image':profile['image'],'source_revision':profile['source_revision'],
         'target_source_annotation':profile['source_revision'],
         'target_settings':profile['target_settings'],'server_dry_run_verified':True,
+        **({'target_env':profile['target_env']} if profile.get('target_env') else {}),
         'services':discovered,'maintenance_seconds':profile['maintenance_seconds'],
         'legacy_bootstrap':profile['legacy_bootstrap'],'public_urls':profile['public_urls'],
         'maximum_probe_output_tokens':sum(p['max_tokens'] for p in profile['business_probes']),

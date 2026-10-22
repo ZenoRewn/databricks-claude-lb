@@ -6,6 +6,11 @@ import re
 from urllib.parse import urlsplit
 
 SCHEMA='lb-release-plan-v1'
+ENV_SCHEMA='lb-release-plan-v2'
+IDENTITY_MODE='COPILOT_RESPONSES_ITEM_ID_MODE'
+IDENTITY_MODELS='COPILOT_RESPONSES_ITEM_ID_MODELS'
+ENV_KEYS=(IDENTITY_MODE,IDENTITY_MODELS)
+MODEL_NAME=re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}')
 CONTROL='lb.zeno.ink/release'
 EPOCH='lb.zeno.ink/release-epoch'
 RECOVER='lb.zeno.ink/recovery-only'
@@ -18,11 +23,57 @@ SHA=re.compile(r'[a-f0-9]{40}')
 DIGEST=re.compile(r'[^\s@]+@sha256:[a-f0-9]{64}')
 APP_FILES=('main.py','build_metadata.py','chat_adapter.py','claude_model_identity.py','model_capabilities.py','effort_compat.py','request_telemetry.py','safe_diagnostics.py','request_timing.py','request_budget.py','admission.py',
            'gateway_lifecycle.py','upstream_body.py','usage_store.py','otel_setup.py','dashboard.html',
-           'response_semantics.py','cleanup_observability.py','copilot_pricing.py','release_probe.py','key_policy.py','provider_credentials.py')
+           'response_semantics.py','responses_item_identity.py','cleanup_observability.py','copilot_pricing.py','release_probe.py','key_policy.py','provider_credentials.py')
 
 
 def encoded(value):return json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
 def digest(value):return hashlib.sha256(encoded(value)).hexdigest()
+
+
+def environment_overrides(plan):
+    """Only reviewed, literal identity settings; never arbitrary env/commands."""
+    values=plan.get('target_env',{})
+    if not isinstance(values,dict) or set(values)-set(ENV_KEYS):
+        raise ValueError('Only fixed Responses identity environment overrides are supported')
+    if any(not isinstance(value,str) for value in values.values()):
+        raise ValueError('Identity environment overrides must be literal strings')
+    if IDENTITY_MODE in values and values[IDENTITY_MODE] not in ('off','observe','stabilize'):
+        raise ValueError('Invalid Responses identity mode')
+    if IDENTITY_MODELS in values:
+        models=values[IDENTITY_MODELS].split(',') if values[IDENTITY_MODELS] else []
+        if (len(values[IDENTITY_MODELS])>16384 or len(models)>128 or len(set(models))!=len(models)
+                or any(not MODEL_NAME.fullmatch(model) for model in models)):
+            raise ValueError('Identity models must be unique exact names in a bounded CSV')
+    return values
+
+
+def apply_environment_overrides(container,plan):
+    """Mutate only a caller-owned copy, preserving all unrelated env entries."""
+    overrides=environment_overrides(plan)
+    if not overrides:return
+    env=container.get('env')
+    if env is None:env=[]
+    if not isinstance(env,list) or any(not isinstance(entry,dict) for entry in env):
+        raise ValueError('Invalid original container environment')
+    seen=set();result=[]
+    for entry in env:
+        name=entry.get('name')
+        if name in overrides:
+            if name in seen:raise ValueError('Duplicate targeted environment variable')
+            seen.add(name);result.append({'name':name,'value':overrides[name]})
+        else:result.append(copy.deepcopy(entry))
+    result.extend({'name':name,'value':overrides[name]} for name in ENV_KEYS if name in overrides and name not in seen)
+    container['env']=result
+
+
+def verify_pod_environment(pod,expected_container):
+    containers=pod.get('spec',{}).get('containers',[])
+    if len(containers)!=1 or containers[0].get('name')!=expected_container.get('name'):
+        raise ValueError('environment_container_identity_changed')
+    for key in ('env','envFrom'):
+        if ((key in containers[0])!=(key in expected_container)
+                or containers[0].get(key)!=expected_container.get(key)):
+            raise ValueError('pod_environment_does_not_match_reviewed_image')
 
 
 def default_target_settings():
@@ -37,6 +88,7 @@ def target_pod_spec(current,plan):
     pod=copy.deepcopy(current['spec']['template']['spec'])
     settings=plan.get('target_settings',default_target_settings())
     pod['containers'][0]['image']=plan['image']
+    apply_environment_overrides(pod['containers'][0],plan)
     for key in ('livenessProbe','readinessProbe','startupProbe','lifecycle'):pod['containers'][0][key]=copy.deepcopy(settings[key])
     pod['terminationGracePeriodSeconds']=settings['terminationGracePeriodSeconds']
     return pod
@@ -58,8 +110,13 @@ def verify_target_template(deployment,pod_spec,annotations):
 
 
 def validate_plan(plan):
-    if plan.get('schema_version')!=SCHEMA:
+    overrides=environment_overrides(plan)
+    if plan.get('schema_version') not in (SCHEMA,ENV_SCHEMA):
         raise ValueError('Unsupported release plan schema')
+    if overrides and plan.get('schema_version')!=ENV_SCHEMA:
+        raise ValueError('Environment overrides require release plan v2')
+    if plan.get('schema_version')==ENV_SCHEMA and not overrides:
+        raise ValueError('Release plan v2 requires fixed environment overrides')
     if plan.get('lab') and not plan.get('namespace','').startswith('lb-lab'):
         raise ValueError('Lab mode is restricted to explicitly isolated lb-lab namespaces')
     if 'target_settings' not in plan and not plan.get('lab'):

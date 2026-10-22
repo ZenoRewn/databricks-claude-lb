@@ -501,6 +501,29 @@ OAuth 凭据用于交换短期 session token，后者的有效期以上游 `expi
 
 Copilot 实时费用采用 GHCP token 价格表及适用上下文档位；未知价格保留未知。套餐额度、折扣和历史计费模式请核对 GitHub 账单，不从 LB 计数推算剩余额度。完整口径见 [计费说明](COPILOT_PRICING.md)。
 
+### 原生 Responses 流式 message ID 兼容
+
+用于同一 message 在 added/delta/done/完成快照之间更换 ID 的兼容问题。默认关闭；不会按正文去重，两条同文消息仍会保留。配置是服务进程的环境变量，启动时读取：
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `COPILOT_RESPONSES_ITEM_ID_MODE` | `off` | `off` 原样转发；`observe` 只观察；`stabilize` 稳定已绑定 message 的 ID |
+| `COPILOT_RESPONSES_ITEM_ID_MODELS` | 空 | 逗号分隔的精确模型 allowlist；空值不启用任何模型，不支持通配符或前缀匹配 |
+| `COPILOT_STRIP_INPUT_ITEM_IDS` | `true` | 既有的下一轮 input ID 剥离；`stabilize` 要求它保持启用，否则拒绝启动 |
+
+例如，已授权的隔离观察环境可以设置：
+
+```text
+COPILOT_RESPONSES_ITEM_ID_MODE=observe
+COPILOT_RESPONSES_ITEM_ID_MODELS=gpt-6-astra
+```
+
+模型名必须与该请求使用的模型精确一致；设置 allowlist 不会新增模型资格、路由或账户授权。未知 mode 会拒绝启动。`observe` 返回原始 bytes，观察失败只停止该 attempt 的观察；`stabilize` 才会改写受支持的字段。每个请求固定模式和模型命中结果，每个上游 attempt 使用独立映射。
+
+首批仅覆盖 GHCP 原生 Responses 流式 message，包含文本、refusal 和 annotation 的已知引用。reasoning/tool ID、Foundry、Messages、Chat、非流式 Responses 和 buffered adapter 保持既有行为。后续轮次须继续使用 input ID 剥离；依赖 item retrieval 或 `item_reference` 的客户端需要独立验收。字段白名单、资源限额、错误与观测边界见 [流式协议](STREAM_PROTOCOL.md#opt-in-copilot-responses-message-identity)。
+
+禁用时将 mode 改回 `off`，按既有受控流程重启/滚动；这不是热开关，也不影响已开始请求的固定模式。恢复原样转发可能再次出现原有重复显示，不能删除账本或重发推理来“回退”。上线与真实桌面多轮/工具验收仍需另外完成；本配置示例不表示已启用或已通过生产验收。
+
 ## 用量存储
 
 JSON 适合单实例本地使用，目录需对运行用户可写。Docker 镜像以 UID 1000 运行，绑定挂载时核对目录权限。JSON 不支持多个 writer 共享同一文件。

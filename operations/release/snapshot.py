@@ -1,7 +1,7 @@
 """Read-only discovery; keep complete selectors and private rollback material."""
 import copy
 
-from .model import CONTROL,GATE,DIGEST,digest
+from .model import CONTROL,GATE,DIGEST,digest,apply_environment_overrides
 
 
 def matches(selector,labels):
@@ -86,7 +86,7 @@ def capture(api,namespace,deployment,container):
             'original_replicas':d['spec'].get('replicas',1)}
 
 
-def protected_spec(deployment,container):
+def protected_spec(deployment,container,plan=None):
     spec=copy.deepcopy(deployment['spec'])
     spec.pop('replicas',None)
     pod=spec['template']['spec'];pod.pop('terminationGracePeriodSeconds',None)
@@ -95,5 +95,6 @@ def protected_spec(deployment,container):
     if not annotations:spec['template'].get('metadata',{}).pop('annotations',None)
     for c in pod['containers']:
         if c['name']==container:
+            if plan is not None:apply_environment_overrides(c,plan)
             for key in ('image','livenessProbe','readinessProbe','startupProbe','lifecycle'):c.pop(key,None)
     return spec

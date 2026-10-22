@@ -4,7 +4,9 @@ Author: Zeno Ren
 
 ## 当前运行版本
 
-最近一次已记录的 AKS 发布：**2026-10-19，应用源码 `53615db`**，维护 78.5 秒，11 个阶段一次通过，三协议业务探针、账本与清理验收通过。修的是一条**已经在生产发生过**的策略绕过：Anthropic Messages 面的候选判断经 `LoadBalancer.select_endpoint()`，而那里只看 config 声明的 `models` 列表 —— Copilot 账户声明 `models: []`（= all），谓词恒真，于是启用态 / `allowed_models` / per-model 账户选择 / 已发现能力**四层全部被跳过**。实测一次强制走 copilot 的 `/v1/messages` 落在运维从未启用的 `zenoren-msft` 上，而 `/admin/model-routing/{model}` 同时报它被排除。**首次提交在 preflight 以 403 中止**（`maintenance_started_at: null`，生产未被触碰）：2026-10-18 的凭据迁移给 Deployment 加了 `envFrom` 却漏了把该 Secret 名加进 `Role/lb-release-controller-target` —— 正是下面那条注意事项说过的情况，且 `plan` 阶段不会暴露它。补上后换新 release ID 重跑一次通过。本次运行文件清单未变（仍 24 个），**控制器不需要重建**。见 [本次回执](reviews/2026-10-19-messages-account-policy/REPORT.md)。
+最近一次已记录的 AKS 发布：**2026-10-22，应用源码 `51507c5`**，修 GHCP 逐 delta 换 message ID 导致长回答因 `identity_mapping_limit` 中断，仅换镜像、控制器无需重建，见 [本次回执](reviews/2026-10-22-ghcp-identity-digest/REPORT.md)。
+
+再上一次：**2026-10-19，应用源码 `53615db`**，维护 78.5 秒，11 个阶段一次通过，三协议业务探针、账本与清理验收通过。修的是一条**已经在生产发生过**的策略绕过：Anthropic Messages 面的候选判断经 `LoadBalancer.select_endpoint()`，而那里只看 config 声明的 `models` 列表 —— Copilot 账户声明 `models: []`（= all），谓词恒真，于是启用态 / `allowed_models` / per-model 账户选择 / 已发现能力**四层全部被跳过**。实测一次强制走 copilot 的 `/v1/messages` 落在运维从未启用的 `zenoren-msft` 上，而 `/admin/model-routing/{model}` 同时报它被排除。**首次提交在 preflight 以 403 中止**（`maintenance_started_at: null`，生产未被触碰）：2026-10-18 的凭据迁移给 Deployment 加了 `envFrom` 却漏了把该 Secret 名加进 `Role/lb-release-controller-target` —— 正是下面那条注意事项说过的情况，且 `plan` 阶段不会暴露它。补上后换新 release ID 重跑一次通过。本次运行文件清单未变（仍 24 个），**控制器不需要重建**。见 [本次回执](reviews/2026-10-19-messages-account-policy/REPORT.md)。
 
 上一次（2026-10-17，`0a9f830`）是 Claude 三路径上线与 Foundry 凭据首次投产，当时**控制器必须重建**（新增运行文件让 `APP_FILES` 从 21 变 22，而 `validate_plan` 在控制器进程内断言文件集合完全相等）—— 新增运行时文件时记得这条，见 [上一次回执](reviews/2026-10-17-three-paths-release/REPORT.md)。
 

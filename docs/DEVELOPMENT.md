@@ -12,6 +12,7 @@ Python 3.11+，推荐 3.12；前端为独立 HTML、CSS 和原生 JavaScript，�
 | 准入、请求预算、生命周期 | `admission.py`、`request_budget.py`、`gateway_lifecycle.py` |
 | 请求与发送观测、安全诊断、阶段时间 | `request_telemetry.py`、`safe_diagnostics.py`、`request_timing.py` |
 | 协议结果、Chat 适配、上游错误体 | `response_semantics.py`、`chat_adapter.py`、`upstream_body.py` |
+| GHCP 原生 Responses 流式 message ID 兼容 | `responses_item_identity.py` |
 | 参数与渠道能力 | `effort_compat.py`、`model_capabilities.py` |
 | 运行时策略存储（渠道 allowlist、模型偏好、模型→账户、账户启用与 allowed_models） | `key_policy.py` |
 | 上游凭据封装、存储与 device flow | `provider_credentials.py` |
@@ -117,9 +118,9 @@ reason 读者。守卫是对所有 (账户 × 模型 × api_type × 存储状态
 插在中间会让 `main.CopilotEndpoint('name', '', 1, [], {...})` 这类位置参数构造静默错位，
 测试里就有这种写法。
 
-**新增运行时文件要同步三处并重建发布控制器镜像**：`build_metadata.RUNTIME_FILES`、
-`operations/release/model.APP_FILES`、`Dockerfile` 的 COPY。`model.py` 对 `APP_FILES`
-做**严格集合相等**校验，少一个多一个都会让发布红。只在 `main.py` 里加代码则不涉及这三处 ——
+**新增运行时文件要同步清单并重建发布控制器镜像**：`build_metadata.RUNTIME_FILES`、
+`operations/release/model.APP_FILES`、`Dockerfile` 的 COPY 及 CI 的 runtime asset 检查。`model.py` 对 `APP_FILES`
+做**严格集合相等**校验，少一个多一个都会让发布红。只在 `main.py` 里加代码则不涉及这些清单 ——
 这也是面板会话逻辑没有拆成独立模块的原因。
 
 **秘密不要进 `LB_SETTINGS`。** `/config/effective` 把整个 settings 字典返回给任何持有效
