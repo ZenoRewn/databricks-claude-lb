@@ -14,7 +14,7 @@ import claude_model_identity as claude_identity
 import model_capabilities
 from model_capabilities import observe_route_budget, estimate_payload, payload_has_image
 from build_metadata import runtime_identity, release_identity
-from safe_diagnostics import (DiagnosticFilter, DiagnosticStreamHandler, DiagnosticTextFormatter, default_handler,
+from safe_diagnostics import (safe_identifier, DiagnosticFilter, DiagnosticStreamHandler, DiagnosticTextFormatter, default_handler,
                               render_metrics as diagnostic_metrics, EVENT_NAMES, transport_details)
 from request_timing import (observed_phase, begin_stream as timing_begin_stream,
                             end_stream as timing_end_stream, observe_event,
@@ -1294,6 +1294,8 @@ class _SSEObservation:
         self.terminal = None
         self.finish_reason = None
         self.neutral = False
+        self.upstream_error_code = None
+        self.upstream_error_type = None
         self.usage = {}
         self.usage_recorded = False
         self.input_tokens = self.output_tokens = self.cache_read_tokens = self.cache_creation_tokens = 0
@@ -1398,6 +1400,9 @@ class _SSEObservation:
             self.terminal = "error"
             error = data.get("error", data)
         if isinstance(error, dict):
+            # Bounded identifiers only; never the upstream message text.
+            self.upstream_error_code = safe_identifier(str(error.get('code') or ''), 'unknown') if error.get('code') is not None else None
+            self.upstream_error_type = safe_identifier(str(error.get('type') or ''), 'unknown') if error.get('type') is not None else None
             reason = failure_reason({'error':error})
             note_failure(reason, origin='upstream_stream')
             # Narrow request-local evidence only. Auth/quota/overload/server and
@@ -3079,6 +3084,23 @@ class RequestAttempt:
     route_circuit: object = field(default=None, repr=False)
     route_generation: int = 0
     route_probe: bool = False
+    payload_fingerprint: Optional[str] = None
+
+
+_PAYLOAD_FINGERPRINT_KEY = secrets.token_bytes(16)
+
+
+def payload_fingerprint(payload):
+    """Process-keyed 12-hex digest of a request body; never comparable across
+    restarts or reversible to content. None when there is no body to compare."""
+    if not isinstance(payload, dict):
+        return None
+    try:
+        raw = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False,
+                         default=str).encode('utf-8', 'surrogatepass')
+    except (TypeError, ValueError):
+        return None
+    return hashlib.blake2b(raw, digest_size=6, key=_PAYLOAD_FINGERPRINT_KEY).hexdigest()
 
 
 @dataclass(eq=False)
@@ -3100,6 +3122,10 @@ class CircuitRecovery:
     trial_started_at: Optional[float] = None
     contributing: set = field(default_factory=set)
     contributing_attempts: int = 0
+    # Payload fingerprints already counted in the current streak. A client that
+    # resends one deterministic-failure conversation (2026-10-22: five identical
+    # 4,428,689-byte bodies) is one health signal, not five.
+    failed_payloads: set = field(default_factory=set)
 
     def note_failure(self, request_id):
         self.contributing_attempts += 1
@@ -3110,6 +3136,17 @@ class CircuitRecovery:
     def reset_streak(self):
         self.contributing.clear()
         self.contributing_attempts = 0
+        self.failed_payloads.clear()
+
+    def is_repeat_payload(self, fingerprint):
+        """True when this payload already counted in the current streak."""
+        if fingerprint is None:
+            return False
+        if fingerprint in self.failed_payloads:
+            return True
+        if len(self.failed_payloads) < 64:
+            self.failed_payloads.add(fingerprint)
+        return False
 
 
 @dataclass(eq=False)
@@ -3455,7 +3492,8 @@ class LoadBalancer:
             self._note_trial_started(endpoint)
             self._circuit_event(endpoint, 'OPEN', 'trial_admitted',
                                 self._admission_evidence(endpoint, payload))
-        lease = RequestAttempt(endpoint, endpoint.circuit_generation, probe)
+        lease = RequestAttempt(endpoint, endpoint.circuit_generation, probe,
+                               payload_fingerprint=payload_fingerprint(payload))
         if route is not None:
             lease.route_circuit = route
             lease.route_generation = route.circuit_generation
@@ -3473,7 +3511,8 @@ class LoadBalancer:
         return lease
 
     async def on_request_end(self, endpoint: WorkspaceEndpoint, success: bool,
-                             is_client_error: bool = False, *, lease=None, cancelled=False, failure_scope='endpoint'):
+                             is_client_error: bool = False, *, lease=None, cancelled=False, failure_scope='endpoint',
+                             payload_scoped=False):
         lease = lease if lease is not None else self.current_attempt(endpoint)
         if lease.endpoint is not endpoint:
             raise RuntimeError("Request attempt endpoint mismatch")
@@ -3499,13 +3538,15 @@ class LoadBalancer:
             route.active_requests = max(0, route.active_requests - 1)
             self._settle_circuit(route, lease.route_generation, lease.route_probe, success,
                                  failed and failure_scope == 'model_api',
-                                 cancelled=cancelled, request_id=request_id)
+                                 cancelled=cancelled, request_id=request_id,
+                                 fingerprint=lease.payload_fingerprint if payload_scoped else None)
         self._settle_circuit(endpoint, lease.generation, lease.probe, success,
                              failed and (failure_scope != 'model_api' or route is None),
-                             cancelled=cancelled, request_id=request_id)
+                             cancelled=cancelled, request_id=request_id,
+                             fingerprint=lease.payload_fingerprint if payload_scoped else None)
 
     def _settle_circuit(self, endpoint, generation, probe, success, failed,
-                        *, cancelled=False, request_id=None):
+                        *, cancelled=False, request_id=None, fingerprint=None):
         # Old in-flight results still count in telemetry, never override a newer trip/trial.
         if generation != endpoint.circuit_generation:
             return
@@ -3543,6 +3584,12 @@ class LoadBalancer:
             endpoint.consecutive_errors = 0
             record.reset_streak()
         elif failed:
+            if record.is_repeat_payload(fingerprint):
+                # Telemetry (total_errors) already counted it; health does not.
+                log_event({'kind': 'lb_repeat_payload_failure', 'endpoint_alias': endpoint.name,
+                           'payload_fingerprint': fingerprint, 'repeat_payload_failure': True,
+                           'consecutive_errors': endpoint.consecutive_errors})
+                return
             record.note_failure(request_id)
             endpoint.consecutive_errors += 1
             if endpoint.consecutive_errors >= self.circuit_breaker_threshold:
@@ -6859,13 +6906,15 @@ class CopilotProxy:
                 md["request_id"] = request_id
             return md
 
-        async def end_current_request(success: bool, is_client_error: bool = False, *, cancelled=False, failure_scope="endpoint"):
+        async def end_current_request(success: bool, is_client_error: bool = False, *, cancelled=False, failure_scope="endpoint",
+                                      payload_scoped=False):
             if not request_lease["active"]:
                 return
             current = request_lease["endpoint"]
             await proxy_self.load_balancer.on_request_end(
                 current, success=success, is_client_error=is_client_error,
-                lease=request_lease["lease"], cancelled=cancelled, failure_scope=failure_scope
+                lease=request_lease["lease"], cancelled=cancelled, failure_scope=failure_scope,
+                payload_scoped=payload_scoped
             )
             request_lease["active"] = False
 
@@ -7279,7 +7328,11 @@ class CopilotProxy:
                                     # Settle before offering the terminal: clients may stop
                                     # immediately at it. Later transport close is cleanup,
                                     # not a second generation outcome or replay trigger.
-                                    await end_current_request(success=success, is_client_error=observation.neutral or observation.outcome == "incomplete")
+                                    # Upstream accepted the stream and then declared this
+                                    # generation failed: the body may be the cause, so a
+                                    # resend of the same body is not a new health signal.
+                                    await end_current_request(success=success, is_client_error=observation.neutral or observation.outcome == "incomplete",
+                                                              payload_scoped=observation.terminal == "failed")
                                     if success:
                                         # 恢复只有走到合法终端事件才算成功：上游接受了改写
                                         # 后的请求但流仍被截断，不能记 succeeded（否则
@@ -7287,7 +7340,11 @@ class CopilotProxy:
                                         recovery.note_succeeded()
                                     _record_observation_usage(proxy_self,current_endpoint,model,start_time,observation)
                                     _emit_stream_end(observation.terminal, logging.INFO if success else logging.WARNING,
-                                                     terminal_valid=True, account_neutral=observation.neutral)
+                                                     terminal_valid=True, account_neutral=observation.neutral,
+                                                     upstream_error_code=observation.upstream_error_code,
+                                                     upstream_error_type=observation.upstream_error_type,
+                                                     payload_fingerprint=request_lease["lease"].payload_fingerprint
+                                                     if request_lease.get("lease") is not None else None)
                                     note_content_offered(observation.frame_has_content)
                                     yield wire_output.frame(output_frame)
                                     return
