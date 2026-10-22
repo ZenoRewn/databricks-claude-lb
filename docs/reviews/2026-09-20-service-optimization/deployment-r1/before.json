@@ -1,0 +1,55 @@
+{
+  "author": "Zeno Ren",
+  "captured_at_utc": "2026-09-20T09:31:31.142615+00:00",
+  "uid": "48206cf1-f9b8-4c1e-8d94-5e972d5f4177",
+  "generation": 58,
+  "replicas": 1,
+  "strategy": {
+    "rollingUpdate": {
+      "maxSurge": 0,
+      "maxUnavailable": 1
+    },
+    "type": "RollingUpdate"
+  },
+  "terminationGracePeriodSeconds": 30,
+  "container": {
+    "name": "claude-lb",
+    "image": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:00437a6ed3e9fc96a552e04d8a69eca8aeafa3a434080a9846edb4be89495596",
+    "resources": {
+      "limits": {
+        "cpu": "500m",
+        "memory": "2Gi"
+      },
+      "requests": {
+        "cpu": "100m",
+        "memory": "256Mi"
+      }
+    },
+    "livenessProbe": {
+      "failureThreshold": 3,
+      "httpGet": {
+        "path": "/health",
+        "port": 8000,
+        "scheme": "HTTP"
+      },
+      "initialDelaySeconds": 10,
+      "periodSeconds": 30,
+      "successThreshold": 1,
+      "timeoutSeconds": 1
+    },
+    "readinessProbe": {
+      "failureThreshold": 3,
+      "httpGet": {
+        "path": "/health",
+        "port": 8000,
+        "scheme": "HTTP"
+      },
+      "initialDelaySeconds": 5,
+      "periodSeconds": 10,
+      "successThreshold": 1,
+      "timeoutSeconds": 1
+    },
+    "startupProbe": null,
+    "lifecycle": null
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "author": "Zeno Ren",
+  "source": "Original local gate-and-drain script after null-endpoints fix; never a complete release controller",
+  "original_sha256": "777a3dca1fef24086b8d4c0aed02f9ed057080c5705ed5ae313dcd2f32d7ca78",
+  "redactions": [
+    "context",
+    "namespace",
+    "old pod name",
+    "release ID"
+  ],
+  "purpose": "Offline mocked control-flow reproduction only; not a deployable script"
+}

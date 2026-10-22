@@ -1,0 +1,27 @@
+[
+  {
+    "link": "https://github.com/ZenoRewn/databricks-claude-lb/actions/runs/35502639718/job/106057030625",
+    "name": "pytest (3.12)",
+    "state": "SUCCESS"
+  },
+  {
+    "link": "https://github.com/ZenoRewn/databricks-claude-lb/actions/runs/35502639718/job/106057030608",
+    "name": "pytest (3.11)",
+    "state": "SUCCESS"
+  },
+  {
+    "link": "https://github.com/ZenoRewn/databricks-claude-lb/actions/runs/35502639718/job/106057030658",
+    "name": "pytest (3.13)",
+    "state": "SUCCESS"
+  },
+  {
+    "link": "https://github.com/ZenoRewn/databricks-claude-lb/actions/runs/35502639718/job/106057030632",
+    "name": "docker-smoke",
+    "state": "SUCCESS"
+  },
+  {
+    "link": "https://github.com/ZenoRewn/databricks-claude-lb/actions/runs/35502639718/job/106057030547",
+    "name": "mysql-usage",
+    "state": "SUCCESS"
+  }
+]

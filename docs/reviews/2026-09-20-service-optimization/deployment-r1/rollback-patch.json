@@ -1,0 +1,57 @@
+[
+  {
+    "op": "test",
+    "path": "/spec/template/spec/containers/0/image",
+    "value": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:fad410525c7d8468ab5a81f2d0a5fff23939320a593b4ff42c50b4ddb8e3f5f8"
+  },
+  {
+    "op": "replace",
+    "path": "/spec/template/spec/containers/0/image",
+    "value": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:00437a6ed3e9fc96a552e04d8a69eca8aeafa3a434080a9846edb4be89495596"
+  },
+  {
+    "op": "replace",
+    "path": "/spec/template/spec/terminationGracePeriodSeconds",
+    "value": 30
+  },
+  {
+    "op": "replace",
+    "path": "/spec/template/spec/containers/0/readinessProbe",
+    "value": {
+      "failureThreshold": 3,
+      "httpGet": {
+        "path": "/health",
+        "port": 8000,
+        "scheme": "HTTP"
+      },
+      "initialDelaySeconds": 5,
+      "periodSeconds": 10,
+      "successThreshold": 1,
+      "timeoutSeconds": 1
+    }
+  },
+  {
+    "op": "replace",
+    "path": "/spec/template/spec/containers/0/livenessProbe",
+    "value": {
+      "failureThreshold": 3,
+      "httpGet": {
+        "path": "/health",
+        "port": 8000,
+        "scheme": "HTTP"
+      },
+      "initialDelaySeconds": 10,
+      "periodSeconds": 30,
+      "successThreshold": 1,
+      "timeoutSeconds": 1
+    }
+  },
+  {
+    "op": "remove",
+    "path": "/spec/template/spec/containers/0/startupProbe"
+  },
+  {
+    "op": "remove",
+    "path": "/spec/template/spec/containers/0/lifecycle"
+  }
+]
