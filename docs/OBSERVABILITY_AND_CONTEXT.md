@@ -120,7 +120,7 @@ DNS/TCP/TLS/pool 没有可靠独立 hook，保持 null。阶段可能嵌套，�
 
 `LB_CONTEXT_LARGE_INPUT_BYTES=262144` 可配置规模提示阈值，范围 1 B～64 MiB；这不是模型上下文容量或服务拒绝阈值。
 
-图片数量超过预算时，`LB_IMAGE_TRIM_POLICY=reject` 默认保留原输入并返回 413。调用方可用 `X-LB-Image-Trim: allow` 明确允许旧图替换，或由管理员设置全局 allow；响应头显示实际策略和 `images.trimmed`。strict 模式仍在任何裁剪前返回 400。允许裁剪后必须重跑图片准入，不绕过像素/内存限制。
+图片数量超过预算时，`LB_IMAGE_TRIM_POLICY=reject` 默认保留原输入并返回 413。调用方可用 `X-LB-Image-Trim: allow` 明确允许旧图替换，或由管理员设置全局 allow；响应头显示实际策略和 `images.trimmed`。strict 模式仍在任何裁剪前返回 400。允许裁剪后必须重跑图片准入，不绕过像素/内存限制。拒绝时 `lb_request_end` 带 `image_count`（本请求图片数）与 `image_limit`（`IMG_MAX_COUNT`），可直接看出超了多少。Codex 用户可在 provider 配置加 `http_headers = { "X-LB-Image-Trim" = "allow" }` 只为自己开启裁剪（2026-10-22 实测响应头回显 `x-lb-image-trim: allow`）。
 
 既有图片压缩仍运行；实际压缩会报告 `images.compressed`。这里的保留指不擅自删除图片，不承诺无损重编码。Databricks 4 MiB 出站限制和 LB 64 MiB 原始字节限制不等于模型 token 窗口，不能把某次 2 MB 失败样本变成全局模型阈值。
 

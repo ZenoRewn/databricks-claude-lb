@@ -166,6 +166,14 @@ call sites — there a 401 really does mean the endpoint's own credential
 (`dapi` token / `api-key`) is bad, so counting it is correct. The kill switch
 `COPILOT_STATEFUL_401_NEUTRAL=false` restores the legacy behaviour.
 
+### Repeated identical bodies after `response.failed` count once
+
+2026-10-22: one Codex conversation (five identical 4,428,689-byte bodies) received `response.created → response.failed` five times; each resend counted as an endpoint failure and tripped `zenoren-icloud` account-wide, so an unrelated `claude-opus-5-5` request then got 503. The same model served 4–13 MB image requests that day, so size alone was not the cause.
+
+Within one error streak, a **payload-scoped** failure whose body fingerprint was already counted does not increment `consecutive_errors` (`total_errors` still does). Payload-scoped means upstream accepted the stream and then emitted `response.failed`; auth, transport, 5xx and every other failure keep the old counting even for an identical body. Fingerprints are a 12-hex BLAKE2b keyed by a per-process random key, held only in memory (at most 64 per streak) and cleared on success. Different bodies failing still trip the breaker. The repeat is logged as `lb_repeat_payload_failure`.
+
+This does not make the poisoned request succeed and does not replay it. `response.failed` now logs `upstream_error_code` / `upstream_error_type` (safe identifiers only, never the message) plus `payload_fingerprint`, so the next occurrence can be classified from evidence before any request-level reclassification is considered.
+
 ## Compatibility and metrics
 
 Existing endpoint `total_errors`, `total_requests`, `active_requests`,

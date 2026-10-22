@@ -28,13 +28,16 @@ IDENTIFIERS.update(('event_time', 'startup_budget_source', 'inconclusive_kind', 
 # REFUSED_STREAM leaves httpcore's reuse gate untouched, so without this the
 # 2026-10-17 cascade is indistinguishable from "upstream is flaky".
 IDENTIFIERS.add('retirement_reason')
+# Upstream response.failed detail (code/type only, never message) and a keyed
+# body fingerprint so «same conversation failing again» is visible in logs.
+IDENTIFIERS.update(('upstream_error_code', 'upstream_error_type', 'payload_fingerprint'))
 NUMBERS = set('schema_version upstream_status upstream_http_status http_status duration_seconds attempt admissions '
               'upstream_sends input_bytes body_size_bytes input_tokens output_tokens cache_read_tokens chunks '
               'chunks_yielded decoded_bytes decoded_deliveries frames pending_eof_bytes peak_pending_bytes '
               'eligible_count tried_count untried_count remaining_loop_attempts remaining_seconds retry_after_seconds '
               'pool_saturated upstream_stall httpx_active httpx_total max_attempts attempts error_count '
               'startup_budget_seconds total_budget_seconds diagnostic_dropped_events source_line estimated_input_tokens '
-              'reserved_output_tokens input_limit context_limit output_limit age_seconds text_bytes image_count started_at_unix '
+              'reserved_output_tokens input_limit context_limit output_limit age_seconds text_bytes image_count image_limit started_at_unix '
               'circuit_generation consecutive_errors'.split())
 NUMBERS.update(('http2_error_code', 'http2_stream_id', 'http2_last_stream_id', 'upstream_idle_seconds',
                 'seconds_since_headers', 'threshold_seconds'))
@@ -46,7 +49,7 @@ NUMBERS.update(('event_monotonic', 'preference_window_remaining', 'contributing_
 NUMBERS.update(('h2_stream_id_watermark', 'retired_connections'))
 BOOLEANS = set('retry retry_allowed retryable retry_after_present downstream_headers_sent downstream_content_started '
                'downstream_body_completed draining_at_finish saw_completion terminal_seen terminal_valid has_image '
-               'sent_any_chunk account_neutral read_timeout probe_ok httpx_pool_observed_full upstream_headers_received '
+               'sent_any_chunk account_neutral repeat_payload_failure read_timeout probe_ok httpx_pool_observed_full upstream_headers_received '
                'stream upstream_stream estimate_complete enforcement_allowed '
                'small_input_evidence admitted_payload_small admitted_estimate_complete'.split())
 LIST_FIELDS = {'parameters', 'dropped_parameters', 'rejected_parameters', 'transformed_parameters', 'removed_params', 'unknown_components'}

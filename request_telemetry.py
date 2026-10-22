@@ -172,6 +172,8 @@ class RequestRecord:
     rejected_parameters: set = field(default_factory=set)
     transformed_parameters: set = field(default_factory=set)
     image_trim_policy: str = field(default_factory=lambda: IMAGE_TRIM_POLICY)
+    image_count: int | None = None
+    image_limit: int | None = None
     failure_reason: str = 'none'
     error_origin: str = 'none'
     requested_model: str = 'unknown'
@@ -312,10 +314,12 @@ def reject_parameters(fields, *, status=400, code='parameter_not_forwarded'):
         'parameters': sorted(values), 'lb_request_id': current_request_id(), 'retryable': False}})
 
 
-def require_image_trim_consent():
+def require_image_trim_consent(image_count=None, image_limit=None):
     record = CURRENT.get()
     if record is None:
         return  # Explicit standalone transformation helper, outside serving.
+    # Recorded before any rejection so a 413 says how far over the limit it was.
+    record.image_count, record.image_limit = image_count, image_limit
     if record.parameter_policy == 'strict':
         reject_parameters({'images.trimmed'})
     if record.image_trim_policy != 'allow':
@@ -580,6 +584,7 @@ class RequestTelemetryMiddleware:
                     'parameter_policy':record.parameter_policy,'dropped_parameters':sorted(record.dropped_parameters),
                     'rejected_parameters':sorted(record.rejected_parameters),
                     'transformed_parameters':sorted(record.transformed_parameters), 'image_trim_policy':record.image_trim_policy,
+                    'image_count':record.image_count,'image_limit':record.image_limit,
                     'outcome':outcome,'http_status':status,'generation_outcome':record.generation,
                     'failure_reason':record.failure_reason,
                     'error_origin':record.error_origin,
