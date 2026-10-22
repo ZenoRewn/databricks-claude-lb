@@ -1,0 +1,93 @@
+[
+  {
+    "op": "test",
+    "path": "/metadata/uid",
+    "value": "48206cf1-f9b8-4c1e-8d94-5e972d5f4177"
+  },
+  {
+    "op": "test",
+    "path": "/metadata/generation",
+    "value": 58
+  },
+  {
+    "op": "test",
+    "path": "/spec/template/spec/containers/0/name",
+    "value": "claude-lb"
+  },
+  {
+    "op": "test",
+    "path": "/spec/template/spec/containers/0/image",
+    "value": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:00437a6ed3e9fc96a552e04d8a69eca8aeafa3a434080a9846edb4be89495596"
+  },
+  {
+    "op": "add",
+    "path": "/spec/template/spec/containers/0/livenessProbe",
+    "value": {
+      "httpGet": {
+        "path": "/health/live",
+        "port": 8000,
+        "scheme": "HTTP"
+      },
+      "periodSeconds": 30,
+      "timeoutSeconds": 2,
+      "failureThreshold": 3,
+      "successThreshold": 1
+    }
+  },
+  {
+    "op": "add",
+    "path": "/spec/template/spec/containers/0/readinessProbe",
+    "value": {
+      "httpGet": {
+        "path": "/health/accepting",
+        "port": 8000,
+        "scheme": "HTTP"
+      },
+      "periodSeconds": 5,
+      "timeoutSeconds": 2,
+      "failureThreshold": 1,
+      "successThreshold": 1
+    }
+  },
+  {
+    "op": "add",
+    "path": "/spec/template/spec/containers/0/startupProbe",
+    "value": {
+      "httpGet": {
+        "path": "/health/live",
+        "port": 8000,
+        "scheme": "HTTP"
+      },
+      "periodSeconds": 2,
+      "timeoutSeconds": 2,
+      "failureThreshold": 30,
+      "successThreshold": 1
+    }
+  },
+  {
+    "op": "add",
+    "path": "/spec/template/spec/containers/0/lifecycle",
+    "value": {
+      "preStop": {
+        "exec": {
+          "command": [
+            "python",
+            "/app/gateway_lifecycle.py",
+            "--wait-seconds",
+            "45"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "op": "replace",
+    "path": "/spec/template/spec/terminationGracePeriodSeconds",
+    "value": 120
+  },
+  {
+    "op": "replace",
+    "path": "/spec/template/spec/containers/0/image",
+    "value": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:fad410525c7d8468ab5a81f2d0a5fff23939320a593b4ff42c50b4ddb8e3f5f8"
+  }
+]

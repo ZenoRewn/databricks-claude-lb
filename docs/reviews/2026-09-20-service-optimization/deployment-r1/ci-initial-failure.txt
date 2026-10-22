@@ -1,0 +1,34 @@
+pytest (3.11)	Run pytest	﻿2026-09-20T09:31:03.9144160Z ##[group]Run python -m pytest tests/ -q --tb=short
+pytest (3.11)	Run pytest	2026-09-20T09:31:03.9144643Z ^[[36;1mpython -m pytest tests/ -q --tb=short^[[0m
+pytest (3.11)	Run pytest	2026-09-20T09:31:03.9168577Z shell: /usr/bin/bash -e {0}
+pytest (3.11)	Run pytest	2026-09-20T09:31:03.9168932Z env:
+pytest (3.11)	Run pytest	2026-09-20T09:31:03.9169331Z   pythonLocation: /opt/hostedtoolcache/Python/3.11.16/x64
+pytest (3.11)	Run pytest	2026-09-20T09:31:03.9169842Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.11.16/x64/lib/pkgconfig
+pytest (3.11)	Run pytest	2026-09-20T09:31:03.9170349Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.16/x64
+pytest (3.11)	Run pytest	2026-09-20T09:31:03.9170808Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.16/x64
+pytest (3.11)	Run pytest	2026-09-20T09:31:03.9171285Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.16/x64
+pytest (3.11)	Run pytest	2026-09-20T09:31:03.9171734Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.11.16/x64/lib
+pytest (3.11)	Run pytest	2026-09-20T09:31:03.9172135Z ##[endgroup]
+pytest (3.11)	Run pytest	2026-09-20T09:31:05.9999126Z ssssss................................................................................................................ [ 20%]
+pytest (3.11)	Run pytest	2026-09-20T09:31:07.3070149Z ............................................................ [ 31%]
+pytest (3.11)	Run pytest	2026-09-20T09:31:08.6798780Z ............................................... [ 39%]
+pytest (3.11)	Run pytest	2026-09-20T09:31:09.7891583Z ...................................s......................................................... [ 55%]
+pytest (3.11)	Run pytest	2026-09-20T09:31:42.6600427Z ............................................................................................................................................................ [ 82%]
+pytest (3.11)	Run pytest	2026-09-20T09:31:46.7665499Z ........................... [ 87%]
+pytest (3.11)	Run pytest	2026-09-20T09:31:50.8494618Z ............................... [ 92%]
+pytest (3.11)	Run pytest	2026-09-20T09:31:51.2363327Z ..........................................                          [100%]
+pytest (3.11)	Run pytest	2026-09-20T09:31:51.2364630Z =================================== FAILURES ===================================
+pytest (3.11)	Run pytest	2026-09-20T09:31:51.2365612Z _ AdmissionTests.test_cancel_before_and_after_slot_offer_does_not_leak (offered=True) _
+pytest (3.11)	Run pytest	2026-09-20T09:31:51.2366856Z tests/test_admission.py:33: in test_cancel_before_and_after_slot_offer_does_not_leak
+pytest (3.11)	Run pytest	2026-09-20T09:31:51.2367881Z     with self.assertRaises(asyncio.CancelledError):await pending
+pytest (3.11)	Run pytest	2026-09-20T09:31:51.2369242Z E   AssertionError: CancelledError not raised
+pytest (3.11)	Run pytest	2026-09-20T09:31:51.2369928Z =============================== warnings summary ===============================
+pytest (3.11)	Run pytest	2026-09-20T09:31:51.2370685Z tests/test_api_surface_contract.py:25
+pytest (3.11)	Run pytest	2026-09-20T09:31:51.2372333Z   /home/runner/work/databricks-claude-lb/databricks-claude-lb/tests/test_api_surface_contract.py:25: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+pytest (3.11)	Run pytest	2026-09-20T09:31:51.2374460Z     from starlette.testclient import TestClient
+pytest (3.11)	Run pytest	2026-09-20T09:31:51.2374957Z 
+pytest (3.11)	Run pytest	2026-09-20T09:31:51.2375392Z -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+pytest (3.11)	Run pytest	2026-09-20T09:31:51.2376233Z =========================== short test summary info ============================
+pytest (3.11)	Run pytest	2026-09-20T09:31:51.2377846Z SUBFAILED(offered=True) tests/test_admission.py::AdmissionTests::test_cancel_before_and_after_slot_offer_does_not_leak - AssertionError: CancelledError not raised
+pytest (3.11)	Run pytest	2026-09-20T09:31:51.2379582Z 1 failed, 567 passed, 7 skipped, 1 warning, 480 subtests passed in 46.69s
+pytest (3.11)	Run pytest	2026-09-20T09:31:51.4231943Z ##[error]Process completed with exit code 1.

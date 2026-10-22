@@ -1,0 +1,11 @@
+{
+  "author": "Zeno Ren",
+  "scope": "Local incident review only; no AKS reads or writes, no GitHub push",
+  "offline_historical_scenarios_reproduced": 3,
+  "external_commands_executed_in_reproduction": 0,
+  "relative_links_valid": true,
+  "markdown_rendered_with": "bundled marked, local browser accessibility inspection",
+  "rendered_tables": 3,
+  "new_release_controller_implemented": false,
+  "reviewed_at_utc": "2026-09-20T10:25:25.180624+00:00"
+}

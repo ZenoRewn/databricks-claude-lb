@@ -1,0 +1,13 @@
+{
+  "schema_created": true,
+  "engine": "InnoDB",
+  "ledger_rows": 0,
+  "daily_before": [
+    289,
+    "96912"
+  ],
+  "daily_after": [
+    289,
+    "96912"
+  ]
+}

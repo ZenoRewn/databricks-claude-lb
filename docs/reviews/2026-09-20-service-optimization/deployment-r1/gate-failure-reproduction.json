@@ -1,0 +1,25 @@
+{
+  "author": "Zeno Ren",
+  "offline_only": true,
+  "historical_failure_modes_reproduced": true,
+  "cases": {
+    "legacy_null_endpoints": {
+      "gated": false,
+      "restore_calls": 1,
+      "external_commands_executed": 0,
+      "error_type": "TypeError"
+    },
+    "successful_drain_without_next_owner": {
+      "gated": true,
+      "restore_calls": 0,
+      "external_commands_executed": 0,
+      "error_type": null
+    },
+    "observation_error_and_journal_write_failure": {
+      "gated": true,
+      "restore_calls": 0,
+      "external_commands_executed": 0,
+      "error_type": "OSError"
+    }
+  }
+}

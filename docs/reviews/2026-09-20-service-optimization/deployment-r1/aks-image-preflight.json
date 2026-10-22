@@ -1,0 +1,7 @@
+{
+  "source_hashes_match": true,
+  "platform": "x86_64",
+  "image_id": "zenoseaacr.azurecr.io/databricks-claude-lb@sha256:fad410525c7d8468ab5a81f2d0a5fff23939320a593b4ff42c50b4ddb8e3f5f8",
+  "exit_code": 0,
+  "node": "aks-nodepool1-16702958-vmss000001"
+}

@@ -1,0 +1,11 @@
+[
+  {
+    "op": "test",
+    "path": "/spec/selector/lb-release-gate",
+    "value": "maintenance-20260920"
+  },
+  {
+    "op": "remove",
+    "path": "/spec/selector/lb-release-gate"
+  }
+]

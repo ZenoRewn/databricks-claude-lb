@@ -1,0 +1,32 @@
+import json,subprocess,pathlib,time,datetime
+k=['kubectl','--context','EXAMPLE_CONTEXT','-n','EXAMPLE_NAMESPACE'];root=pathlib.Path('docs/reviews/2026-09-20-service-optimization/deployment-r1')
+def now():return datetime.datetime.now(datetime.timezone.utc).isoformat()
+def run(*args,**kwargs):return subprocess.check_output(k+list(args),text=True,**kwargs)
+original=json.loads(pathlib.Path('/tmp/lb-release-20260920/service-baseline.json').read_text())['spec']['selector']; assert original=={'app':'claude-lb'}
+pod='EXAMPLE_OLD_POD'
+metrics_script='import urllib.request,json; s=urllib.request.urlopen("http://127.0.0.1:8000/metrics",timeout=5).read().decode(); print(json.dumps({l.split()[0]:float(l.split()[1]) for l in s.splitlines() if not l.startswith("#") and "_endpoint_active_requests{" in l}))'
+gate='EXAMPLE_RELEASE_ID'; forward=[{'op':'test','path':'/spec/selector','value':original},{'op':'add','path':'/spec/selector/lb-release-gate','value':gate}]
+restore=[{'op':'test','path':'/spec/selector/lb-release-gate','value':gate},{'op':'remove','path':'/spec/selector/lb-release-gate'}]
+root.joinpath('service-restore-patch.json').write_text(json.dumps(restore,indent=2)+'\n')
+records=[];success=False
+try:
+ run('patch','service','claude-lb','--type=json','-p',json.dumps(forward)); records.append({'timestamp':now(),'event':'service_gated'});print(json.dumps(records[-1]),flush=True)
+ time.sleep(8)
+ slices=json.loads(run('get','endpointslice','-l','kubernetes.io/service-name=claude-lb','-o','json'))
+ ready=[e for s in slices['items'] for e in (s.get('endpoints') or []) if e.get('conditions',{}).get('ready')]
+ assert not ready, 'Endpoint removal not observed'
+ zero_samples=0
+ for _ in range(120):
+  values=json.loads(run('exec',pod,'-c','claude-lb','--','python','-c',metrics_script)); assert len(values)==14
+  active=sum(values.values()); records.append({'timestamp':now(),'active_upstream_requests':active}); print(json.dumps(records[-1]),flush=True)
+  zero_samples=zero_samples+1 if active==0 else 0
+  if zero_samples>=3:break
+  time.sleep(5)
+ else:raise RuntimeError('Existing requests still active; restore traffic without replacing pod')
+ time.sleep(33)
+ values=json.loads(run('exec',pod,'-c','claude-lb','--','python','-c',metrics_script));assert sum(values.values())==0
+ records.append({'timestamp':now(),'event':'drained_and_periodic_flush_wait_complete','active_upstream_requests':0});print(json.dumps(records[-1]),flush=True);success=True
+finally:
+ root.joinpath('maintenance-drain.json').write_text(json.dumps(records,indent=2)+'\n')
+ if not success:
+  run('patch','service','claude-lb','--type=json','-p',json.dumps(restore));print('Restored old service after drain failure',flush=True)
