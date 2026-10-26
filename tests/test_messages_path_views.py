@@ -14,7 +14,13 @@ import main
 
 class MessagesPathViewTests(unittest.TestCase):
     def setUp(self):
+        # The `*_resolution` pair is the real store's primary implementation —
+        # it answers «what rule applies» together with «which layer it came
+        # from» — so the double mirrors that and derives the plain readers.
         store = type('Store', (), {
+            'model_preference_resolution': lambda _s, m: ((), None),
+            'model_accounts_resolution': lambda _s, m: ((), None),
+            'model_routing_baseline': lambda _s, m: {},
             'model_preference': lambda _s, m: (),
             'model_accounts': lambda _s, m: (),
             'model_accounts_exclusion_reason': lambda *a: None,

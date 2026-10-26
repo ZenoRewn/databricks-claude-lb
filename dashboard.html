@@ -379,7 +379,7 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
           </section>
 
           <section class="subtab-panel" id="sub-routing" role="tabpanel" aria-labelledby="sub-nav-routing">
-            <div class="routing-heading"><div><h3>路由规则</h3><p class="scope-note">先看已保存规则，再调整单个模型。未配置的模型沿用默认行为。</p></div><button class="btn btn-primary" id="addRule" type="button">＋ 添加规则</button></div>
+            <div class="routing-heading"><div><h3>路由规则</h3><p class="scope-note">先看生效规则（含 ConfigMap 的 model_routing 基线），再调整单个模型。未配置的模型沿用默认行为。</p></div><button class="btn btn-primary" id="addRule" type="button">＋ 添加规则</button></div>
             <p class="feedback" id="routingFeedback" role="status" hidden></p>
             <div id="routeAddPanel" class="rule-editor" hidden>
               <h4>添加模型规则</h4><div class="rule-row">
@@ -389,8 +389,8 @@ input { color: var(--text-primary); background: var(--background-primary); paddi
               </div><p class="scope-note">手输名称不证明上游支持；继续后读取该模型的配置候选。</p>
             </div>
             <div class="routing-layout" id="routingLayout">
-              <div class="routing-catalogue"><label class="field routing-search" for="routeSearch">已保存规则<input id="routeSearch" type="search" placeholder="搜索模型…" maxlength="190"></label><div id="routingContent"></div></div>
-              <div class="info-box route-editor-empty" id="routeEditorEmpty"><strong>选择一个模型查看规则</strong><span>在左侧查看已保存规则，或添加模型规则。配置诊断会在选中后读取。</span></div>
+              <div class="routing-catalogue"><label class="field routing-search" for="routeSearch">生效规则<input id="routeSearch" type="search" placeholder="搜索模型…" maxlength="190"></label><div id="routingContent"></div></div>
+              <div class="info-box route-editor-empty" id="routeEditorEmpty"><strong>选择一个模型查看规则</strong><span>在左侧查看生效规则，或添加模型规则。配置诊断会在选中后读取。</span></div>
               <section class="route-detail rule-editor" id="routeEditor" aria-label="单模型规则编辑" hidden>
                 <div class="route-detail-heading"><div><h4 id="routeEditorModel"></h4><p class="scope-note" id="routeEditorState" role="status"></p></div><div class="rule-row"><button class="btn" id="retryRoutingDiagnostic" type="button">重读诊断</button><button class="btn" id="closeRouteEditor" type="button">关闭编辑</button></div></div>
                 <fieldset id="routeEditorFields" class="route-fields" disabled>
@@ -1448,6 +1448,12 @@ function renderPolicyState(policy) {
     '模型优先序 ' + escapeHtml(String(policy.model_preferences ?? 0)),
     '账户限定 ' + escapeHtml(String(policy.model_accounts ?? 0)),
     '账户策略 ' + escapeHtml(String(policy.accounts ?? 0)),
+    // 这几个数只统计存储里的行。config 的 model_routing 基线同样在生效，不单
+    // 独报会让「模型优先序 0」与页面上两条正在生效的规则直接矛盾 —— 而存储
+    // 不可达时，基线恰好是唯一还在生效的那一层。
+    ...(policy.baseline_models ? ['配置基线 ' + escapeHtml(String(policy.baseline_models))] : []),
+    // 「正在回落基线但还在重试」与「已经放弃」是两种状态，只有一种会自己好。
+    ...(policy.recovering ? ['正在重试加载'] : []),
   ].join(' · ');
   box.innerHTML = '<div class="info-box" data-state="' + wording[0] + '">' + escapeHtml(wording[1])
     + ' <span class="scope-note">后端 ' + escapeHtml(policy.backend || 'unknown')
@@ -2087,8 +2093,13 @@ function renderRulePreview(sync = true) {
   document.getElementById('restoreRoute').disabled = !routeDiagnosticReady() || keysInFlight;
   const explicit = state.draft.providerChoice ? ['copilot', 'azure_openai'].includes(state.draft.providerChoice)
     : (base.providers || []).some(provider => ['copilot', 'azure_openai'].includes(provider));
+  // 「清除会撤销放行」只有在回落后不再指向 Copilot/Azure 时才成立 —— config 基线
+  // 自己就可能开着这两个入口。判断用服务端算好的 reset_to，不在这里重算。
+  const resetKeepsOpen = !!(base.reset_to && base.reset_to.opens_claude_on_openai_entry_points);
   document.getElementById('routeEntryImpact').textContent = /claude/i.test(state.model)
-    ? (explicit ? 'Responses / Chat：显式渠道偏好将开放此 Claude 模型。恢复整条默认会撤销放行。'
+    ? (explicit ? 'Responses / Chat：显式渠道偏好将开放此 Claude 模型。'
+        + (resetKeepsOpen ? '清除本模型规则后回落到配置基线，该基线仍指向 Copilot / Azure，入口保持开放。'
+          : '恢复整条默认会撤销放行。')
       : 'Responses / Chat：未显式放行此 Claude 模型；仅改账户范围不会开放入口。')
     : '此规则调整 OpenAI 风格入口的渠道顺序与 GHCP 账户范围。';
   renderOrderPreview(); renderMessagesPaths();
@@ -2223,11 +2234,15 @@ function renderRoutingList() {
     + '" aria-pressed="' + (p.model === currentRuleModel()) + '"><strong>' + escapeHtml(p.model)
     + '</strong><span>' + (p.inherited ? '继承默认' : escapeHtml((p.effective_openai_order || []).map(providerLabel).join(' → ')))
     + '</span><small>' + (p.inherited ? '未设模型规则' : p.copilot_candidates_empty ? 'GHCP 无配置候选'
-      : 'GHCP 配置候选 ' + (p.effective_copilot_accounts || []).length + ' 个') + '</small></button>';
+      : 'GHCP 配置候选 ' + (p.effective_copilot_accounts || []).length + ' 个')
+    // 来自 ConfigMap 的 model_routing 基线，而不是存储里的行。不标出来会让人
+    // 以为它已经保存过，而它在策略库不可达时恰好是唯一还在生效的那一层。
+    + (!p.inherited && (p.providers_source === 'config' || p.copilot_accounts_source === 'config')
+      ? ' · 配置基线' : '') + '</small></button>';
   const rows = preferences.filter(p => p.model.toLowerCase().includes(query));
   const defaults = (routingLast.known_models || []).filter(m => !configured.has(m) && m.toLowerCase().includes(query));
   document.getElementById('routingContent').innerHTML = '<div id="routingTable">'
-    + (rows.map(item).join('') || '<p class="route-list-note">' + (query ? '没有匹配的已保存规则。' : '尚无自定义规则。') + '</p>')
+    + (rows.map(item).join('') || '<p class="route-list-note">' + (query ? '没有匹配的生效规则。' : '尚无自定义规则。') + '</p>')
     + (defaults.length ? '<details class="route-defaults"' + (!preferences.length || query ? ' open' : '')
       + '><summary>目录模型 · 继承默认（' + defaults.length + '）</summary>'
       + defaults.map(model => item({model, inherited: true})).join('') + '</details>' : '')
@@ -2250,8 +2265,17 @@ function renderRouteReview(type) {
   const base = state.baseline;
   const resetting = type === 'reset';
   const payload = resetting ? {copilot_accounts: [], providers: []} : routePayload();
-  const order = resetting ? defaultOrder : routeOrder();
-  const messagesOrder = resetting ? defaultMessagesOrder : routeMessagesOrder();
+  // 清除后回到的是**基线**，不一定是默认顺序 —— ConfigMap 的 model_routing 可以
+  // 为这个模型声明一条，那时「恢复默认」落在那条上。`reset_to` 由服务端用与生效
+  // 顺序同一个折算算出；在这里重算一遍就会在有基线的模型上给出另一个答案，而这
+  // 张表正是运维下决心前唯一逐行核对的地方。
+  const resetTo = (base && base.reset_to) || {};
+  const resetToBaseline = resetTo.source === 'config';
+  const order = resetting ? (resetTo.effective_openai_order || defaultOrder) : routeOrder();
+  const messagesOrder = resetting ? (resetTo.effective_messages_order || defaultMessagesOrder)
+    : routeMessagesOrder();
+  const shownAccounts = resetting ? (resetTo.copilot_accounts || []) : payload.copilot_accounts;
+  const sourceTag = segment => base && base[segment] === 'config' ? '（配置基线）' : '';
   const claude = /claude/i.test(state.model);
   const opening = !resetting && claude && payload.providers?.some(provider => ['copilot', 'azure_openai'].includes(provider))
     && !(base.providers || []).some(provider => ['copilot', 'azure_openai'].includes(provider));
@@ -2262,26 +2286,42 @@ function renderRouteReview(type) {
   const accountsText = accounts => accounts.length ? accounts.join('、') : '全部符合条件账户';
   const node = document.getElementById('routeReview');
   node.hidden = false;
-  node.innerHTML = '<h4>' + (resetting ? '恢复整条规则默认' : '确认本模型变更') + '</h4><p class="scope-note">'
+  node.innerHTML = '<h4>' + (resetting ? (resetToBaseline ? '清除规则 · 回到配置基线' : '恢复整条规则默认')
+    : '确认本模型变更') + '</h4><p class="scope-note">'
     + escapeHtml(state.model) + ' · 不修改任何账户的全局启用状态</p><div class="table-scroll"><table><thead><tr><th>设置</th>'
-    + '<th>当前已保存</th><th>拟提交</th></tr></thead><tbody><tr><td>渠道顺序 · OpenAI 面</td><td>'
-    + escapeHtml((base.effective_openai_order || defaultOrder).map(providerLabel).join(' → ')) + '</td><td>'
-    + escapeHtml(order.map(providerLabel).join(' → ')) + (resetting ? '（默认）' : payload.providers ? '（显式）' : '（保持）')
+    // 「当前生效」而不是「当前已保存」：一条规则可以来自 config 基线而根本没有
+    // 存储记录，把它说成已保存会让人去找一行不存在的数据库行。
+    + '<th>当前生效</th><th>拟提交</th></tr></thead><tbody><tr><td>渠道顺序 · OpenAI 面</td><td>'
+    + escapeHtml((base.effective_openai_order || defaultOrder).map(providerLabel).join(' → '))
+    + sourceTag('providers_source') + '</td><td>'
+    + escapeHtml(order.map(providerLabel).join(' → '))
+    + (resetting ? (resetToBaseline ? '（配置基线）' : '（默认）') : payload.providers ? '（显式）' : '（保持）')
     // 两个面存的是同一份偏好，但生效顺序各自过滤 —— 只列一面会让另一面的改动
     // 在确认环节完全不可见，而这里正是运维唯一会逐行核对的地方。
     + '</td></tr><tr><td>渠道顺序 · Messages 面</td><td>'
-    + escapeHtml((base.effective_messages_order || defaultMessagesOrder).map(providerLabel).join(' → ')) + '</td><td>'
-    + escapeHtml(messagesOrder.map(providerLabel).join(' → ')) + (resetting ? '（默认）' : payload.providers ? '（显式）' : '（保持）')
+    + escapeHtml((base.effective_messages_order || defaultMessagesOrder).map(providerLabel).join(' → '))
+    + sourceTag('providers_source') + '</td><td>'
+    + escapeHtml(messagesOrder.map(providerLabel).join(' → '))
+    + (resetting ? (resetToBaseline ? '（配置基线）' : '（默认）') : payload.providers ? '（显式）' : '（保持）')
     + '</td></tr><tr><td>账户范围</td><td>' + escapeHtml(accountsText(base.copilot_accounts || []))
-    + '</td><td>' + escapeHtml(accountsText(payload.copilot_accounts)) + '</td></tr></tbody></table></div>'
-    + (resetting ? '<p class="route-warning">同时清除渠道偏好与账户限定。'
-      + (claude ? '该 Claude 模型的 Responses / Chat 入口将关闭。' : '这不是仅清除渠道偏好。') + '</p>' : '')
+    + sourceTag('copilot_accounts_source') + '</td><td>' + escapeHtml(accountsText(shownAccounts))
+    + '</td></tr></tbody></table></div>'
+    + (resetting ? '<p class="route-warning">'
+      + (resetToBaseline ? '清除本模型的已保存规则后回到配置基线（ConfigMap 的 model_routing），'
+        + '上表「拟提交」就是回落后的结果，不是空规则。'
+        : '同时清除渠道偏好与账户限定。')
+      // 基线自己可能仍指向 Copilot/Azure，那时这两个入口不会关闭 —— 由服务端
+      // 按回落后的 provider 判定，不在这里重算一遍。
+      + (claude && !resetTo.opens_claude_on_openai_entry_points
+        ? '该 Claude 模型的 Responses / Chat 入口将关闭。'
+        : claude ? '回落后的渠道仍指向 Copilot / Azure，Responses / Chat 入口保持开放。'
+        : resetToBaseline ? '' : '这不是仅清除渠道偏好。') + '</p>' : '')
     + (opening ? '<p class="route-warning">将显式开放此 Claude 模型的 Responses / Chat。Messages 面不受此影响，它的顺序见上一行。裸 claude-* 按 GHCP 分档参考价估算，与 ADB 的公开 API 参考计价不同。</p>' : '')
     + (zero ? '<p class="route-warning">GHCP 配置候选为 0；Foundry 的部署、密钥权限与可用性未在此验证。</p>' : '')
     + (risk ? '<label class="route-option"><input type="checkbox" id="routeRiskAck">我已了解上述影响</label>' : '')
     + '<div class="rule-row route-review-actions"><button class="btn" id="cancelRouteReview" type="button">返回编辑</button>'
     + '<button class="btn btn-primary" id="confirmRouteSave" type="button"' + (risk ? ' disabled' : '') + '>'
-    + (resetting ? '确认恢复整条默认' : '确认保存') + '</button></div>';
+    + (resetting ? (resetToBaseline ? '确认清除并回到基线' : '确认恢复整条默认') : '确认保存') + '</button></div>';
   document.getElementById('cancelRouteReview').addEventListener('click', cancelRouteReview);
   document.getElementById('confirmRouteSave').addEventListener('click', confirmRouteSave);
   if (risk) document.getElementById('routeRiskAck').addEventListener('change', event => {

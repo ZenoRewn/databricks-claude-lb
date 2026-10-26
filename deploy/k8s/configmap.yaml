@@ -137,3 +137,17 @@ data:
     #   database: YOUR_DATABASE
     #   pool_size: 5
     #   retention_days: 90
+    #
+    # per-model 路由**基线**。工作台写的规则存在策略库里，是叠在这一段之上的
+    # overlay；策略库不可达时（例如上面那个 MySQL 停机）生效的是这一段。
+    # 不写它的后果实测过：基线退化成硬编码的默认顺序，于是每次发布都像
+    # 「自定义路由策略被清空」，而规则其实一条没丢。形状与
+    # PUT /admin/model-routing/{model} 的请求体一致，面板上读到的可以原样抄。
+    #
+    # **写错会拒绝启动**（provider id / 段名拼错、同一模型两种拼法各写一条都只是
+    # 静默无效），所以改完先用校验 Pod 跑一遍 load_config —— 单副本 + maxSurge:0
+    # 下拒绝启动意味着停服到回滚。
+    # model_routing:
+    #   claude-opus-5-5:
+    #     providers: [copilot, databricks]
+    #     copilot_accounts: [zenoren-icloud]

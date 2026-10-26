@@ -141,8 +141,8 @@ reason 与 capability 一样是**时点**判断，不是能力认证。
 | 层 | overlay 不可用时的结果 | 回落到的基线 |
 |---|---|---|
 | 按密钥限渠道 | 允许全部渠道 | config 里配置了哪些 provider |
-| 模型 → provider 优先序 | 默认顺序 | Copilot 优先 → Azure fallback |
-| 模型 → GHCP 账户 | 本层不限定账户 | 全部启用账户 |
+| 模型 → provider 优先序 | 基线规则，没声明则默认顺序 | config 的 `model_routing[model].providers` |
+| 模型 → GHCP 账户 | 基线规则，没声明则不限定 | config 的 `model_routing[model].copilot_accounts` |
 | GHCP `allowed_models` | 本层不施加约束 | 端点的 `models` 列表 |
 | GHCP 账户启用态 | 保持 inert 或启用 | 端点的 `enabled` 声明 |
 
@@ -150,7 +150,39 @@ reason 与 capability 一样是**时点**判断，不是能力认证。
 
 理由是限制层不应把数据库故障放大成网关整体不可用，但同样不该把故障变成一次意料之外的扩权。两种状态都显式暴露：从未成功加载为 `unavailable`，加载过但刷新失败为 `stale`（继续执行最后一次成功读取的策略），在 `/stats` 与 Dashboard 可见，不静默。
 
-跨层的回归断言在 `tests/test_key_policy.py::DegradationFallsBackToTheConfigBaselineTests` —— 五层放在一个类里断言，任何一层改成真正的 fail-open 都会红。
+跨层的回归断言在 `tests/test_key_policy.py::DegradationFallsBackToTheConfigBaselineTests` —— 五层放在一个类里断言，任何一层改成真正的 fail-open 都会红；per-model 那两层的 config 基线在 `tests/test_routing_baseline.py`。
+
+#### per-model 规则写进 config：`model_routing`
+
+前两层的基线过去是**硬编码的默认顺序**，所以那一层的规则只有 overlay 一个落点。2026-10-26 的后果：`zeno-sea-mysql` 处于 Stopped，`reload()` 每次启动都 10s 超时，降级规则照约定回落基线 —— 而基线是常量，于是**每次发布都像「自定义路由策略被清空」**，手工重配一次，下次发布再丢一次。规则其实一条没丢（库启动后 `model_preferences` 原样在）。
+
+```yaml
+model_routing:
+  claude-opus-5-5:                    # 三种拼法任选其一，按模型身份匹配
+    providers: [copilot, databricks]  # 顺序即偏好；只重排不筛除
+    copilot_accounts: [acct-a]        # 省略 = 不限定
+  gpt-6-astra:
+    providers: [azure_openai]
+```
+
+形状与 `PUT /admin/model-routing/{model}` 的请求体一致，面板上读到的规则可以原样抄进 ConfigMap。三条边界：
+
+- **写错拒绝启动。** provider id 拼错、段名拼错、同一个模型两种拼法各写一条，都只是静默无效而没有任何症状可查，所以 `parse_routing_baseline` 在 `load_config` 里就拒绝（与 `${ENV}` 引用同一个判断）。代价同样是单副本下停服到回滚 —— 改完先用校验 Pod 跑一遍 `load_config`。
+- **`DELETE /admin/model-routing/{model}` 是「回到基线」，不是「回到默认顺序」。** 工作台的确认框按 `reset_to` 渲染回落后的实际结果，包括基线仍指向 Copilot/Azure 时 `claude-*` 的 Responses/Chat 入口**不会**关闭。
+- **基线也能给 `claude-*` 开 OpenAI 风格入口。** 与 overlay 里配同样的偏好等效 —— 那条 opt-in 现在可以写在 ConfigMap 里。
+
+工作台列表里这类规则带「配置基线」标记，`/admin/model-routing/{model}` 的 `providers_source` / `copilot_accounts_source` 给出同一件事的机器可读版本。
+
+#### 加载失败会重试，不必再滚一次 Pod
+
+策略存储过去是 load-once：`reload()` 只在启动时调一次，既没有重试也没有 admin 入口。数据库晚一分钟起来，进程就带着「回落基线」一直跑到下次发布 —— 而 `maxSurge:0/maxUnavailable:1` 的单副本意味着那次重滚本身是一次停服，为的是取回一份从未丢失的状态。
+
+现在加载失败后由 `recover_until_loaded()` 指数退避重试（有上限），任务挂在 lifespan 上。两个细节有意为之：
+
+- **停止条件是「完整加载成功过」而不是 `state == 'loaded'`。** overlay 不可达时一次成功写入会把 state 翻成 `loaded`，好让刚写的那条规则生效，但缓存此时只有那一条；照 state 停下来会把其余已存规则永久当成不存在。
+- **凭据库不加这个重试。** 端点固定在启动时构建，晚到的凭据不会变成端点，重试只会让 `/admin/credentials` 报出一批并没有在服务的记录。
+
+`status()`（即 `/stats` 的 `provider_policy`）里 `recovering` 与 `baseline_models` 一并暴露：「正在回落基线但还在重试」和「已经放弃」是两种状态，只有一种会自己好。
 
 <a id="dashboard-unlock-contract"></a>
 
@@ -326,6 +358,8 @@ device flow 的 `device_code` 只存在进程内并带 TTL，不落库、不进�
 ### 路由规则：模型 → Provider → GHCP 账户
 
 `PUT /admin/model-routing/{model}` 设置单个模型的规则。两段都可选：省略 `providers` 只改账户，省略 `copilot_accounts` 不动账户。**没有规则的模型维持原本行为。**
+
+这里写的是 overlay。同一条规则也可以写在 config 的 `model_routing` 段作为基线，形状相同 —— 策略库不可达时生效的是它，见[策略降级](#策略降级配置是基线存储是-overlay)。清除一条规则是回到基线，不是回到默认顺序。
 
 两段都在**任何写入之前**校验完。第三段打错一个账户名却让 provider 那半边已经生效，是最难排查的一种半应用。
 
