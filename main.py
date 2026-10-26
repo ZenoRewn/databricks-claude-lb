@@ -36,7 +36,8 @@ from gateway_lifecycle import sync_drain, DRAIN_MARKER_FILE
 from key_policy import (ALL_PROVIDERS, EXCLUSION_REASONS, PROVIDER_IDS, PROVIDER_LABELS,
                         KeyPolicyStore,
                         fingerprint as key_fingerprint, mask as key_mask,
-                        normalise_accounts, normalise_providers, ordered_providers)
+                        normalise_accounts, normalise_providers, ordered_providers,
+                        parse_routing_baseline)
 from provider_credentials import (CredentialKeyError, CredentialStore, DeviceFlowExpired,
                                   DeviceFlowRegistry)
 from response_semantics import assess_json, reported_usage, failure_reason, enrich_error, decode_json_response, invalid_stream_type, is_html as is_html_content_type
@@ -7878,10 +7879,26 @@ def resolve_credential(value, *, field: str) -> str:
     return expand_env_vars(value)
 
 
+# config 声明的 per-model 路由基线，由 load_config 解析、lifespan 构建
+# KeyPolicyStore 时注入。走全局而不是加到 load_config 的返回元组里：那个元组有
+# 仓外调用方（release_probe 按四元组解包），而这里与 `API_KEY_TO_TENANT` 是同一个
+# 模式 —— 配置的唯一解析点写入，运行时只读。
+MODEL_ROUTING_BASELINE: Dict[str, dict] = {}
+
+
 def load_config(config_path: str = "config.yaml") -> tuple:
     """返回 (ClaudeProxy, Optional[AzureOpenAIProxy], Optional[CopilotProxy], storage_config)"""
+    global MODEL_ROUTING_BASELINE
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
+
+    # 校验放在最前面：这一段写错（provider id 拼错、段名拼错、同一个模型两种
+    # 拼法各写一条）不会有任何症状，规则只是静默无效。与 `${ENV}` 引用同一个
+    # 判断 —— 拒绝启动是唯一运维能据以行动的版本。
+    MODEL_ROUTING_BASELINE = parse_routing_baseline(config.get("model_routing"))
+    if MODEL_ROUTING_BASELINE:
+        logger.info("[Routing] config baseline declares %d per-model rule(s): %s",
+                    len(MODEL_ROUTING_BASELINE), ", ".join(sorted(MODEL_ROUTING_BASELINE)))
 
     for ep_cfg in (config.get("github_copilot") or {}).get("endpoints", []):
         if "api_types" in ep_cfg:
@@ -8141,14 +8158,26 @@ async def lifespan(app: FastAPI):
     # 独立于账本的小连接池：授权策略不该因为用量账本不健康而不可用。
     # 加载失败不阻止启动 —— 此时不施加任何渠道限制，状态在 /stats 与
     # Dashboard 上显式暴露，而不是静默。
-    key_policy_store = KeyPolicyStore(storage_config)
+    key_policy_store = KeyPolicyStore(storage_config,
+                                      routing_baseline=MODEL_ROUTING_BASELINE)
     await key_policy_store.start()
     policy_state = key_policy_store.status()
-    logger.info("[Policy] provider allow-list store: backend=%s state=%s tenants=%d",
-                policy_state["backend"], policy_state["state"], policy_state["tenants"])
+    logger.info("[Policy] provider allow-list store: backend=%s state=%s tenants=%d "
+                "baseline_rules=%d",
+                policy_state["backend"], policy_state["state"], policy_state["tenants"],
+                policy_state["baseline_models"])
     if policy_state["state"] != "loaded":
-        logger.warning("[Policy] provider allow-lists are NOT being enforced (state=%s)",
-                       policy_state["state"])
+        logger.warning("[Policy] provider allow-lists are NOT being enforced (state=%s); "
+                       "per-model routing serves the config baseline (%d rule(s)) "
+                       "until the overlay loads",
+                       policy_state["state"], policy_state["baseline_models"])
+    # 加载失败后继续重试，而不是等下一次滚动。过去这个 store 只在启动时读一次：
+    # 2026-10-26 数据库停机时每次发布都把运维配过的规则「清掉」（实际是回落基线），
+    # 而库恢复后仍要再滚一次 Pod 才认。任务挂在 lifespan 上与其他后台循环同生命周期。
+    policy_recovery_task: Optional[asyncio.Task] = None
+    if not key_policy_store.fully_loaded:
+        policy_recovery_task = asyncio.create_task(
+            key_policy_store.recover_until_loaded(), name='key-policy-recovery')
 
     # 凭据录入的端点在这里并入：此刻还没有在途请求、没有既有熔断与会话亲和
     # 状态，所以端点集合依然"固定在启动时"，只是来源从一处变两处。运行时增删
@@ -8239,7 +8268,8 @@ async def lifespan(app: FastAPI):
         copilot_connection_monitor_task = asyncio.create_task(
             copilot_proxy.connection_monitor_loop()
         )
-    tasks = (copilot_warmup_task,copilot_bg_task,copilot_connection_monitor_task,copilot_pricing_task)
+    tasks = (copilot_warmup_task,copilot_bg_task,copilot_connection_monitor_task,copilot_pricing_task,
+             policy_recovery_task)
     clients = (proxy,azure_proxy,copilot_proxy)
     store = usage_store
     app.state.lb_initialized = True
@@ -8539,6 +8569,18 @@ def _verify_lb_api_key(actual_key: str) -> bool:
 OPENAI_STYLE_PROVIDERS = ("copilot", "azure_openai")
 
 
+def _openai_order_from(preferred) -> tuple:
+    """把一份偏好折算成 OpenAI 风格入口的顺序。
+
+    与 store 的查找分开，因为同一个折算要回答两个问题：「现在的顺序是什么」和
+    「清掉这条规则后会变成什么」。在工作台那边重算一遍必然漂移，而漂移的那份
+    恰好出现在运维下决心前核对的确认框里。
+    """
+    order = [p for p in preferred if p in OPENAI_STYLE_PROVIDERS]
+    order += [p for p in OPENAI_STYLE_PROVIDERS if p not in order]
+    return tuple(order)
+
+
 def _openai_provider_order(model: str) -> tuple:
     """OpenAI 风格入口的 provider 尝试顺序。
 
@@ -8547,10 +8589,7 @@ def _openai_provider_order(model: str) -> tuple:
     偏好里会被忽略 —— 它服务 /v1/messages，不服务这两个入口。
     """
     store = key_policy_store
-    preferred = store.model_preference(model) if store is not None else ()
-    order = [p for p in preferred if p in OPENAI_STYLE_PROVIDERS]
-    order += [p for p in OPENAI_STYLE_PROVIDERS if p not in order]
-    return tuple(order)
+    return _openai_order_from(store.model_preference(model) if store is not None else ())
 
 
 def _messages_pools(allowed_providers=None) -> dict:
@@ -8678,7 +8717,11 @@ def _messages_provider_order(model: str) -> tuple:
     surface — the mirror image of `databricks` being ignored over there.
     """
     store = key_policy_store
-    preferred = store.model_preference(model) if store is not None else ()
+    return _messages_order_from(store.model_preference(model) if store is not None else ())
+
+
+def _messages_order_from(preferred) -> tuple:
+    """同 `_openai_order_from`，Messages 面那一份折算。"""
     order = [p for p in preferred if p in claude_identity.MESSAGES_PROVIDERS]
     order += [p for p in claude_identity.DEFAULT_CLAUDE_ORDER if p not in order]
     return tuple(order)
@@ -10527,6 +10570,31 @@ def _copilot_model_id(model: str) -> str:
     return claude_identity.rewrite(model, 'copilot') if model else model
 
 
+def _model_routing_reset_view(model: str) -> dict:
+    """`DELETE /admin/model-routing/{model}` 之后这条规则会变成什么。
+
+    删除是「回到基线」而不是「回到默认顺序」—— 与 `allowed_models` 回落 config
+    的 `models`、启用态回落 `enabled:` 完全同一条降级规则。把它算在服务端是因为
+    它要与生效顺序共用那一个折算函数；在前端照抄一遍，两边就会在有基线的模型上
+    给出不同答案，而不一致的那一份正是确认框里被当真的那份。
+    """
+    store = key_policy_store
+    baseline = store.model_routing_baseline(model) if store is not None else {}
+    providers = baseline.get("providers", ())
+    return {
+        "providers": list(providers),
+        "copilot_accounts": list(baseline.get("copilot_accounts", ())),
+        "effective_openai_order": list(_openai_order_from(providers)),
+        "effective_messages_order": list(_messages_order_from(providers)),
+        # 基线自己就可能把 claude 开在 OpenAI 风格入口上，那种情况下清除规则
+        # **不会**关闭那两个入口。
+        "opens_claude_on_openai_entry_points": (
+            "claude" in model.lower()
+            and any(p in OPENAI_STYLE_PROVIDERS for p in providers)),
+        "source": "config" if baseline else "default",
+    }
+
+
 def _model_routing_view(model: str) -> dict:
     """一条规则的三段：模型 → provider 顺序 → GHCP 账户。"""
     store = key_policy_store
@@ -10540,11 +10608,22 @@ def _model_routing_view(model: str) -> dict:
     # `_messages_path_views` 早就按 `forwarded` 问同一个收口。两处拼法不同
     # 时，同一个响应会既说 Copilot 这一跳能服务、又说没有账户能服务它。
     effective = [ep.name for ep in endpoints if ep.supports(_copilot_model_id(model))]
+    # 两段各自问一次「值 + 来源」。来源必须由查找本身给出：一条 config 基线规则
+    # 若渲染成「已保存」，运维会去找一行并不存在的数据库记录 —— 本仓库视为
+    # 比没有诊断更糟的那种「诊断与判断打架」。
+    preference, preference_source = (store.model_preference_resolution(model)
+                                     if store is not None else ((), None))
+    accounts, accounts_source = (store.model_accounts_resolution(model)
+                                 if store is not None else ((), None))
     return {
         "model": model,
-        "providers": list(store.model_preference(model)) if store is not None else [],
+        "providers": list(preference),
+        # 'overlay' = 策略库里的行，'config' = ConfigMap 的 model_routing 基线，
+        # null = 两处都没有规则（按默认顺序）。
+        "providers_source": preference_source,
         "effective_openai_order": list(_openai_provider_order(model)),
-        "copilot_accounts": list(store.model_accounts(model)) if store is not None else [],
+        "copilot_accounts": list(accounts),
+        "copilot_accounts_source": accounts_source,
         # 客户端算不出这个：要同时拿到 capability、allowed_models 和启用态。
         "effective_copilot_accounts": effective,
         # 有端点却一个都不合格 = 这条规则把 GHCP 候选清空了。不是错误（provider
@@ -10553,6 +10632,9 @@ def _model_routing_view(model: str) -> dict:
         "copilot_candidates_empty": bool(endpoints) and not effective,
         "opens_claude_on_openai_entry_points": ("claude" in model.lower()
                                                 and _model_pinned_to_openai_style_provider(model)),
+        # 清除这条规则后会回到什么。没有 config 基线时就是今天的默认顺序与
+        # 「不限定账户」，所以调用方不需要分支判断「有没有基线」。
+        "reset_to": _model_routing_reset_view(model),
         # /v1/messages 面的三条路径各自状态。服务不了的也列出来并说明原因 ——
         # 缺席正是「看不出 ADB 是有意不在此面还是漏了」的根源。
         "effective_messages_order": list(_messages_provider_order(model)),
@@ -10571,12 +10653,16 @@ async def admin_model_routing(request: Request, x_api_key: Optional[str] = Heade
     store = key_policy_store
     preferences = store.model_preferences_snapshot() if store is not None else {}
     selections = store.model_accounts_snapshot() if store is not None else {}
+    # config 基线声明的模型也要列出来，否则策略库不可达时整页是空的 —— 而那恰好
+    # 是基线在生效、最需要看见它的时候。每行自带 `*_source` 说明来自哪一层。
+    baseline = store.routing_baseline_snapshot() if store is not None else {}
     accounts = [{"account": ep.name, "enabled": _copilot_account_enabled(ep)}
                 for ep in _copilot_endpoints()]
     return {
         # 两个维度各自都能单独成规则，所以列表是它们的并集。
         "preferences": [_model_routing_view(model)
-                        for model in sorted(set(preferences) | set(selections))],
+                        for model in sorted(set(preferences) | set(selections)
+                                            | set(baseline))],
         "providers": list(PROVIDER_IDS),
         "provider_labels": dict(PROVIDER_LABELS),
         # 两个协议面各发一份选项。只给 OpenAI 面那一份时，工作台的顺序下拉里唯一的

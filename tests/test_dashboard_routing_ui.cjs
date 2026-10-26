@@ -11,8 +11,15 @@ const account = (name, overrides = {}) => ({account: name, enabled: true,
   enablement_source: 'operator', selected: false, serves_model: true, reason: null,
   serves_model_ignoring_selection: true, reason_ignoring_selection: null,
   capability_known: true, requests: 0, circuit_open: false, ...overrides});
+// What clearing this rule falls back to. Defaults to «the default order and no
+// account limit», which is what a model with no ConfigMap baseline returns to.
+const resetTo = (overrides = {}) => ({providers: [], copilot_accounts: [],
+  effective_openai_order: ['copilot', 'azure_openai'],
+  effective_messages_order: ['databricks', 'copilot', 'azure_anthropic'],
+  opens_claude_on_openai_entry_points: false, source: 'default', ...overrides});
 function diagnostic(model, overrides = {}) {
   return {model, providers: [], effective_openai_order: ['copilot', 'azure_openai'],
+    providers_source: null, copilot_accounts_source: null, reset_to: resetTo(),
     copilot_accounts: [], effective_copilot_accounts: ['acct-a', 'acct-b'],
     copilot_candidates_empty: false, opens_claude_on_openai_entry_points: false,
     effective_messages_order: ['databricks', 'copilot', 'azure_anthropic'],
@@ -48,6 +55,21 @@ const seedDiagnostics = {
   // No stored preference at all, so a single surface choice has nothing to
   // carry along and must write exactly one provider.
   'claude-haiku-5.5': diagnostic('claude-haiku-5.5'),
+  // A rule that exists only in the ConfigMap baseline — no stored row at all.
+  // It is effective, so it has to be listed and labelled, and clearing the
+  // model's rule falls back to it rather than to the default order.
+  'gpt-6-astra': diagnostic('gpt-6-astra', {
+    providers: ['azure_openai'], providers_source: 'config',
+    effective_openai_order: ['azure_openai', 'copilot'],
+    copilot_accounts: ['acct-a'], copilot_accounts_source: 'config',
+    reset_to: resetTo({providers: ['azure_openai'], copilot_accounts: ['acct-a'],
+      effective_openai_order: ['azure_openai', 'copilot'], source: 'config'})}),
+  // A Claude model whose baseline still names Copilot: clearing the stored
+  // rule does **not** close its Responses/Chat entry points.
+  'claude-fable-5.1': diagnostic('claude-fable-5.1', {
+    providers: ['copilot'], opens_claude_on_openai_entry_points: true,
+    reset_to: resetTo({providers: ['copilot'], source: 'config',
+      opens_claude_on_openai_entry_points: true})}),
 };
 function section(from, to) {
   assert.ok(html.includes(from) && html.includes(to), `Missing script section ${from}`);
@@ -421,6 +443,86 @@ test('whole-rule reset is reviewed and clears provider and account scope togethe
   assert.deepEqual(h.snapshots['claude-opus-5.5'].providers, []);
   assert.deepEqual(h.snapshots['claude-opus-5.5'].copilot_accounts, []);
   assert.equal(h.snapshots['claude-opus-5.5'].opens_claude_on_openai_entry_points, false);
+});
+
+test('a rule that comes only from the config baseline is listed and labelled', async () => {
+  // While the policy store is unreachable this is the one layer still in
+  // force, so it must not be missing from the list — and it must not read as
+  // «saved», which would send an operator looking for a row that is not there.
+  const h = harness();
+  const markup = h.element('routingContent').innerHTML;
+  assert.match(markup, /gpt-6-astra/);
+  assert.match(markup, /配置基线/);
+});
+
+test('the policy state line counts the baseline rules it is serving', async () => {
+  // «模型优先序 0» next to two rules visibly in force is the kind of
+  // contradiction a real page shows and an offline fixture hides: the counts
+  // read the overlay only, and the baseline is what survives an outage.
+  const h = harness();
+  h.context.renderPolicyState({...POLICY, model_preferences: 0, baseline_models: 2});
+  const markup = h.element('keysPolicyState').innerHTML;
+  assert.match(markup, /配置基线 2/);
+  assert.doesNotMatch(markup, /正在重试加载/);
+});
+
+test('a store still retrying says so rather than looking settled', async () => {
+  const h = harness();
+  h.context.renderPolicyState({...POLICY, state: 'unavailable', baseline_models: 1,
+    recovering: true});
+  assert.match(h.element('keysPolicyState').innerHTML, /正在重试加载/);
+});
+
+test('a stored rule is not labelled as a config baseline', async () => {
+  const h = harness();
+  const markup = h.element('routingContent').innerHTML;
+  const stored = markup.slice(markup.indexOf('gpt-4o'), markup.indexOf('claude-opus-5.5'));
+  assert.ok(stored.includes('gpt-4o'), 'the stored row must be in the slice under test');
+  assert.doesNotMatch(stored, /配置基线/);
+});
+
+test('the reset preview shows the config baseline, not the default order', async () => {
+  // «Back to the default order» is a promise the gateway no longer keeps once
+  // a ConfigMap declares a baseline for this model, and this dialog is where
+  // the operator checks before a destructive write.
+  const h = harness();
+  await h.select('gpt-6-astra');
+  await h.context.clearRouting('gpt-6-astra');
+  const review = h.element('routeReview').innerHTML;
+  assert.match(review, /配置基线/);
+  assert.match(review, /Foundry → GHCP|azure_openai/);
+  assert.match(review, /acct-a/, 'the account scope the baseline keeps must be shown');
+  assert.doesNotMatch(review, /（默认）/, 'resetting here does not reach the default order');
+});
+
+test('a reset that keeps claude open on the openai entries does not claim they close', async () => {
+  const h = harness();
+  await h.select('claude-fable-5.1');
+  // The editor's impact line makes the same promise before the dialog opens.
+  assert.doesNotMatch(h.element('routeEntryImpact').textContent, /撤销放行/);
+  assert.match(h.element('routeEntryImpact').textContent, /保持开放/);
+  await h.context.clearRouting('claude-fable-5.1');
+  const review = h.element('routeReview').innerHTML;
+  assert.doesNotMatch(review, /入口将关闭/);
+  assert.match(review, /保持开放/);
+  // «恢复默认» names a destination this write does not reach.
+  assert.match(review, /回到配置基线|回到基线/);
+  assert.doesNotMatch(review, /恢复整条规则默认/);
+});
+
+test('a reset without a baseline keeps saying it revokes the openai entries', async () => {
+  const h = harness();
+  await h.select('claude-opus-5.5');
+  assert.match(h.element('routeEntryImpact').textContent, /撤销放行/);
+});
+
+test('a reset without a baseline still reports the default order and the closing entries', async () => {
+  const h = harness();
+  await h.select('claude-opus-5.5');
+  await h.context.clearRouting('claude-opus-5.5');
+  const review = h.element('routeReview').innerHTML;
+  assert.match(review, /（默认）/);
+  assert.match(review, /入口将关闭/);
 });
 
 test('a risky reset cannot execute until its visible impact acknowledgement is checked', async () => {

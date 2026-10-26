@@ -75,6 +75,26 @@ endpoints:
   #   token: ${DATABRICKS_TOKEN_3}
   #   weight: 1
 
+# per-model 路由基线（可选）
+#
+# 工作台「路由规则」页写的规则存在策略库（用量存储）里，是叠在这一段之上的
+# overlay。这一段是**基线**：overlay 缺失或未加载时回落到它，没写才回落默认顺序。
+# 形状与 PUT /admin/model-routing/{model} 的请求体一致，面板上读到的规则可以原样抄。
+#
+# 为什么需要它：策略库不可达时（例如 MySQL 停机），按降级规则会回落基线，而基线
+# 过去是硬编码的默认顺序 —— 于是每次发布都像「自定义路由策略被清空」。写在这里的
+# 规则跟着 ConfigMap 走，与数据库是否可达无关。
+#
+# **写错会拒绝启动**：provider id 拼错、段名拼错、同一个模型两种拼法各写一条，都只是
+# 静默无效而没有任何症状，所以在加载期就拒绝（与 ${ENV} 引用同一个判断）。
+#
+# model_routing:
+#   claude-opus-5-5:                  # 三种拼法任选其一，按模型身份匹配
+#     providers: [copilot, databricks]   # 顺序即偏好；只重排不筛除，fallback 保留
+#     copilot_accounts: [acct-a]         # 限定到这些 GHCP 账户；省略 = 不限定
+#   gpt-6-astra:
+#     providers: [azure_openai]
+
 # Token 用量数据持久化（可选）
 # 方式 1: JSON 文件（默认）
 # usage_data_dir: ./usage_data

@@ -76,6 +76,84 @@ MASK_MIN_LENGTH = 12
 # Distinguishes "caller omitted allowed_models" from "caller asked to clear it".
 _UNSET = object()
 
+# Backoff for re-loading the overlay after a failed start. The store used to
+# load exactly once, so a database that came back a minute later still left the
+# process serving from baseline until somebody rolled the pod — which, with
+# `maxSurge:0/maxUnavailable:1` on a single replica, is a deliberate outage to
+# recover state that was never lost. The usage ledger already reconnects on its
+# own; this is the same idea with a ceiling, because a store that is merely
+# unavailable must not turn into a retry loop against a sick database.
+RELOAD_RETRY_INITIAL = 5
+RELOAD_RETRY_MAX = 300
+
+# The two segments of one per-model rule, named exactly as
+# `PUT /admin/model-routing/{model}` names them: an operator reads a rule in the
+# Dashboard and transcribes it into the ConfigMap unchanged. A third shape would
+# be a third thing to document, test and get wrong.
+BASELINE_SEGMENTS = ('providers', 'copilot_accounts')
+
+
+def parse_routing_baseline(value) -> dict:
+    """Validate the config-declared per-model routing baseline.
+
+    Every other policy layer here degrades to something an operator *wrote*:
+    a provider allow-list to the providers config declares, `allowed_models` to
+    the endpoint's `models`, account enablement to `enabled:`, the panel
+    password to its environment variable. Per-model routing was the one whose
+    baseline was a hard-coded default order, so its rules could only ever live
+    in the overlay — and a stopped database therefore looked exactly like
+    "my routing rules were wiped on deploy" (2026-10-26).
+
+    Invalid entries raise rather than load. A typo'd provider id or segment name
+    silently does nothing, and "the rule I wrote has no effect" leaves no trace
+    in the config or the logs to search for — the same reasoning that makes an
+    unresolved `${ENV}` credential reference fatal. Note the cost is the same
+    too: a single replica with `maxSurge:0` means refusing to start is an
+    outage, so this section belongs in the pre-flight `load_config` check.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError('model_routing must be a mapping of model -> rule')
+    parsed = {}
+    for raw_model, raw_rule in value.items():
+        model = str(raw_model).strip()
+        if not model:
+            raise ValueError('model_routing keys must be non-empty model names')
+        if not isinstance(raw_rule, dict):
+            raise ValueError(
+                f"model_routing['{model}'] must be a mapping with "
+                f"{' and/or '.join(BASELINE_SEGMENTS)}")
+        unknown = sorted(set(raw_rule) - set(BASELINE_SEGMENTS))
+        if unknown:
+            raise ValueError(f"model_routing['{model}']: unknown key(s) "
+                             f"{', '.join(unknown)}; expected "
+                             f"{' and/or '.join(BASELINE_SEGMENTS)}")
+        rule = {}
+        if raw_rule.get('providers') is not None:
+            rule['providers'] = ordered_providers(raw_rule['providers'])
+        accounts = normalise_accounts(raw_rule.get('copilot_accounts'))
+        if accounts:
+            rule['copilot_accounts'] = accounts
+        if not rule:
+            # An entry that declares nothing is a half-finished edit, not a
+            # baseline. Keeping it would also make `routing_baseline_snapshot`
+            # list a model the Dashboard then shows with an empty rule.
+            raise ValueError(f"model_routing['{model}'] declares nothing; give "
+                             f"{' and/or '.join(BASELINE_SEGMENTS)} or remove it")
+        parsed[model] = rule
+    # One model, one rule — the same invariant writes enforce in storage. Left
+    # alone, `rule_key` would resolve one spelling deterministically and the
+    # other would sit in the ConfigMap doing nothing, which is precisely the
+    # failure this validation exists to prevent.
+    for model in parsed:
+        siblings = identity_siblings(parsed, model)
+        if siblings:
+            raise ValueError(
+                f"model_routing names one model twice: '{model}' and "
+                f"'{siblings[0]}' are spellings of the same model; keep one")
+    return parsed
+
 
 def normalise_providers(value) -> tuple:
     """Validate an operator-supplied provider list into canonical order.
@@ -138,6 +216,17 @@ def rule_key(mapping, model: str) -> Optional[str]:
     return siblings[0] if siblings else None
 
 
+def _identity_lookup(mapping, model: str) -> Optional[tuple]:
+    """`mapping`'s value for this model by identity, or None when absent.
+
+    None rather than `()` because an empty value and a missing one are
+    different answers here: one layer having no rule is what hands the question
+    to the next one.
+    """
+    key = rule_key(mapping, model)
+    return tuple(mapping[key]) if key is not None else None
+
+
 def identity_siblings(mapping, model: str) -> list:
     """Keys in `mapping` that are other spellings of the same Claude model."""
     canonical_id = claude_identity.canonical(model)
@@ -189,7 +278,7 @@ def mask(key: str) -> str:
 class KeyPolicyStore:
     """Tenant → allowed providers, cached in memory and persisted per backend."""
 
-    def __init__(self, storage_config: Optional[dict] = None):
+    def __init__(self, storage_config: Optional[dict] = None, *, routing_baseline=None):
         config = storage_config or {}
         self._config = config
         requested = config.get('type', 'memory')
@@ -198,10 +287,25 @@ class KeyPolicyStore:
         self._accounts: dict = {}
         self._preferences: dict = {}
         self._model_accounts: dict = {}
+        # Config-declared baseline for the two per-model routing segments. Kept
+        # split by segment so each resolves on its own: a baseline naming only
+        # accounts must not imply a provider order, and vice versa.
+        self._baseline = parse_routing_baseline(routing_baseline)
+        self._baseline_preferences = {model: rule['providers']
+                                      for model, rule in self._baseline.items()
+                                      if 'providers' in rule}
+        self._baseline_accounts = {model: rule['copilot_accounts']
+                                   for model, rule in self._baseline.items()
+                                   if 'copilot_accounts' in rule}
         # One-way verifier for the panel password, or None for "no overlay".
         self._panel_password: Optional[str] = None
         self._state = 'unavailable'
         self._last_loaded_at: Optional[float] = None
+        # Set only by a full `reload()`, never by the state flip a successful
+        # write performs: that flip makes one just-written rule effective, but
+        # the cache then holds exactly that one row. Reading it as "loaded"
+        # would end recovery and strand every other stored rule.
+        self._full_load_at: Optional[float] = None
         self._last_error_type: Optional[str] = None
         self._pool = None
         self._lock = asyncio.Lock()
@@ -217,8 +321,34 @@ class KeyPolicyStore:
         if self.backend == 'memory':
             self._state = 'loaded'
             self._last_loaded_at = time.time()
+            self._full_load_at = self._last_loaded_at
             return
         await self.reload()
+
+    @property
+    def fully_loaded(self) -> bool:
+        """Whether a complete load has ever succeeded — see `_full_load_at`."""
+        return self._full_load_at is not None
+
+    async def recover_until_loaded(self) -> None:
+        """Re-attempt the initial load until one fully succeeds.
+
+        Owned by the lifespan rather than started inside `start()`, next to the
+        other background loops it already cancels on shutdown. Keeping it out of
+        `start()` also means constructing a store never leaves a task running
+        behind a caller's back.
+        """
+        delay = RELOAD_RETRY_INITIAL
+        attempts = 0
+        while not self.fully_loaded:
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, RELOAD_RETRY_MAX)
+            attempts += 1
+            await self.reload()
+        logger.info('key_policy: overlay loaded after %d retry attempt(s); '
+                    'tenants=%d accounts=%d model_rules=%d',
+                    attempts, len(self._policies), len(self._accounts),
+                    len(self._preferences) + len(self._model_accounts))
 
     async def close(self):
         if self._pool is not None:
@@ -248,6 +378,7 @@ class KeyPolicyStore:
         self._panel_password = panel_password
         self._state = 'loaded'
         self._last_loaded_at = time.time()
+        self._full_load_at = self._last_loaded_at
         self._last_error_type = None
         return self.status()
 
@@ -275,22 +406,69 @@ class KeyPolicyStore:
             'last_loaded_at': self._last_loaded_at,
             'last_error_type': self._last_error_type,
             'unrestricted_when_unavailable': True,
+            # How many per-model rules the config declares. Reported separately
+            # from the overlay counts so "the database is down but N rules are
+            # still in force" is readable rather than inferred.
+            'baseline_models': len(self._baseline),
+            # A store serving from baseline while it keeps trying is a different
+            # situation from one that has given up, and only one of them will
+            # fix itself. Derived, not tracked: no second piece of state to
+            # fall out of step with the load itself.
+            'recovering': self.backend != 'memory' and not self.fully_loaded,
         }
 
     # -- per-model provider preference -----------------------------------
 
-    def model_preference(self, model: str) -> tuple:
-        """Ordered preference for one model; empty means «use the default order».
+    def model_preference_resolution(self, model: str) -> tuple:
+        """`(order, source)` where source is 'overlay', 'config' or None.
 
-        Resolved by model identity, not by spelling — see `rule_key`.
+        The primary implementation of this layer, with the plain readers derived
+        from it — the same shape as `account_exclusion_reason` and for the same
+        reason. The Dashboard has to say whether an effective rule came from a
+        database row or from the ConfigMap, because the two have different
+        repairs, and a source computed beside the lookup instead of by it would
+        drift and be believed anyway.
+
+        Resolved by model identity, not by spelling, on both sides: a baseline
+        written in the Databricks spelling has to reach a request that arrives
+        in the Copilot spelling, since that rewrite is exactly what the Messages
+        failover performs.
         """
-        if self._state == 'unavailable':
-            return ()
-        key = rule_key(self._preferences, model)
-        return tuple(self._preferences.get(key, ())) if key is not None else ()
+        if self._state != 'unavailable':
+            key = rule_key(self._preferences, model)
+            if key is not None:
+                return tuple(self._preferences[key]), 'overlay'
+        declared = _identity_lookup(self._baseline_preferences, model)
+        return (declared, 'config') if declared is not None else ((), None)
+
+    def model_preference(self, model: str) -> tuple:
+        """Ordered preference for one model; empty means «use the default order»."""
+        return self.model_preference_resolution(model)[0]
 
     def model_preferences_snapshot(self) -> dict:
         return {model: tuple(order) for model, order in self._preferences.items()}
+
+    def routing_baseline_snapshot(self) -> dict:
+        """Config-declared rules, so callers can list them beside stored ones."""
+        return {model: dict(rule) for model, rule in self._baseline.items()}
+
+    def model_routing_baseline(self, model: str) -> dict:
+        """The config-declared rule for one model, ignoring the overlay.
+
+        What clearing a stored rule returns to. The Dashboard's confirmation
+        dialog needs this as its own question: it used to answer «back to the
+        default order» from a constant, which stops being true the moment a
+        ConfigMap declares a baseline for that model — and that dialog is the
+        one place an operator checks before a destructive write.
+        """
+        rule = {}
+        providers = _identity_lookup(self._baseline_preferences, model)
+        if providers is not None:
+            rule['providers'] = providers
+        accounts = _identity_lookup(self._baseline_accounts, model)
+        if accounts is not None:
+            rule['copilot_accounts'] = accounts
+        return rule
 
     async def set_model_preference(self, model: str, providers) -> tuple:
         if not isinstance(model, str) or not model.strip():
@@ -345,16 +523,22 @@ class KeyPolicyStore:
     # selected accounts a request lands on is session affinity's decision, so an
     # operator-visible ordering would be a promise this layer cannot keep.
 
-    def model_accounts(self, model: str) -> tuple:
-        """Accounts this model is limited to; empty means «not limited».
+    def model_accounts_resolution(self, model: str) -> tuple:
+        """`(accounts, source)` — see `model_preference_resolution`.
 
         Same degradation rule as every other layer: an unloaded overlay yields
-        the config baseline, which here is "no limit".
+        the config baseline, which is "no limit" unless config declares one.
         """
-        if self._state == 'unavailable':
-            return ()
-        key = rule_key(self._model_accounts, model)
-        return tuple(self._model_accounts.get(key, ())) if key is not None else ()
+        if self._state != 'unavailable':
+            key = rule_key(self._model_accounts, model)
+            if key is not None:
+                return tuple(self._model_accounts[key]), 'overlay'
+        declared = _identity_lookup(self._baseline_accounts, model)
+        return (declared, 'config') if declared is not None else ((), None)
+
+    def model_accounts(self, model: str) -> tuple:
+        """Accounts this model is limited to; empty means «not limited»."""
+        return self.model_accounts_resolution(model)[0]
 
     def model_accounts_exclusion_reason(self, model: str, account: str) -> Optional[str]:
         """Why this model's selection drops this account, or None if it does not."""
