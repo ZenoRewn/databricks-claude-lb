@@ -4,9 +4,11 @@ Author: Zeno Ren
 
 ## 当前运行版本
 
-最近一次已记录的 AKS 发布：**2026-10-22，应用源码 `09a9abb`**：同一请求体反复 `response.failed` 不再把整个账户熔断，并补记上游错误码诊断，仅换镜像，见 [本次回执](reviews/2026-10-22-failed-payload-scope/REPORT.md)。
+最近一次已记录的 AKS 发布：**2026-10-26，应用源码 `c638187`**：per-model 路由有了 config 基线（`model_routing`），并让策略库加载失败后重试到成功。修的是一条被误读成「配置丢失」的降级 —— `zeno-sea-mysql` 处于 Stopped，`reload()` 每次启动超时，而这一层的基线是硬编码默认顺序，所以每次发布都像规则被清空（实际一条没丢）。维护 51.7 秒、11 阶段一次通过。**ConfigMap 加 `model_routing` 是独立的第二步**，先用校验 Pod 跑过 `load_config` 才动生产；顺序不能反，旧镜像忽略该段而新镜像会校验它。见 [本次回执](reviews/2026-10-26-routing-config-baseline/REPORT.md)。
 
-更早：**2026-10-22，应用源码 `51507c5`**，修 GHCP 逐 delta 换 message ID 导致长回答因 `identity_mapping_limit` 中断，仅换镜像、控制器无需重建，见 [本次回执](reviews/2026-10-22-ghcp-identity-digest/REPORT.md)。
+更早：**2026-10-22，应用源码 `09a9abb`**：同一请求体反复 `response.failed` 不再把整个账户熔断，并补记上游错误码诊断，仅换镜像，见 [本次回执](reviews/2026-10-22-failed-payload-scope/REPORT.md)。
+
+再更早：**2026-10-22，应用源码 `51507c5`**，修 GHCP 逐 delta 换 message ID 导致长回答因 `identity_mapping_limit` 中断，仅换镜像、控制器无需重建，见 [本次回执](reviews/2026-10-22-ghcp-identity-digest/REPORT.md)。
 
 再上一次：**2026-10-19，应用源码 `53615db`**，维护 78.5 秒，11 个阶段一次通过，三协议业务探针、账本与清理验收通过。修的是一条**已经在生产发生过**的策略绕过：Anthropic Messages 面的候选判断经 `LoadBalancer.select_endpoint()`，而那里只看 config 声明的 `models` 列表 —— Copilot 账户声明 `models: []`（= all），谓词恒真，于是启用态 / `allowed_models` / per-model 账户选择 / 已发现能力**四层全部被跳过**。实测一次强制走 copilot 的 `/v1/messages` 落在运维从未启用的 `zenoren-msft` 上，而 `/admin/model-routing/{model}` 同时报它被排除。**首次提交在 preflight 以 403 中止**（`maintenance_started_at: null`，生产未被触碰）：2026-10-18 的凭据迁移给 Deployment 加了 `envFrom` 却漏了把该 Secret 名加进 `Role/lb-release-controller-target` —— 正是下面那条注意事项说过的情况，且 `plan` 阶段不会暴露它。补上后换新 release ID 重跑一次通过。本次运行文件清单未变（仍 24 个），**控制器不需要重建**。见 [本次回执](reviews/2026-10-19-messages-account-policy/REPORT.md)。
 
