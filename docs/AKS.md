@@ -4,7 +4,9 @@ Author: Zeno Ren
 
 ## 当前运行版本
 
-最近一次已记录的 AKS 发布：**2026-10-26，应用源码 `c638187`**：per-model 路由有了 config 基线（`model_routing`），并让策略库加载失败后重试到成功。修的是一条被误读成「配置丢失」的降级 —— `zeno-sea-mysql` 处于 Stopped，`reload()` 每次启动超时，而这一层的基线是硬编码默认顺序，所以每次发布都像规则被清空（实际一条没丢）。维护 51.7 秒、11 阶段一次通过。**ConfigMap 加 `model_routing` 是独立的第二步**，先用校验 Pod 跑过 `load_config` 才动生产；顺序不能反，旧镜像忽略该段而新镜像会校验它。见 [本次回执](reviews/2026-10-26-routing-config-baseline/REPORT.md)。
+最近一次已记录的 AKS 发布：**2026-10-27，应用源码 `461de98`**：Responses 输出项身份的稳定化从 message 扩到全部已认全引用事件的类型（reasoning / function_call），并上线 2026-10-26 的目录重新核验与价目基线轮换。**第一次提交被业务探针挡下并整体回滚** —— `grok-4.7` 的 reasoning 项带六个不同 id，而 `reasoning_summary_*` 不在引用事件集合里，未知事件分支按设计 fail-closed 把流切断。补齐事件并加「只改写认全类型」的白名单后重发，11 阶段一次通过、维护 63.8 秒、5 条探针全通过。另外两件当日运维变更（Codex 重复复发的真因是新模型不在 `COPILOT_RESPONSES_ITEM_ID_MODELS` 名单里；408 `request_body_timeout` 的真因是 6–14 MB 请求体撞上 120 秒 body 预算）见 [本次回执](reviews/2026-10-27-identity-all-output-items/REPORT.md)。
+
+更早：**2026-10-26，应用源码 `c638187`**：per-model 路由有了 config 基线（`model_routing`），并让策略库加载失败后重试到成功。修的是一条被误读成「配置丢失」的降级 —— `zeno-sea-mysql` 处于 Stopped，`reload()` 每次启动超时，而这一层的基线是硬编码默认顺序，所以每次发布都像规则被清空（实际一条没丢）。维护 51.7 秒、11 阶段一次通过。**ConfigMap 加 `model_routing` 是独立的第二步**，先用校验 Pod 跑过 `load_config` 才动生产；顺序不能反，旧镜像忽略该段而新镜像会校验它。见 [本次回执](reviews/2026-10-26-routing-config-baseline/REPORT.md)。
 
 更早：**2026-10-22，应用源码 `09a9abb`**：同一请求体反复 `response.failed` 不再把整个账户熔断，并补记上游错误码诊断，仅换镜像，见 [本次回执](reviews/2026-10-22-failed-payload-scope/REPORT.md)。
 

@@ -6,6 +6,7 @@ Author: Zeno Ren
 
 | 日期 | 范围 | 入口 |
 |---|---|---|
+| 2026-10-27 | **AKS 发布** `461de98`（第二次提交）：Codex 重复复发的真因不是回归 —— 稳定化逐模型 opt-in，刚开通的 `gpt-6.1-terra` 不在名单里，79 次请求零 identity 事件。排查中量出 reasoning 项的 id 在自己的生命周期里漂移（`gpt-6.1-sol` 三处三个 id），把稳定化扩到全部输出项。**第一次发布被 `grok-4.7` 的业务探针挡下并干净回滚**：它的 reasoning 项带六个 id，而 `reasoning_summary_*` 不在引用事件集合里，未知事件分支按设计 fail-closed 切断了流。补齐事件 + 加「只改写认全类型」白名单后重发，维护 63.8 秒、5 条探针全通过，并用生产抓的 18 帧真帧重放验证 | [复发诊断与两次发布回执](2026-10-27-identity-all-output-items/REPORT.md) |
 | 2026-10-26 | **AKS 发布** `c638187`：运维报「自定义路由策略重新发布就丢失」，真因是 `zeno-sea-mysql` 处于 **Stopped**，`reload()` 每次启动超时，降级规则照约定回落基线 —— 而 per-model 路由的基线是**硬编码默认顺序**，于是每次发布都像规则被清空（启库后 `model_preferences: 2` 原样在，一条没丢）。新增 config 的 `model_routing` 段作为这一层的基线，并让策略库加载失败后退避重试到成功（停止条件是 `fully_loaded`，不是 `state == 'loaded'`）。维护 51.7 秒、11 阶段一次通过；ConfigMap 基线是独立第二步，校验 Pod 的 `fsGroup` 缺失曾造成 4 个账户的假阳性失败 | [修复与发布回执](2026-10-26-routing-config-baseline/REPORT.md) |
 | 2026-10-22 | **AKS 发布** `09a9abb`：同一 Codex 会话把相同请求体重发 5 次、每次都 `response.failed`，5 次全部记成账户失败，熔断了 `zenoren-icloud`，无关模型因此拿到 503。改为同一请求体的 `response.failed` 在本轮连续失败里只计一次；同时补记上游错误码、请求体指纹和图片超限张数。一次通过 | [修复与发布回执](2026-10-22-failed-payload-scope/REPORT.md) |
 | 2026-10-22 | **AKS 发布** `51507c5`：GHCP 在**每个 delta** 换一个 message ID，按原始字符串保存 alias 使约 5000 delta 的长回答撞 2 MiB 上限而中断（48h 内 10 次，全是 `identity_mapping_limit`）。alias 改存每 attempt 加 key 的 16 字节摘要，`max_aliases` 调到 131072；发布一次通过（首次 submit 因 shell 参数未拆分而未执行，生产未触碰） | [修复与发布回执](2026-10-22-ghcp-identity-digest/REPORT.md) |
