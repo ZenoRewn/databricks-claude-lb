@@ -296,7 +296,7 @@ class AccountSelectionSubtractsCandidatesTests(unittest.IsolatedAsyncioTestCase)
             await self.store.set_model_accounts('gpt-5.4', ['acct-a'])
             self.assertNotIn('gpt-5.4', main._collect_openai_model_ids(azure=None, databricks=None),
                              'the wildcard account is not selected for this model')
-            self.assertIn('gpt-5.5', main._collect_openai_model_ids(azure=None, databricks=None),
+            self.assertIn('gpt-6.1-sol', main._collect_openai_model_ids(azure=None, databricks=None),
                           'models with no selection still come from the wildcard')
 
 

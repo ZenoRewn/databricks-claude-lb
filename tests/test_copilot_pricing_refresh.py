@@ -12,12 +12,15 @@ import pytest
 import copilot_pricing as p
 
 HTML = (Path(__file__).parent / 'fixtures/copilot-pricing-20261001.html').read_text()
-LIVE = (Path(__file__).parent / 'fixtures/copilot-pricing-20261019.html').read_text()
+LIVE = (Path(__file__).parent / 'fixtures/copilot-pricing-20261026.html').read_text()
+PREVIOUS = (Path(__file__).parent / 'fixtures/copilot-pricing-20261019.html').read_text()
 # Worker scenarios run on the **current** snapshot: a fetched page older than
 # the bundled baseline is refused by design, so feeding the 2026-10-01 excerpt
 # to a worker would exercise the rejection path, not the schedule.
 PAGE = LIVE
-NOW = datetime(2026, 10, 19, 9, tzinfo=timezone.utc)
+# 跟着 LIVE 快照走。缓存的 fetched_at 早于 CHECKED_ON 会被 load_cache 按
+# provenance 拒绝，所以轮换快照必须一起挪这个基准时间。
+NOW = datetime(2026, 10, 26, 9, tzinfo=timezone.utc)
 
 
 def async_test(fn):
@@ -36,11 +39,41 @@ def isolate_catalog():
 def test_the_bundled_baseline_is_a_parsed_snapshot_not_a_hand_list():
     # The baseline must stay exactly what the parser reads off the page it was
     # cut from — that is what keeps it from drifting into hand-typed numbers.
-    catalog = p.parse_pricing_html(LIVE, '2026-10-19')
+    catalog = p.parse_pricing_html(LIVE, '2026-10-26')
     assert catalog['models'] == p.MODELS
     assert catalog['long_context'] == p.LONG_CONTEXT
     assert catalog['promotion_end'] == p.PROMOTION_END
-    assert p.CHECKED_ON == '2026-10-19'
+    assert p.CHECKED_ON == '2026-10-26'
+
+
+def test_the_rotated_baseline_adds_terra_and_retires_five_rates():
+    """What the 2026-10-19 → 2026-10-26 rotation actually changed, measured.
+
+    The rotation was not optional: `gpt-6.1-terra` is advertised in
+    `/models` now, and that catalogue guarantees every entry is priceable by
+    some table even with no refresh — so the offline floor had to learn it.
+
+    It also *removes* five models GitHub stopped publishing. That cost is real
+    and bounded: `gpt-5.4`, `gpt-5-mini`, `gpt-5.5` and `gpt-5.4-mini` keep
+    public list prices in `main.MODEL_PRICING`, which is the right table for
+    `gpt-5.4` anyway (Azure serves it, not Copilot). Only `gemini-3.7-flash`
+    loses its last rate, and its promotional period had already expired.
+    Production is unaffected either way: a successful weekly refresh replaces
+    this table wholesale, so it only ever applies to a pod that cannot reach
+    the page at all.
+    """
+    before = p.parse_pricing_html(PREVIOUS, '2026-10-19')
+    after = p.parse_pricing_html(LIVE, '2026-10-26')
+    assert set(after['models']) - set(before['models']) == {'gpt-6.1-terra'}
+    assert set(before['models']) - set(after['models']) == {
+        'gemini-3.7-flash', 'gpt-5-mini', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.5'}
+    # No silent re-pricing of anything that survived the rotation.
+    for name in set(after['models']) & set(before['models']):
+        assert after['models'][name] == before['models'][name], name
+    assert after['models']['gpt-6.1-terra'] == {
+        'input': 1, 'output': 5, 'cache_read': 0.05, 'cache_write': 1.25}
+    assert after['long_context']['gpt-6.1-terra'] == (
+        272000, {'input': 2, 'output': 7.5, 'cache_read': 0.1, 'cache_write': 2.5})
 
 
 def test_the_previous_snapshot_still_parses_and_differs_as_measured():
@@ -111,7 +144,7 @@ async def test_refresh_persists_and_new_instance_waits_until_seven_days(tmp_path
         again = p.PricingRefresh(worker.cache_path, clock=lambda: NOW + timedelta(days=1))
         await again.load_cache()
         assert again.next_due == NOW + timedelta(days=7)
-        assert p.get_metadata()['checked_on'] == '2026-10-19'
+        assert p.get_metadata()['checked_on'] == '2026-10-26'
         assert p.get_metadata()['refresh']['last_success_at'] == NOW.isoformat()
         assert p.get_metadata()['refresh']['stale'] is False
 

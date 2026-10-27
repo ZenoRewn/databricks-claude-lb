@@ -176,7 +176,7 @@ LB 自带图片自动压缩（>200KB base64 → ≤1280px JPEG@82）；如果压
 
 ### 真因
 
-GHCP 部分新模型（gpt-5.5、gpt-5.6-sol、gpt-5.6-luna、gpt-5.6-terra、gpt-5-codex 等）**只允许走 `/responses` API**，不允许走 `/chat/completions`。这是 GHCP 上游的强约束，LB 无法绕过。
+GHCP 部分新模型（gpt-5.6-sol、gpt-5.6-terra、gpt-6-astra、gpt-6.1-sol、gpt-6.1-terra、gpt-5.4-nano、grok-4.6/4.7 等）**只允许走 `/responses` API**，不允许走 `/chat/completions`（后者回 400 `unsupported_api_for_model`）。这是 GHCP 上游的强约束，LB 无法绕过。反向也有：`gemini-3.8-flash`、`gemini-4-argon` 只走 `/chat/completions`，经 `/v1/responses` 同样 400。每个模型可用的入口见 `/v1/models` 条目里的 `supported_endpoints`。
 
 ### 解决
 
