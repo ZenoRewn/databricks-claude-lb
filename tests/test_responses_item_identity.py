@@ -412,3 +412,86 @@ def test_alias_keys_are_not_the_raw_upstream_ids():
     normalizer.transform(added())
     normalizer.transform(reference("secret-upstream-id"))
     assert all(not isinstance(key, str) for key in normalizer._aliases)
+
+
+# --- 2026-10-27: identity stabilization covered messages only -----------------
+#
+# The approved plan said «按当前 response + output_index 维护稳定的输出项身份»
+# — output items, not messages. The implementation narrowed it to
+# `kind == "message"`, so a reasoning item's id still drifted across its own
+# lifecycle. Measured against production on 2026-10-27 with gpt-6.1-sol, a model
+# that had been inside the stabilize list since it shipped:
+#
+#   idx=0 reasoning  added=6023a19e  done=2c705db7  completed=6a84a5ed
+#   idx=1 message    added=56a0c0d0  delta=56a0c0d0  done=56a0c0d0  completed=56a0c0d0
+#
+# Codex desktop updates its item list with `findIndex(existing.id === incoming.id)`
+# and pushes when it misses, so a drifting reasoning id is appended as a second
+# entry by exactly the mechanism the message fix was written for.
+#
+# Rewriting these ids is safe for the same reason it was safe for messages: the
+# downstream id never travels back upstream, because `_strip_input_item_ids`
+# removes the top-level `id` from **every** input item (reasoning included,
+# measured — `encrypted_content` and `call_id` are kept and never touched here).
+
+
+def test_a_reasoning_item_keeps_one_identity_across_its_lifecycle():
+    normalizer = ResponsesItemIdentity()
+    normalizer.transform(added(kind="reasoning", ident="A", encrypted_content="keep-sensitive"))
+    done = payload(normalizer.transform(frame({
+        "type": "response.output_item.done", "output_index": 0,
+        "item": {"type": "reasoning", "id": "B", "encrypted_content": "keep-sensitive"}})))
+    assert done["item"]["id"] == "A"
+    assert done["item"]["encrypted_content"] == "keep-sensitive"
+    final = payload(normalizer.transform(terminal(
+        [{"type": "reasoning", "id": "C", "encrypted_content": "keep-sensitive"}])))
+    assert final["response"]["output"][0]["id"] == "A"
+    assert final["response"]["output"][0]["encrypted_content"] == "keep-sensitive"
+    assert normalizer.summary()["drift_items"] == 1
+
+
+def test_a_reasoning_summary_delta_follows_the_same_identity():
+    normalizer = ResponsesItemIdentity()
+    normalizer.transform(added(kind="reasoning"))
+    actual = payload(normalizer.transform(reference(
+        "B", event="response.output_text.delta")))
+    assert actual["item_id"] == "A"
+
+
+def test_a_function_call_keeps_its_identity_without_touching_call_id_or_arguments():
+    normalizer = ResponsesItemIdentity()
+    normalizer.transform(added(kind="function_call", ident="A",
+                               call_id="call-stays", name="tool", arguments='{"id":"B"}'))
+    done = payload(normalizer.transform(frame({
+        "type": "response.output_item.done", "output_index": 0,
+        "item": {"type": "function_call", "id": "B", "call_id": "call-stays",
+                 "name": "tool", "arguments": '{"id":"B"}'}})))
+    assert done["item"]["id"] == "A"
+    assert done["item"]["call_id"] == "call-stays"
+    assert done["item"]["arguments"] == '{"id":"B"}'
+
+
+def test_every_managed_item_type_counts_as_mapped():
+    """`mapped_items` gates «an inconsistency is now dangerous», so it must count
+    every item whose identity we hand out — not only messages.
+
+    Left counting messages alone, a stream that emitted a reasoning item and no
+    message would have rewritten an id while reporting `mapped_items == 0`, and
+    the degradation guards keyed on that counter would quietly take the
+    «nothing committed yet» branch.
+    """
+    normalizer = ResponsesItemIdentity()
+    normalizer.transform(added(kind="reasoning"))
+    normalizer.transform(added(index=1, ident="X", kind="message"))
+    summary = normalizer.summary()
+    assert summary["mapped_items"] == 2
+    assert summary["tracked_items"] == 2
+
+
+def test_a_drifting_reasoning_id_cannot_degrade_silently():
+    # No message anywhere, so the old counter was 0 here: an unparseable
+    # snapshot after a rewrite had to fail, not fall back.
+    normalizer = ResponsesItemIdentity()
+    normalizer.transform(added(kind="reasoning"))
+    normalizer.transform(reference("B"))
+    assert_failure(normalizer, terminal([{"type": "reasoning", "id": "B"}, {"type": "message", "id": "Z"}]))

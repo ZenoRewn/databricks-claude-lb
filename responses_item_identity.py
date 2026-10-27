@@ -1,10 +1,13 @@
-"""Attempt-local GHCP Responses message identity compatibility.
+"""Attempt-local GHCP Responses output item identity compatibility.
 
 Author: Zeno Ren
 
 This module owns no network, retries, stream buffers, or account health. Call it
 only with complete SSE frames, and close it when that upstream attempt ends.
-Only a message's first valid output_item.added establishes its downstream ID.
+An item's first valid output_item.added establishes its downstream ID, and every
+output item type is covered — message, reasoning and function_call alike. Only
+the top-level ``id`` is ever rewritten; ``call_id``, ``encrypted_content`` and
+``arguments`` are passed through untouched.
 """
 
 from dataclasses import dataclass
@@ -264,7 +267,16 @@ class ResponsesItemIdentity:
 
     def _canonical(self, binding, index, ident):
         self._alias(ident, index)
-        if binding.kind != "message" or ident == binding.canonical:
+        # 每一种输出项都算，不只是 message。原方案说的是「维护稳定的**输出项**
+        # 身份」，实现当初收窄到 message，于是 reasoning 项的 id 仍在自己的
+        # added / done / completed 之间漂移 —— 2026-10-27 实测 gpt-6.1-sol
+        # （一直在 stabilize 名单里）三处三个不同 id，而 Codex 按 id 找不到就
+        # 追加，正是这条修复要挡的那个机制。
+        #
+        # 改写它们不会回传给上游：`_strip_input_item_ids` 剥掉**每个** input item
+        # 的顶层 id（reasoning 在内，实测保留 encrypted_content 后上下文不丢）。
+        # 本函数只碰 id，`call_id` / `encrypted_content` / `arguments` 一律不动。
+        if ident == binding.canonical:
             return ident
         if not binding.drifted:
             binding.drifted = True
@@ -282,20 +294,18 @@ class ResponsesItemIdentity:
         if isinstance(item, dict) and "id" in item:
             identities.append(item["id"])
         for ident in identities:
-            if binding is not None and binding.kind == "message" and ident != binding.canonical:
+            if binding is not None and ident != binding.canonical:
                 return True
             if isinstance(ident, str):
                 alias_index = self._lookup(ident)
-                if alias_index is not None:
-                    known = self._bindings[alias_index]
-                    if known.kind == "message" and ident != known.canonical:
-                        return True
+                if alias_index is not None and ident != self._bindings[alias_index].canonical:
+                    return True
         response = event.get("response")
         output = response.get("output") if isinstance(response, dict) else None
         if isinstance(output, list):
             for index, item in enumerate(output):
                 binding = self._bindings.get(index)
-                if binding is not None and binding.kind == "message" and (
+                if binding is not None and (
                         not isinstance(item, dict) or item.get("id") != binding.canonical):
                     return True
         return False
@@ -363,7 +373,10 @@ class ResponsesItemIdentity:
         self._reserve_strings(len(item["type"].encode("utf-8")) + len(item["id"].encode("utf-8", "surrogatepass")))
         self._bindings[index] = _Binding(item["type"], item["id"])
         self._tracked_items += 1
-        self._mapped_items += item["type"] == "message"
+        # 这个计数是「已经对外发出过身份，此后不一致不能再静默降级」的闸门。
+        # 只数 message 时，一个只有 reasoning 项的流会在改写了 id 之后仍报
+        # mapped_items == 0，于是那些守卫会走「还没提交过任何东西」的分支。
+        self._mapped_items += 1
         return False
 
     def _done(self, event):
