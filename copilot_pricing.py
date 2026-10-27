@@ -19,7 +19,7 @@ import tempfile
 import httpx
 
 SOURCE_URL = 'https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing'
-CHECKED_ON = '2026-10-19'
+CHECKED_ON = '2026-10-26'
 AI_CREDIT_USD = 0.01
 
 
@@ -28,12 +28,8 @@ def _rates(input_price, output_price, cached_input, cache_write=0):
 
 
 MODELS = {
-    'gpt-5-mini': _rates(0.25,2,0.025),
     'gpt-5.3-codex': _rates(1.75,14,0.175),
-    'gpt-5.4': _rates(2.5,15,0.25),
-    'gpt-5.4-mini': _rates(0.75,4.5,0.075),
     'gpt-5.4-nano': _rates(0.2,1.25,0.02),
-    'gpt-5.5': _rates(5,30,0.5),
     'gpt-5.6-luna': _rates(0.2,1.2,0.02,0.25),
     'gpt-5.6-sol': _rates(4,20,0.4,5),
     'gpt-5.6-terra': _rates(2,12,0.2,2.5),
@@ -41,6 +37,7 @@ MODELS = {
     'gpt-6-luna': _rates(0.1,0.5,0.01,0.125),
     'gpt-6-sol': _rates(2,10,0.2,2.5),
     'gpt-6.1-sol': _rates(2,10,0.1,2.5),
+    'gpt-6.1-terra': _rates(1,5,0.05,1.25),
     'claude-haiku-4.5': _rates(1,5,0.1,1.25),
     'claude-haiku-5.5': _rates(0.1,0.5,0.01,0.125),
     'claude-sonnet-4': _rates(3,15,0.3,3.75),
@@ -53,7 +50,6 @@ MODELS = {
     'claude-opus-4.8-fast': _rates(10,50,1,12.5),
     'claude-fable-5': _rates(10,50,1,12.5),
     'claude-fable-5.1': _rates(10,50,0.25,12.5),
-    'gemini-3.7-flash': _rates(0.75,3.75,0.075),
     'gemini-3.8-flash': _rates(0.75,3.75,0.075),
     'gemini-4-argon': _rates(2,10,0.1),
     'mai-code-1.1-flash': _rates(0.2,1.2,0.02),
@@ -63,8 +59,6 @@ MODELS = {
     'kimi-k3': _rates(3,15,0.3),
 }
 LONG_CONTEXT = {
-    'gpt-5.4': (272000,_rates(5,22.5,0.5)),
-    'gpt-5.5': (272000,_rates(10,45,1)),
     'gpt-5.6-luna': (200000,_rates(0.4,1.8,0.04,0.5)),
     'gpt-5.6-sol': (272000,_rates(8,30,0.8,10)),
     'gpt-5.6-terra': (272000,_rates(4,18,0.4,5)),
@@ -72,13 +66,13 @@ LONG_CONTEXT = {
     'gpt-6-luna': (272000,_rates(0.2,0.75,0.02,0.25)),
     'gpt-6-sol': (272000,_rates(4,15,0.4,5)),
     'gpt-6.1-sol': (272000,_rates(4,15,0.2,5)),
+    'gpt-6.1-terra': (272000,_rates(2,7.5,0.1,2.5)),
     'claude-haiku-5.5': (100000,_rates(0.5,2.5,0.05,0.625)),
     'grok-4.5': (200000,_rates(4,12,1)),
     'grok-4.6': (200000,_rates(4,12,1)),
     'grok-4.7': (200000,_rates(4,12,1)),
 }
 PROMOTION_END = {
-    'gemini-3.7-flash': date(2026,12,31),
     'gemini-3.8-flash': date(2026,12,31),
     'gemini-4-argon': date(2026,11,30),
 }

@@ -278,7 +278,9 @@ class OpenAICompatTests(unittest.TestCase):
         self.assertEqual(ids, sorted(set(ids)))
         self.assertIn("gpt-4.1", ids)
         self.assertIn("gpt-4o", ids)
-        self.assertIn("gpt-5.5", ids)
+        # gpt-5.5 于 2026-10-26 从 GHCP 下架（404 no provider），已移出核验目录；
+        # 这里改用仍在目录里的条目，断言的是「目录 id 会被收集」而不是某个模型。
+        self.assertIn("gpt-6.1-sol", ids)
         self.assertIn("gpt-5.6-sol", ids)
         self.assertIn("gpt-5.6-luna", ids)
         self.assertIn("gpt-5.6-terra", ids)

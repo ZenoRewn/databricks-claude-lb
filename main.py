@@ -415,27 +415,39 @@ MESSAGES_ENTRY_POINT = "/v1/messages"
 # /responses 上报 "does not support Responses API"。客户端选错入口就是 400。
 OPENAI_COMPAT_DEFAULT_MODELS = {
     # 仅 Responses API
-    "gpt-5-mini":         (RESPONSES_ENTRY_POINT,),
     "gpt-5.3-codex":      (RESPONSES_ENTRY_POINT,),
+    # GHCP 已不再列出 gpt-5.4，但它是每个已配置 Azure OpenAI 端点声明的
+    # deployment，所以这两个入口仍把它路由到 Azure —— 「GHCP 没有」不等于
+    # 「网关不支持」。2026-10-26 实测那一跳回 401（invalid subscription key or
+    # wrong API endpoint）：那是待修的凭据缺陷，不是模型消失，删掉条目只会把
+    # 缺陷藏起来。
     "gpt-5.4":            (RESPONSES_ENTRY_POINT,),
-    "gpt-5.4-mini":       (RESPONSES_ENTRY_POINT,),
-    "gpt-5.5":            (RESPONSES_ENTRY_POINT,),
+    "gpt-5.4-nano":       (RESPONSES_ENTRY_POINT,),
     "gpt-5.6-sol":        (RESPONSES_ENTRY_POINT,),
     "gpt-5.6-terra":      (RESPONSES_ENTRY_POINT,),
+    "gpt-6-astra":        (RESPONSES_ENTRY_POINT,),
     "gpt-6-luna":         (RESPONSES_ENTRY_POINT,),
     "gpt-6-sol":          (RESPONSES_ENTRY_POINT,),
     "gpt-6.1-sol":        (RESPONSES_ENTRY_POINT,),
+    "gpt-6.1-terra":      (RESPONSES_ENTRY_POINT,),
+    "grok-4.6":           (RESPONSES_ENTRY_POINT,),
     "grok-4.7":           (RESPONSES_ENTRY_POINT,),
     "mai-code-1.1-flash": (RESPONSES_ENTRY_POINT,),
     # 两个入口都实测可用
     "gpt-5.6-luna":       (RESPONSES_ENTRY_POINT, CHAT_ENTRY_POINT),
-    # 仅 Chat Completions（这几个由 Azure fallback 服务，不在 Copilot 价目表里）
+    # 仅 Chat Completions（前四个由 Azure fallback 服务，不在 Copilot 价目表里）
     "gpt-4.1":            (CHAT_ENTRY_POINT,),
     "gpt-4.1-2025-04-14": (CHAT_ENTRY_POINT,),
     "gpt-4o":             (CHAT_ENTRY_POINT,),
     "gpt-4o-mini":        (CHAT_ENTRY_POINT,),
     "gemini-3.8-flash":   (CHAT_ENTRY_POINT,),
+    "gemini-4-argon":     (CHAT_ENTRY_POINT,),
 }
+# 2026-10-26 重新核验的结果都在 tests/test_model_catalog.py 里，包括两条**有意
+# 不收录**：`gpt-5.6-sol-fast` 与 `mai-code-2-flash` 实测可用但官方价目页没有它们
+# 的费率（本目录保证每个条目都能被某张表计价）；`kimi-k3` 上游有而网关服务不了，
+# 原因是运维策略（企业号无该能力 + business 号的 allowed_models 不含它），不是
+# 上游缺失。三者都仍可被显式请求。
 
 # 保留 id 视图供既有调用方与测试使用。
 OPENAI_COMPAT_DEFAULT_MODEL_IDS = tuple(OPENAI_COMPAT_DEFAULT_MODELS)
@@ -8854,7 +8866,13 @@ def _collect_model_catalog(azure=None, copilot=None, databricks=None) -> dict:
                 # 唯一收口，per-model 的账户限定也在里面。少问一层会让目录宣传
                 # 一个路由时根本没有候选账户的模型。
                 if ep.supports(model):
-                    catalog.setdefault(model, ())
+                    # 两个来源答的是两个问题，都要保留：**可用性**来自发现的
+                    # capability（快照比任何手写清单都准），**可用入口**来自核验表
+                    # —— 快照只存 id，没有入口信息。早先这里写死 `()`，于是账户
+                    # 一旦发现过 capability，核验过的入口就被整个丢掉：2026-10-26
+                    # 线上 `/v1/models` 的 `gpt-6.1-sol` 没有 `supported_endpoints`，
+                    # 而客户端正是靠它避开那个 400。核验表没覆盖的条目仍然不作断言。
+                    catalog.setdefault(model, OPENAI_COMPAT_DEFAULT_MODELS.get(model, ()))
         # 通配且从未发现过 capability：它实际能服务什么无从枚举，拿静态核验表
         # 当上限，但仍逐个过 supports()，否则账户限定在目录里会失效。
         for ep in wildcards:

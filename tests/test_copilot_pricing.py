@@ -16,7 +16,13 @@ class CopilotPricingTests(unittest.TestCase):
     # rather than a rate the vendor stopped publishing — so they are listed here
     # explicitly instead of the assertion being loosened.
     RETIRED_SINCE_20260921 = {'claude-opus-4.7', 'gemini-3.5-flash',
-                              'gemini-3.6-flash', 'kimi-k2.7-code'}
+                              'gemini-3.6-flash', 'kimi-k2.7-code',
+                              # 2026-10-26 的官方页不再列出这五个。gpt-5.4 等四个
+                              # 仍有 main.MODEL_PRICING 的公开 API 价（gpt-5.4 本就
+                              # 由 Azure 服务，那才是对的那张表）；gemini-3.7-flash
+                              # 的促销期也已过。
+                              'gpt-5-mini', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.5',
+                              'gemini-3.7-flash'}
 
     def test_all_observed_official_rows_match(self):
         snapshot=json.loads((Path(__file__).parent/'fixtures/copilot-pricing-20260921.json').read_text())
@@ -63,8 +69,10 @@ class CopilotPricingTests(unittest.TestCase):
         self.assertIsNone(pricing.get_pricing('gemini-3.8-flash',at=date(2027,1,1)))
 
     def test_no_separate_cache_write_rate_keeps_normal_input_charge(self):
-        quote=pricing.estimate_request('gpt-5.4',1000,0,100,400)
-        self.assertAlmostEqual(quote['estimated_cost_usd'],(600*2.5+400*.25)/1000000)
+        # 原先钉在 gpt-5.4 上，而官方页 2026-10-26 已不再发布它的费率。这里要的只是
+        # 「cache_write 为 0」这一形状，grok-4.7 仍在发布且同形。
+        quote=pricing.estimate_request('grok-4.7',1000,0,100,400)
+        self.assertAlmostEqual(quote['estimated_cost_usd'],(600*2+400*.5)/1000000)
 
 
 class CopilotStatsPricingTests(unittest.IsolatedAsyncioTestCase):

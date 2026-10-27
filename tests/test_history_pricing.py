@@ -221,19 +221,23 @@ class CopilotMessagesBasisTests(unittest.TestCase):
                         self.DAY['cache_creation_tokens'] + self.DAY['cache_read_tokens'])
 
     def test_a_copilot_non_claude_day_keeps_the_inclusive_basis(self):
-        # Unchanged path, pinned by its real shape: gpt-5.4 has a long-context
-        # tier, so a multi-request day returns conservative **bounds** rather
-        # than a point (the day's tier mix is unknowable without request
-        # boundaries). The fix must not collapse that into a single number.
+        # Unchanged path, pinned by its real shape: the model needs a
+        # long-context tier, so a multi-request day returns conservative
+        # **bounds** rather than a point (the day's tier mix is unknowable
+        # without request boundaries). The fix must not collapse that into a
+        # single number. Re-pinned from gpt-5.4 to gpt-6.1-sol on 2026-10-26:
+        # GitHub stopped publishing gpt-5.4, so copilot_pricing no longer prices
+        # it and the row would fall back to the legacy table — which would have
+        # tested the wrong basis.
         day = {'input_tokens': 1000000, 'output_tokens': 10000,
                'cache_creation_tokens': 100000, 'cache_read_tokens': 400000,
                'requests': 5, 'errors': 0}
-        row = main.historical_model_cost('gpt-5.4', {**day, 'by_provider': {'copilot': day}})
+        row = main.historical_model_cost('gpt-6.1-sol', {**day, 'by_provider': {'copilot': day}})
         self.assertEqual(row['pricing_status'], 'complete')
         self.assertEqual(row['pricing_basis'], 'current_copilot_reference')
         self.assertIsNone(row['estimated_cost_usd'], 'a range has no point value')
-        self.assertAlmostEqual(row['estimated_cost_min_usd'], 1.75, places=6)
-        self.assertAlmostEqual(row['estimated_cost_max_usd'], 3.425, places=6)
+        self.assertAlmostEqual(row['estimated_cost_min_usd'], 1.39, places=6)
+        self.assertAlmostEqual(row['estimated_cost_max_usd'], 2.73, places=6)
 
     def test_a_databricks_claude_day_is_unchanged(self):
         row = main.historical_model_cost('databricks-claude-opus-5-5',

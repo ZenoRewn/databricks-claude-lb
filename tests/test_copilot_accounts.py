@@ -237,12 +237,16 @@ class CatalogFollowsAccountPolicyTests(unittest.TestCase):
         self.assertIn('gpt-4o', catalog, 'a shared model stays reachable')
 
     def test_unverified_entry_points_are_not_claimed(self):
-        # gpt-6-astra was unreachable while only the enterprise account was
-        # configured, so its entry point was never measured.
+        # Re-pinned on 2026-10-26: gpt-6-astra *has* been measured since
+        # (200 on /v1/responses, and it is a release business probe), so it now
+        # carries verified entry points. kimi-k3 is the honest stand-in — the
+        # business account lists it, but the gateway cannot reach it and no
+        # entry point was ever measured, so the catalogue claims nothing.
         catalog = self._catalog()
-        self.assertEqual(catalog['gpt-6-astra'], ())
+        self.assertEqual(catalog['gpt-6-astra'], ('/v1/responses',))
+        self.assertEqual(catalog['kimi-k3'], ())
         self.assertNotIn('supported_endpoints',
-                         main._openai_model_entry('gpt-6-astra', catalog['gpt-6-astra']))
+                         main._openai_model_entry('kimi-k3', catalog['kimi-k3']))
 
 
 class AdminEndpointTests(unittest.TestCase):
