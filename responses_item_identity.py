@@ -30,7 +30,23 @@ _REFERENCE_EVENTS = frozenset({
     # Official streaming-event schema: this event has a top-level item_id.
     # Text delta/done carry logprobs themselves; no guessed logprob event.
     "response.output_text.annotation.added",
+    # Reasoning and tool references, all carrying a top-level item_id in the
+    # official schema. Rewriting a reasoning item's id without these is worse
+    # than not rewriting it at all: the unknown-event branch fails closed, so
+    # the stream is cut. 2026-10-27 measured grok-4.7 carrying *six* different
+    # ids for one reasoning item across exactly these events, which rolled back
+    # a release at the business-probe gate.
+    "response.reasoning_summary_part.added", "response.reasoning_summary_part.done",
+    "response.reasoning_summary_text.delta", "response.reasoning_summary_text.done",
+    "response.reasoning_text.delta", "response.reasoning_text.done",
+    "response.function_call_arguments.delta", "response.function_call_arguments.done",
 })
+# Only item types whose reference events are fully enumerated above may be
+# rewritten. An unlisted type keeps the original pass-through behaviour, so an
+# upstream item kind we have never seen cannot cut a stream by drifting its id
+# through an event this module does not know how to repair — which is exactly
+# how grok-4.7 failed when every type became rewritable.
+_REWRITABLE_KINDS = frozenset({"message", "reasoning", "function_call"})
 _TERMINAL_EVENTS = frozenset({
     "response.completed", "response.failed", "response.incomplete",
 })
@@ -267,16 +283,19 @@ class ResponsesItemIdentity:
 
     def _canonical(self, binding, index, ident):
         self._alias(ident, index)
-        # 每一种输出项都算，不只是 message。原方案说的是「维护稳定的**输出项**
-        # 身份」，实现当初收窄到 message，于是 reasoning 项的 id 仍在自己的
-        # added / done / completed 之间漂移 —— 2026-10-27 实测 gpt-6.1-sol
-        # （一直在 stabilize 名单里）三处三个不同 id，而 Codex 按 id 找不到就
-        # 追加，正是这条修复要挡的那个机制。
+        # message / reasoning / function_call 都算，不只是 message。原方案说的是
+        # 「维护稳定的**输出项**身份」，实现当初收窄到 message，于是 reasoning 项的
+        # id 仍在自己的 added / done / completed 之间漂移 —— 2026-10-27 实测
+        # gpt-6.1-sol（一直在 stabilize 名单里）三处三个不同 id，而 Codex 按 id
+        # 找不到就追加，正是这条修复要挡的那个机制。
+        #
+        # 但只限 `_REWRITABLE_KINDS`：改写一个类型就必须认全引用它的事件，否则
+        # 未知事件分支会 fail-closed 把流切断（grok-4.7 就是这样回滚了一次发布）。
         #
         # 改写它们不会回传给上游：`_strip_input_item_ids` 剥掉**每个** input item
         # 的顶层 id（reasoning 在内，实测保留 encrypted_content 后上下文不丢）。
         # 本函数只碰 id，`call_id` / `encrypted_content` / `arguments` 一律不动。
-        if ident == binding.canonical:
+        if binding.kind not in _REWRITABLE_KINDS or ident == binding.canonical:
             return ident
         if not binding.drifted:
             binding.drifted = True
@@ -294,18 +313,20 @@ class ResponsesItemIdentity:
         if isinstance(item, dict) and "id" in item:
             identities.append(item["id"])
         for ident in identities:
-            if binding is not None and ident != binding.canonical:
+            if binding is not None and binding.kind in _REWRITABLE_KINDS and ident != binding.canonical:
                 return True
             if isinstance(ident, str):
                 alias_index = self._lookup(ident)
-                if alias_index is not None and ident != self._bindings[alias_index].canonical:
-                    return True
+                if alias_index is not None:
+                    known = self._bindings[alias_index]
+                    if known.kind in _REWRITABLE_KINDS and ident != known.canonical:
+                        return True
         response = event.get("response")
         output = response.get("output") if isinstance(response, dict) else None
         if isinstance(output, list):
             for index, item in enumerate(output):
                 binding = self._bindings.get(index)
-                if binding is not None and (
+                if binding is not None and binding.kind in _REWRITABLE_KINDS and (
                         not isinstance(item, dict) or item.get("id") != binding.canonical):
                     return True
         return False
@@ -373,10 +394,11 @@ class ResponsesItemIdentity:
         self._reserve_strings(len(item["type"].encode("utf-8")) + len(item["id"].encode("utf-8", "surrogatepass")))
         self._bindings[index] = _Binding(item["type"], item["id"])
         self._tracked_items += 1
-        # 这个计数是「已经对外发出过身份，此后不一致不能再静默降级」的闸门。
-        # 只数 message 时，一个只有 reasoning 项的流会在改写了 id 之后仍报
-        # mapped_items == 0，于是那些守卫会走「还没提交过任何东西」的分支。
-        self._mapped_items += 1
+        # 这个计数是「已经对外发出过身份，此后不一致不能再静默降级」的闸门，
+        # 所以口径必须与「会被改写的类型」一致：只数 message 时，一个只有
+        # reasoning 项的流会在改写了 id 之后仍报 0，守卫会走「还没提交过任何
+        # 东西」的分支；数上不改写的类型则会让纯透传的流也失去降级余地。
+        self._mapped_items += item["type"] in _REWRITABLE_KINDS
         return False
 
     def _done(self, event):

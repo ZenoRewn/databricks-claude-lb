@@ -495,3 +495,96 @@ def test_a_drifting_reasoning_id_cannot_degrade_silently():
     normalizer.transform(added(kind="reasoning"))
     normalizer.transform(reference("B"))
     assert_failure(normalizer, terminal([{"type": "reasoning", "id": "B"}, {"type": "message", "id": "Z"}]))
+
+
+# --- 2026-10-27 发布回滚：覆盖 reasoning 项必须同时认识它的引用事件 ---------
+#
+# 把改写从 message 扩到全部输出项之后，lb-identity-all-items-fd38e8a 这次发布在
+# verifying_business 阶段被 grok-4.7 的探针挡下（completed=false、text_chars=0）并
+# 整体回滚。实测它的 reasoning 项在一条流里带**六个**不同 id，而引用它的是
+# reasoning_summary_part.added / reasoning_summary_text.delta / .done /
+# reasoning_summary_part.done —— 这些都不在 _REFERENCE_EVENTS 里，于是走 _unknown()
+# 的 fail-closed 分支，整条流被中断。
+#
+# fail-closed 本身是对的（半稳定的身份比不稳定更糟），缺的是把这些事件认全。由此
+# 还得出一条更强的约束：只改写**引用事件已经认全**的 item 类型。否则上游哪天多出
+# 一种新 item 类型并让它的 id 漂移，就会以同样的方式打断用户的流 —— 而那正是这次
+# grok-4.7 的遭遇。
+
+
+def _grok_reasoning_shape():
+    """idx=0 reasoning 六个 id，idx=1 message 稳定。取自 2026-10-27 实测形状。"""
+    return [
+        ("response.output_item.added", {"type": "response.output_item.added", "output_index": 0,
+                                        "item": {"type": "reasoning", "id": "A"}}),
+        ("response.reasoning_summary_part.added", {"type": "response.reasoning_summary_part.added",
+                                                   "output_index": 0, "item_id": "B", "summary_index": 0,
+                                                   "part": {"type": "summary_text", "text": ""}}),
+        ("response.reasoning_summary_text.delta", {"type": "response.reasoning_summary_text.delta",
+                                                   "output_index": 0, "item_id": "C", "summary_index": 0,
+                                                   "delta": "thinking"}),
+        ("response.reasoning_summary_text.done", {"type": "response.reasoning_summary_text.done",
+                                                  "output_index": 0, "item_id": "D", "summary_index": 0,
+                                                  "text": "thinking"}),
+        ("response.reasoning_summary_part.done", {"type": "response.reasoning_summary_part.done",
+                                                  "output_index": 0, "item_id": "E", "summary_index": 0,
+                                                  "part": {"type": "summary_text", "text": "thinking"}}),
+        ("response.output_item.done", {"type": "response.output_item.done", "output_index": 0,
+                                       "item": {"type": "reasoning", "id": "F"}}),
+    ]
+
+
+def test_reasoning_reference_events_are_rewritten_not_refused():
+    normalizer = ResponsesItemIdentity()
+    for _, event in _grok_reasoning_shape():
+        actual = payload(normalizer.transform(frame(event)))
+        ident = actual.get("item_id") or actual["item"]["id"]
+        assert ident == "A", actual["type"]
+    normalizer.transform(added(index=1, ident="M", kind="message"))
+    final = payload(normalizer.transform(terminal(
+        [{"type": "reasoning", "id": "G"}, {"type": "message", "id": "M"}])))
+    assert [item["id"] for item in final["response"]["output"]] == ["A", "M"]
+    assert normalizer.summary()["failure_reason"] is None
+
+
+def test_reasoning_summary_payload_fields_are_untouched():
+    normalizer = ResponsesItemIdentity()
+    normalizer.transform(added(kind="reasoning"))
+    actual = payload(normalizer.transform(frame(
+        {"type": "response.reasoning_summary_part.done", "output_index": 0, "item_id": "B",
+         "summary_index": 0, "part": {"type": "summary_text", "text": "B stays in the text"}})))
+    assert actual["item_id"] == "A"
+    assert actual["part"] == {"type": "summary_text", "text": "B stays in the text"}
+    assert actual["summary_index"] == 0
+
+
+def test_function_call_argument_events_follow_the_same_identity():
+    # 同一个坑在工具调用上等着：改写了 function_call 的 id，却不认识
+    # function_call_arguments.* 引用它，第一条漂移的工具流就会被中断。
+    normalizer = ResponsesItemIdentity()
+    normalizer.transform(added(kind="function_call", ident="A", call_id="call-stays", name="tool"))
+    for event in ("response.function_call_arguments.delta", "response.function_call_arguments.done"):
+        actual = payload(normalizer.transform(frame(
+            {"type": event, "output_index": 0, "item_id": "B", "delta": '{"a":1}',
+             "arguments": '{"a":1}'})))
+        assert actual["item_id"] == "A", event
+        assert actual["arguments"] == '{"a":1}'
+
+
+def test_an_item_type_without_known_reference_events_is_left_alone():
+    """未认全引用事件的 item 类型一律不改写 —— 否则下一个 grok-4.7 还会中断。
+
+    这是比「改写全部类型」更强的约束：上游新增一种 item 并让它的 id 漂移时，
+    我们宁可原样转发（客户端最多多显示一条），也不能把整条流打断。
+    """
+    normalizer = ResponsesItemIdentity()
+    normalizer.transform(added(kind="image_generation_call", ident="A"))
+    drifted = frame({"type": "response.image_gen_call.partial_image",
+                     "output_index": 0, "item_id": "B", "partial_image_index": 0})
+    assert normalizer.transform(drifted) is drifted
+    done = payload(normalizer.transform(frame({
+        "type": "response.output_item.done", "output_index": 0,
+        "item": {"type": "image_generation_call", "id": "B"}})))
+    assert done["item"]["id"] == "B"
+    assert normalizer.summary()["failure_reason"] is None
+    assert normalizer.summary()["mapped_items"] == 0
