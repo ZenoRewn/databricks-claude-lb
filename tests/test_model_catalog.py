@@ -133,7 +133,10 @@ class CatalogMatchesProbedRealityTests(unittest.TestCase):
         for model in ('gpt-5.6-sol-fast', 'mai-code-2-flash'):
             with self.subTest(model=model):
                 self.assertNotIn(model, main.OPENAI_COMPAT_DEFAULT_MODELS)
-                self.assertIsNone(copilot_pricing.get_pricing(model))
+        # 2026-11-18 GitHub published a rate for `mai-code-2-flash`; only the
+        # price reason fell away. Advertising it still needs an entry-point
+        # verification, which has not been done.
+        self.assertIsNone(copilot_pricing.get_pricing('gpt-5.6-sol-fast'))
 
     def test_a_model_blocked_only_by_operator_policy_stays_out(self):
         """kimi-k3 is still omitted, but no longer for the reason recorded in 2026-10.

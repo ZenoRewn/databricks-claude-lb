@@ -22,7 +22,9 @@ class CopilotPricingTests(unittest.TestCase):
                               # 由 Azure 服务，那才是对的那张表）；gemini-3.7-flash
                               # 的促销期也已过。
                               'gpt-5-mini', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.5',
-                              'gemini-3.7-flash'}
+                              'gemini-3.7-flash',
+                              # 2026-11-18 的官方页不再列出这两个。
+                              'claude-opus-5', 'gpt-5.6-terra'}
 
     def test_all_observed_official_rows_match(self):
         snapshot=json.loads((Path(__file__).parent/'fixtures/copilot-pricing-20260921.json').read_text())
@@ -47,7 +49,7 @@ class CopilotPricingTests(unittest.TestCase):
 
     def test_aliases_are_explicit_and_unknown_variants_do_not_fall_back(self):
         self.assertEqual(pricing.get_pricing('claude-fable-5.1'),pricing.get_pricing('CLAUDE-FABLE-5-1'))
-        for name in ('gpt-5.6-future','gpt-5.6-luna-pro','claude-fable-5.2','unknown'):
+        for name in ('gpt-5.6-future','gpt-5.6-luna-pro','claude-fable-5.9','unknown'):
             with self.subTest(name=name):self.assertIsNone(pricing.get_pricing(name))
         self.assertEqual(pricing.get_pricing('claude-fable-5.1')['cache_read'],0.25)
         self.assertEqual(pricing.get_pricing('claude-opus-4.8-fast')['input'],10)

@@ -12,15 +12,16 @@ import pytest
 import copilot_pricing as p
 
 HTML = (Path(__file__).parent / 'fixtures/copilot-pricing-20261001.html').read_text()
-LIVE = (Path(__file__).parent / 'fixtures/copilot-pricing-20261026.html').read_text()
+LIVE = (Path(__file__).parent / 'fixtures/copilot-pricing-20261118.html').read_text()
 PREVIOUS = (Path(__file__).parent / 'fixtures/copilot-pricing-20261019.html').read_text()
+OCT26 = (Path(__file__).parent / 'fixtures/copilot-pricing-20261026.html').read_text()
 # Worker scenarios run on the **current** snapshot: a fetched page older than
 # the bundled baseline is refused by design, so feeding the 2026-10-01 excerpt
 # to a worker would exercise the rejection path, not the schedule.
 PAGE = LIVE
 # 跟着 LIVE 快照走。缓存的 fetched_at 早于 CHECKED_ON 会被 load_cache 按
 # provenance 拒绝，所以轮换快照必须一起挪这个基准时间。
-NOW = datetime(2026, 10, 26, 9, tzinfo=timezone.utc)
+NOW = datetime(2026, 11, 18, 9, tzinfo=timezone.utc)
 
 
 def async_test(fn):
@@ -39,11 +40,11 @@ def isolate_catalog():
 def test_the_bundled_baseline_is_a_parsed_snapshot_not_a_hand_list():
     # The baseline must stay exactly what the parser reads off the page it was
     # cut from — that is what keeps it from drifting into hand-typed numbers.
-    catalog = p.parse_pricing_html(LIVE, '2026-10-26')
+    catalog = p.parse_pricing_html(LIVE, '2026-11-18')
     assert catalog['models'] == p.MODELS
     assert catalog['long_context'] == p.LONG_CONTEXT
     assert catalog['promotion_end'] == p.PROMOTION_END
-    assert p.CHECKED_ON == '2026-10-26'
+    assert p.CHECKED_ON == '2026-11-18'
 
 
 def test_the_rotated_baseline_adds_terra_and_retires_five_rates():
@@ -63,7 +64,7 @@ def test_the_rotated_baseline_adds_terra_and_retires_five_rates():
     the page at all.
     """
     before = p.parse_pricing_html(PREVIOUS, '2026-10-19')
-    after = p.parse_pricing_html(LIVE, '2026-10-26')
+    after = p.parse_pricing_html(OCT26, '2026-10-26')
     assert set(after['models']) - set(before['models']) == {'gpt-6.1-terra'}
     assert set(before['models']) - set(after['models']) == {
         'gemini-3.7-flash', 'gpt-5-mini', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.5'}
@@ -74,6 +75,20 @@ def test_the_rotated_baseline_adds_terra_and_retires_five_rates():
         'input': 1, 'output': 5, 'cache_read': 0.05, 'cache_write': 1.25}
     assert after['long_context']['gpt-6.1-terra'] == (
         272000, {'input': 2, 'output': 7.5, 'cache_read': 0.1, 'cache_write': 2.5})
+
+
+def test_the_2026_11_18_rotation_adds_gpt_6_2_and_retires_two_rates():
+    """10-26 → 11-18, measured. Seven models added (gpt-6.2-astra/sol among
+    them), two no longer published: `claude-opus-5` and `gpt-5.6-terra` go
+    back to «unknown» on the offline floor. Nothing that survived is re-priced."""
+    before = p.parse_pricing_html(OCT26, '2026-10-26')
+    after = p.parse_pricing_html(LIVE, '2026-11-18')
+    assert set(after['models']) - set(before['models']) == {
+        'claude-fable-5.2', 'gemini-4-carbon', 'gemini-4-hydrogen', 'gpt-6.2-astra',
+        'gpt-6.2-sol', 'mai-code-2', 'mai-code-2-flash'}
+    assert set(before['models']) - set(after['models']) == {'claude-opus-5', 'gpt-5.6-terra'}
+    for name in set(after['models']) & set(before['models']):
+        assert after['models'][name] == before['models'][name], name
 
 
 def test_the_previous_snapshot_still_parses_and_differs_as_measured():
@@ -144,7 +159,7 @@ async def test_refresh_persists_and_new_instance_waits_until_seven_days(tmp_path
         again = p.PricingRefresh(worker.cache_path, clock=lambda: NOW + timedelta(days=1))
         await again.load_cache()
         assert again.next_due == NOW + timedelta(days=7)
-        assert p.get_metadata()['checked_on'] == '2026-10-26'
+        assert p.get_metadata()['checked_on'] == '2026-11-18'
         assert p.get_metadata()['refresh']['last_success_at'] == NOW.isoformat()
         assert p.get_metadata()['refresh']['stale'] is False
 
@@ -361,3 +376,44 @@ def test_an_unfamiliar_footnote_still_rejects_the_whole_snapshot(note):
     assert 'until December 1, 2026.' not in broken
     with pytest.raises(ValueError):
         p.parse_pricing_html(broken, '2026-10-19')
+
+
+# 2026-11-18: the page appended the post-promotion rate to an «until» footnote
+# («… until December 1, 2026. Starting December 1, 2026, pricing is …»). The
+# whole snapshot was refused for it — so every model published since, gpt-6.2
+# included, stayed «unknown» in production. The trailing sentence is accepted
+# only when it restates the same boundary; the post-promotion rate is *not*
+# adopted (that is a second billing rule the table row does not carry), so the
+# model is unknown after the end date exactly as with a bare «until».
+NOV18 = (Path(__file__).parent / 'fixtures/copilot-pricing-20261118.html').read_text()
+_TAIL = ('Gemini 4 Carbon is available at the promotional pricing of $2.00 per 1M input tokens, '
+         '$0.10 per 1M cached input tokens, and $10.00 per 1M output tokens until December 1, 2026. ')
+
+
+def test_the_2026_11_18_page_parses_and_prices_gpt_6_2():
+    catalog = p.parse_pricing_html(NOV18, '2026-11-18')
+    assert catalog['models']['gpt-6.2-astra'] == {
+        'input': 8.0, 'output': 40.0, 'cache_read': 0.4, 'cache_write': 10.0}
+    assert catalog['long_context']['gpt-6.2-sol'] == (272000, {
+        'input': 4.0, 'output': 15.0, 'cache_read': 0.2, 'cache_write': 5.0})
+    assert catalog['promotion_end']['gemini-4-carbon'] == date(2026, 11, 30)
+
+
+def test_a_post_promotion_sentence_with_another_date_is_rejected():
+    note = 'Starting December 1, 2026, pricing is $4.00 per 1M input tokens'
+    assert note in NOV18
+    broken = NOV18.replace(note, note.replace('December 1', 'December 2'))
+    with pytest.raises(ValueError):
+        p.parse_pricing_html(broken, '2026-11-18')
+
+
+def test_the_image_model_table_is_recognized_and_left_unpriced():
+    # Same page, a second blocker: an image-model table with its own columns.
+    # The gateway serves no image generation, so the table is skipped — by its
+    # exact column set, not by «anything unfamiliar is fine».
+    catalog = p.parse_pricing_html(NOV18, '2026-11-18')
+    assert 'gpt-image-2.5-flare' not in catalog['models']
+    renamed = NOV18.replace('>Image output<', '>Video output<')
+    assert renamed != NOV18
+    with pytest.raises(ValueError):
+        p.parse_pricing_html(renamed, '2026-11-18')

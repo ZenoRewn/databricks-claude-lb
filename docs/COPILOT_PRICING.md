@@ -2,11 +2,13 @@
 
 Author: Zeno Ren
 
-随代码提供的基线核对日期：**2026-10-19**。来源：[GitHub Models and pricing](https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing)。官方表按 token 定价，1 AI credit = 0.01 USD。启用 Copilot 时，项目服务默认每 7 天后台获取、验证并更新官方价格。
+随代码提供的基线核对日期：**2026-11-18**。来源：[GitHub Models and pricing](https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing)。官方表按 token 定价，1 AI credit = 0.01 USD。启用 Copilot 时，项目服务默认每 7 天后台获取、验证并更新官方价格。
 
 `copilot_pricing.py` 基线收录当日官方表的 **33 个模型、13 行长上下文档位**，摘录位于 `tests/fixtures/copilot-pricing-20261019.html`（10 月 1 日摘录与 9 月 21 日 JSON 快照保留用于回归）。相对 10-01 新增 **Claude Haiku 5.5** 与 **Gemini 4 Argon**，**下架** Claude Opus 4.7、Gemini 3.5/3.6 Flash、Kimi K2.7 Code。
 
 **刷新不是只增不减。** 官方会移除退役模型，而保留一个供应商已停止公布的费率等于自己编价 —— 所以退役模型的已记录用量回到「未知」。这一点由 `tests/test_copilot_pricing.py` 的显式退役清单钉住。
+
+**2026-11-18 又一次整份快照被拒，两个原因。** ① Gemini 4 Carbon 的 `until` 脚注追加了一句促销后价格（「Starting December 1, 2026, pricing is …」）；② 新增了一张 GPT Image 2.5 Flare 的图像模型表（`Text input`/`Image output` 等列）。按设计 fail-closed，于是 GPT-6.2 Astra/Sol 等此后上线的模型在生产一直是未知。现在：追加句只在**重述同一边界日**时接受，且**不采用**其中的促销后价格（到期后仍回到未知）；图像表只按那组**确切的列**跳过（网关不服务图像生成），其它陌生列照旧整体拒绝。内置基线同步轮换到 11-18 快照：新增 7 个模型（含 `gpt-6.2-astra`/`gpt-6.2-sol`），`claude-opus-5` 与 `gpt-5.6-terra` 已不在官方页、回到未知。
 
 **2026-10-19 修了一个让刷新从未成功过的缺陷。** 生产 `last_success_at` 一直是 `null`：官方页新增了一条促销脚注写作 「… **until** December 1, 2026」，而解析器只认 `through <date>`，于是整份快照被拒（按设计 fail-closed），目录停在内置基线、此后发布的模型全是未知。两个介词**语义不同**：`promotion_end` 是最后有效日（字段名就叫 `valid_through`），所以 `until December 1` 的最后有效日是 **11-30**，把它读成 12-01 会在那一天报出促销价。
 
@@ -40,12 +42,14 @@ Author: Zeno Ren
 | GPT-6 Luna | $0.10 | $0.50 | $0.01 | $0.125 |
 | GPT-6 Sol | $2.00 | $10.00 | $0.20 | $2.50 |
 | GPT-6.1 Sol | $2.00 | $10.00 | $0.10 | $2.50 |
+| GPT-6.2 Astra | $8.00 | $40.00 | $0.40 | $10.00 |
+| GPT-6.2 Sol | $2.00 | $10.00 | $0.10 | $2.50 |
 | Claude Opus 5.5 | $4.00 | $20.00 | $0.20 | $5.00 |
 | Claude Sonnet 5.5 | $2.00 | $10.00 | $0.20 | $2.50 |
 | Grok 4.7 | $2.00 | $6.00 | $0.50 | 不适用 |
 | Claude Fable 5.1 | $10.00 | $50.00 | $0.25 | $12.50 |
 
-表中单位均为 USD / 100 万 tokens，列出默认档；模块包含官方长上下文档。GPT-5.6 Luna 和 Grok 的阈值为 200,000 输入 tokens；GPT-5.4/5.5、GPT-5.6 Sol/Terra、GPT-6 Astra/Luna/Sol 和 GPT-6.1 Sol 为 272,000。严格超过阈值才使用长上下文档，按每条上游已报告 usage 分别计算，再累加费用，不能把多次短请求的累计输入当成长上下文请求。
+表中单位均为 USD / 100 万 tokens，列出默认档；模块包含官方长上下文档。GPT-5.6 Luna 和 Grok 的阈值为 200,000 输入 tokens；GPT-5.4/5.5、GPT-5.6 Sol/Terra、GPT-6 Astra/Luna/Sol、GPT-6.1 Sol 和 GPT-6.2 Astra/Sol 为 272,000。严格超过阈值才使用长上下文档，按每条上游已报告 usage 分别计算，再累加费用，不能把多次短请求的累计输入当成长上下文请求。
 
 Copilot 的 Chat/Responses 输入统计是包含缓存细分的总输入，因此普通输入计费量为 `input_tokens - cache_read_tokens - cache_creation_tokens`。缓存读取与写入分别应用官方价格；未设置独立缓存写入费的模型，其写入 tokens 仍按普通输入价估算，不视为免费。计费估算不改变原始 token 统计或追加账本。负数、不完整的必需 usage 或不一致的缓存总量不生成完整费用估计。
 

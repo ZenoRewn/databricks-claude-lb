@@ -430,6 +430,8 @@ OPENAI_COMPAT_DEFAULT_MODELS = {
     "gpt-6-sol":          (RESPONSES_ENTRY_POINT,),
     "gpt-6.1-sol":        (RESPONSES_ENTRY_POINT,),
     "gpt-6.1-terra":      (RESPONSES_ENTRY_POINT,),
+    "gpt-6.2-astra":      (RESPONSES_ENTRY_POINT,),
+    "gpt-6.2-sol":        (RESPONSES_ENTRY_POINT,),
     "grok-4.6":           (RESPONSES_ENTRY_POINT,),
     "grok-4.7":           (RESPONSES_ENTRY_POINT,),
     "mai-code-1.1-flash": (RESPONSES_ENTRY_POINT,),
