@@ -1,7 +1,7 @@
 """GitHub Copilot token-price estimates, not invoices. Author: Zeno Ren.
 
 Snapshot: https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing
-Bundled 2026-10-01. Rates are USD per million tokens; 1 AI credit = USD 0.01.
+Bundled 2026-11-18. Rates are USD per million tokens; 1 AI credit = USD 0.01.
 Only explicit model IDs/decimal-separator aliases match; no family fallback.
 """
 import asyncio
@@ -19,8 +19,10 @@ import tempfile
 import httpx
 
 SOURCE_URL = 'https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing'
-CHECKED_ON = '2026-10-26'
+CHECKED_ON = '2026-11-18'
 AI_CREDIT_USD = 0.01
+IMAGE_TABLE_HEADERS = ['Model', 'Release status', 'Text input', 'Cached text input',
+                       'Image input', 'Cached image input', 'Image output']
 
 
 def _rates(input_price, output_price, cached_input, cache_write=0):
@@ -32,7 +34,6 @@ MODELS = {
     'gpt-5.4-nano': _rates(0.2,1.25,0.02),
     'gpt-5.6-luna': _rates(0.2,1.2,0.02,0.25),
     'gpt-5.6-sol': _rates(4,20,0.4,5),
-    'gpt-5.6-terra': _rates(2,12,0.2,2.5),
     'gpt-6-astra': _rates(10,50,1,12.5),
     'gpt-6-luna': _rates(0.1,0.5,0.01,0.125),
     'gpt-6-sol': _rates(2,10,0.2,2.5),
@@ -43,7 +44,6 @@ MODELS = {
     'claude-sonnet-4': _rates(3,15,0.3,3.75),
     'claude-sonnet-4.6': _rates(3,15,0.3,3.75),
     'claude-opus-4.8': _rates(5,25,0.5,6.25),
-    'claude-opus-5': _rates(5,25,0.5,6.25),
     'claude-opus-5.5': _rates(4,20,0.2,5),
     'claude-sonnet-5': _rates(2,10,0.2,2.5),
     'claude-sonnet-5.5': _rates(2,10,0.1,2.5),
@@ -57,11 +57,17 @@ MODELS = {
     'grok-4.6': _rates(2,6,0.5),
     'grok-4.7': _rates(2,6,0.5),
     'kimi-k3': _rates(3,15,0.3),
+    'gpt-6.2-astra': _rates(8,40,0.4,10),
+    'gpt-6.2-sol': _rates(2,10,0.1,2.5),
+    'claude-fable-5.2': _rates(8,40,0.2,10),
+    'gemini-4-carbon': _rates(2,10,0.1),
+    'gemini-4-hydrogen': _rates(1.5,7.5,0.075),
+    'mai-code-2': _rates(0.5,2.5,0.025),
+    'mai-code-2-flash': _rates(0.05,0.25,0.005),
 }
 LONG_CONTEXT = {
     'gpt-5.6-luna': (200000,_rates(0.4,1.8,0.04,0.5)),
     'gpt-5.6-sol': (272000,_rates(8,30,0.8,10)),
-    'gpt-5.6-terra': (272000,_rates(4,18,0.4,5)),
     'gpt-6-astra': (272000,_rates(20,75,2,25)),
     'gpt-6-luna': (272000,_rates(0.2,0.75,0.02,0.25)),
     'gpt-6-sol': (272000,_rates(4,15,0.4,5)),
@@ -71,10 +77,15 @@ LONG_CONTEXT = {
     'grok-4.5': (200000,_rates(4,12,1)),
     'grok-4.6': (200000,_rates(4,12,1)),
     'grok-4.7': (200000,_rates(4,12,1)),
+    'gpt-6.2-astra': (272000,_rates(16,60,0.8,20)),
+    'gpt-6.2-sol': (272000,_rates(4,15,0.2,5)),
 }
 PROMOTION_END = {
     'gemini-3.8-flash': date(2026,12,31),
     'gemini-4-argon': date(2026,11,30),
+    'gemini-4-carbon': date(2026,11,30),
+    'mai-code-2': date(2027,5,16),
+    'mai-code-2-flash': date(2027,5,16),
 }
 
 
@@ -322,7 +333,11 @@ def _promotion(note, name, rates):
     match = re.fullmatch(
         r'(.+) (?:is|are) available at the promotional pricing of (\$[\d.]+) per 1M input tokens, '
         r'(\$[\d.]+) per 1M cached input tokens, and (\$[\d.]+) per 1M output tokens '
-        r'(through|until) ([A-Za-z]+ \d{1,2}, \d{4})\.', note)
+        r'(through|until) ([A-Za-z]+ \d{1,2}, \d{4})\.'
+        # 2026-11-18 起 «until» 脚注会追加促销后价格。只在它重述同一个边界日时接受，
+        # 且不采用那个价格（表格行不承载第二条计费规则），到期后照旧回到未知。
+        r'(?: Starting \6, pricing is \$[\d.]+ per 1M input tokens, \$[\d.]+ per 1M cached input tokens, '
+        r'and \$[\d.]+ per 1M output tokens\.)?', note)
     if not match:
         raise ValueError('Unrecognized pricing footnote')
     models, inp, cached, output, preposition, end = match.groups()
@@ -356,6 +371,9 @@ def parse_pricing_html(html, checked_on):
             continue
         headers = [cell['text'] for cell in rows[0]]
         if 'Model' not in headers:
+            continue
+        # 图像生成模型按图像 token 计价，网关不服务它；只按这组确切的列跳过。
+        if headers == IMAGE_TABLE_HEADERS:
             continue
         if (set(headers) - allowed or len(set(headers)) != len(headers)
                 or not {'Model', 'Input', 'Cached input', 'Output'}.issubset(headers)

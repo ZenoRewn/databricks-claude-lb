@@ -261,3 +261,18 @@ class CopilotMessagesBasisTests(unittest.TestCase):
         self.assertEqual(row['pricing_status'], 'partial')
         self.assertAlmostEqual(row['known_cost_subtotal_usd'], self.EXPECTED, places=6)
 
+
+
+class Gpt62PricingTests(unittest.TestCase):
+    """GPT-6.2 rows as published 2026-11-18 (default ≤272K, long >272K)."""
+
+    def test_default_and_long_context_rates(self):
+        cases = {'gpt-6.2-astra': ((8, 40, 0.4, 10), (16, 60, 0.8, 20)),
+                 'gpt-6.2-sol': ((2, 10, 0.1, 2.5), (4, 15, 0.2, 5))}
+        for model, (default, long) in cases.items():
+            keys = ('input', 'output', 'cache_read', 'cache_write')
+            self.assertEqual(pricing.MODELS[model], dict(zip(keys, default)))
+            self.assertEqual(pricing.LONG_CONTEXT[model], (272000, dict(zip(keys, long))))
+
+    def test_dash_alias_matches(self):
+        self.assertIsNotNone(pricing.estimate_request('gpt-6-2-sol', 1000, 100))
