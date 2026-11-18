@@ -11,3 +11,5 @@ Pillow>=10.0.0
 aiomysql>=0.2.0
 # 凭据录入的应用层封装（AES-GCM）；密钥来自 LB_CREDENTIAL_KEY，不入库
 cryptography>=46.0.0
+# Azure OpenAI 端点 auth: aad（Entra / workload identity）；仅该模式下才会导入
+azure-identity>=1.25.0

@@ -2347,6 +2347,9 @@ class AzureOpenAIEndpoint:
     api_key: str
     deployments: list = field(default_factory=list)  # 可服务的模型/部署列表
     weight: int = 1
+    # 'key' 走 `api-key` 头；'aad' 走 Entra（workload identity）bearer token。
+    # 资源被策略设置 disableLocalAuth 后 key 一律 401，只能用 'aad'。
+    auth: str = 'key'
 
     # 运行时统计字段（与 WorkspaceEndpoint 保持一致）
     active_requests: int = field(default=0, repr=False)
@@ -2413,6 +2416,31 @@ COPILOT_LEGACY_AUTH_FILE = Path.home() / ".config" / "copilot-lb" / "auth.json"
 
 
 AZURE_V1_PATHS = {"responses": "/openai/v1/responses", "chat": "/openai/v1/chat/completions"}
+
+
+AZURE_AUTH_MODES = ('key', 'aad')
+_AZURE_CREDENTIAL = None
+
+
+def _azure_credential():
+    """进程内共享一个 DefaultAzureCredential：它自带 token 缓存，按请求新建会让缓存失效。"""
+    global _AZURE_CREDENTIAL
+    if _AZURE_CREDENTIAL is None:
+        from azure.identity import DefaultAzureCredential
+        _AZURE_CREDENTIAL = DefaultAzureCredential()
+    return _AZURE_CREDENTIAL
+
+
+async def azure_auth_headers(endpoint) -> dict:
+    """Azure OpenAI 请求头的唯一收口；三个调用点（首发与两条重试路径）共用。
+
+    get_token 是同步调用（缓存命中时不发网络请求），放到线程里避免阻塞事件循环。
+    """
+    if getattr(endpoint, 'auth', 'key') == 'aad':
+        token = await asyncio.to_thread(
+            _azure_credential().get_token, 'https://cognitiveservices.azure.com/.default')
+        return {"Authorization": f"Bearer {token.token}", "Content-Type": "application/json"}
+    return {"api-key": endpoint.api_key, "Content-Type": "application/json"}
 
 
 def azure_request_url(endpoint, api_type: str) -> str:
@@ -4395,7 +4423,7 @@ class AzureOpenAIProxy:
 
             url = azure_request_url(endpoint, api_type)
             label = "Responses" if api_type == "responses" else "Chat"
-            headers = {"api-key": endpoint.api_key, "Content-Type": "application/json"}
+            headers = await azure_auth_headers(endpoint)
             logger.info(f"[Azure {label}][{model}] -> {endpoint.name} (attempt {attempt + 1})")
 
             try:
@@ -4575,7 +4603,7 @@ class AzureOpenAIProxy:
                                     current_url = azure_request_url(current_endpoint, "responses")
                                 else:
                                     current_url = azure_request_url(current_endpoint, "chat")
-                                current_headers = {"api-key": current_endpoint.api_key, "Content-Type": "application/json"}
+                                current_headers = await azure_auth_headers(current_endpoint)
                                 rejection = await start_current_request(current_endpoint)
                                 if rejection is not None:
                                     yield rejection
@@ -4636,7 +4664,7 @@ class AzureOpenAIProxy:
                                 current_url = azure_request_url(current_endpoint, "responses")
                             else:
                                 current_url = azure_request_url(current_endpoint, "chat")
-                            current_headers = {"api-key": current_endpoint.api_key, "Content-Type": "application/json"}
+                            current_headers = await azure_auth_headers(current_endpoint)
                             rejection = await start_current_request(current_endpoint)
                             if rejection is not None:
                                 yield rejection
@@ -7984,13 +8012,18 @@ def load_config(config_path: str = "config.yaml") -> tuple:
         azure_lb_config = azure_config.get("load_balancer", lb_config)
         azure_endpoints = []
         for ep in azure_config.get("endpoints", []):
+            auth = ep.get("auth", "key")
+            if auth not in AZURE_AUTH_MODES:
+                raise ValueError(f'azure_openai.endpoints[{ep["name"]!r}].auth must be one of {AZURE_AUTH_MODES}')
             azure_endpoints.append(AzureOpenAIEndpoint(
                 name=ep["name"],
                 endpoint=ep["endpoint"],
-                api_key=resolve_credential(
+                # aad 端点没有 key；key 端点仍要求引用解析得到值（见 resolve_credential）。
+                api_key="" if auth == "aad" else resolve_credential(
                     ep["api_key"], field=f'azure_openai.endpoints[{ep["name"]!r}].api_key'),
                 deployments=ep.get("deployments", []),
                 weight=ep.get("weight", 1),
+                auth=auth,
             ))
             logger.info(f"Loaded Azure OpenAI endpoint: {ep['name']} (deployments: {ep.get('deployments', [])})")
 
