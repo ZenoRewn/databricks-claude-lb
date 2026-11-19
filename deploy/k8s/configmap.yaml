@@ -70,6 +70,12 @@ data:
 
     azure_openai:
       endpoints:
+        # 资源若被策略设置 disableLocalAuth，key 一律 401：改用 `auth: aad`
+        # （workload identity；无需 api_key，endpoint 须用自定义子域名）。例：
+        #   - name: eastus2-azure-ai
+        #     endpoint: https://<custom-subdomain>.cognitiveservices.azure.com
+        #     auth: aad
+        #     deployments: [gpt-5.4]
         - name: eastus2-azure-ai
           endpoint: https://eastus2-azureai-service.cognitiveservices.azure.com
           api_key: ${AZURE_OPENAI_KEY_EASTUS2_AZURE_AI}
