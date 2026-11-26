@@ -77,6 +77,8 @@ data:
         #     auth: aad
         #     deployments: [gpt-5.4]
         # 判定模型（Microsoft Decision）不进 deployments：它只走 POST /v1/decision。
+        # 需要 `Foundry User` 角色（OpenAI User 不含 /providers/* 的 data action），并用
+        # services.ai.azure.com 域名 —— 2026-11-26 实测 cognitiveservices 域名对它回 401。
         # 写成 {对外名: 部署名}，对外名出现在 /v1/models 并用于计价：
         #     decision_deployments: {MAI-Decision-1.1: Decision-1.1}
         - name: eastus2-azure-ai
