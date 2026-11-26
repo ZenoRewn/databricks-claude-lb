@@ -151,7 +151,7 @@ class PhaseMetrics:
         name = 'lb_request_phase_duration_seconds'
         lines = [f'# HELP {name} Observed per-request phase durations including failures; nested phases are not additive',
                  f'# TYPE {name} histogram']
-        for api in ('messages', 'responses', 'chat'):
+        for api in ('messages', 'responses', 'chat', 'decision'):
             for phase in PHASES:
                 labels = f'api_type="{api}",phase="{phase}"'
                 for upper in BUCKETS:

@@ -17,7 +17,8 @@ if not all(math.isfinite(v) and v > 0 for v in (TOTAL_TIMEOUT, STARTUP_TIMEOUT))
 
 CURRENT_DEADLINE = ContextVar('inference_deadline', default=None)
 HEADER_TIMER = ContextVar('upstream_header_timer', default=None)
-ROUTES = {'/v1/messages':'messages', '/v1/responses':'responses', '/v1/chat/completions':'chat'}
+ROUTES = {'/v1/messages':'messages', '/v1/responses':'responses', '/v1/chat/completions':'chat',
+          '/v1/decision':'decision'}
 
 
 def parse_startup_overrides(value):

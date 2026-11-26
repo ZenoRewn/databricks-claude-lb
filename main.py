@@ -388,6 +388,7 @@ def _csv_env_set(name: str, default: str) -> set:
 
 RESPONSES_ENTRY_POINT = "/v1/responses"
 CHAT_ENTRY_POINT = "/v1/chat/completions"
+DECISION_ENTRY_POINT = "/v1/decision"
 MESSAGES_ENTRY_POINT = "/v1/messages"
 
 # Copilot 端点用 models=[] 通配时，网关无从知道上游服务哪些模型，所以这里给一份
@@ -1549,6 +1550,13 @@ MODEL_PRICING = {
     "o3":      {"input": 2.00, "output": 8.00, "cache_write": 0.0, "cache_read": 0.50},
     "o1":      {"input": 15.00, "output": 60.00, "cache_write": 0.0, "cache_read": 7.50},
 
+    # ---------- Microsoft Decision（Azure Foundry 判定模型） ----------
+    # Azure Retail Prices API，eastus2「Decision 1.1 Gl 1M Tokens」= $0.042 / 1M，
+    # 输入输出同价（2026-11-26 核对；DataZone 部署为 0.046–0.05，本表只收 Global）。
+    # key 用对外名 `mai-decision-1.1`：子串匹配，`Decision-1.1` 这类部署名不会命中，
+    # 所以对外名与部署名分开配置时用量按对外名记账。
+    "mai-decision-1.1": {"input": 0.042, "output": 0.042, "cache_write": 0.0, "cache_read": 0.0},
+
     # ---------- Google Gemini（GHCP 提供） ----------
     "gemini-2.5-pro":   {"input": 1.25, "output": 10.00, "cache_write": 0.0, "cache_read": 0.125},
     "gemini-2.5-flash": {"input": 0.30, "output": 2.50,  "cache_write": 0.0, "cache_read": 0.075},
@@ -2350,6 +2358,10 @@ class AzureOpenAIEndpoint:
     # 'key' 走 `api-key` 头；'aad' 走 Entra（workload identity）bearer token。
     # 资源被策略设置 disableLocalAuth 后 key 一律 401，只能用 'aad'。
     auth: str = 'key'
+    # 判定类部署（Microsoft Decision）：对外模型名 -> 部署名。它们只说
+    # `/providers/microsoft/v1/systemone`，与 `deployments`（chat/responses）是两个
+    # 不相交的候选集 —— 混进去会让两个生成式入口把请求发给一个只会回 404 的部署。
+    decision_deployments: dict = field(default_factory=dict)
 
     # 运行时统计字段（与 WorkspaceEndpoint 保持一致）
     active_requests: int = field(default=0, repr=False)
@@ -2416,6 +2428,9 @@ COPILOT_LEGACY_AUTH_FILE = Path.home() / ".config" / "copilot-lb" / "auth.json"
 
 
 AZURE_V1_PATHS = {"responses": "/openai/v1/responses", "chat": "/openai/v1/chat/completions"}
+# Microsoft Decision 的唯一入口（Learn 文档，2026-11-26 对 eastus2 实测 200）。它不是
+# OpenAI v1 面的一部分，所以不进上表 —— 那张表的约定是「全部在 /openai/v1/ 下」。
+AZURE_DECISION_PATH = "/providers/microsoft/v1/systemone"
 
 
 AZURE_AUTH_MODES = ('key', 'aad')
@@ -2443,6 +2458,41 @@ async def azure_auth_headers(endpoint) -> dict:
     return {"api-key": endpoint.api_key, "Content-Type": "application/json"}
 
 
+def _azure_models_for(endpoint, api_type=None):
+    """端点在这个协议面上能服务的模型名：判定面与生成面是不相交的两张表。"""
+    if api_type == 'decision':
+        return getattr(endpoint, 'decision_deployments', None) or {}
+    return endpoint.deployments
+
+
+DECISION_QUESTION_TYPES = ('noul', 'choice', 'score')
+
+
+def decision_request_error(body) -> Optional[str]:
+    """`/v1/decision` 请求体的形状校验；合法返回 None。
+
+    只挡**确定**会失败或网关服务不了的形状（问题类型、空问题集、流式），具体语义
+    （criteria 的写法、图片引用）留给上游判 —— 在这里重写一份上游的校验只会漂移。
+    """
+    if not isinstance(body, dict):
+        return 'JSON body must be an object'
+    if not isinstance(body.get('model'), str) or not body['model'].strip():
+        return 'model must be a nonempty string'
+    if not isinstance(body.get('state'), (str, dict, list)):
+        return 'state must be text or JSON'
+    questions = body.get('questions')
+    if not isinstance(questions, dict) or not questions:
+        return 'questions must be a nonempty object'
+    for name, question in questions.items():
+        if not isinstance(question, dict) or question.get('type') not in DECISION_QUESTION_TYPES:
+            return f'questions[{name!r}].type must be one of {DECISION_QUESTION_TYPES}'
+    if 'assets' in body and not isinstance(body['assets'], dict):
+        return 'assets must be an object'
+    if body.get('stream'):
+        return 'decision models do not stream'
+    return None
+
+
 def azure_request_url(endpoint, api_type: str) -> str:
     """Azure Foundry 的 v1 GA 请求 URL。
 
@@ -2452,7 +2502,7 @@ def azure_request_url(endpoint, api_type: str) -> str:
 
     三个调用点（首发与两条重试路径）共用这里，避免再出现版本号只改了一半的情况。
     """
-    path = AZURE_V1_PATHS.get(api_type)
+    path = AZURE_DECISION_PATH if api_type == 'decision' else AZURE_V1_PATHS.get(api_type)
     if path is None:
         raise ValueError(f'unsupported Azure api_type: {api_type!r}')
     return f"{str(endpoint.endpoint).rstrip('/')}{path}"
@@ -3490,11 +3540,13 @@ class LoadBalancer:
             weights = [ep.weight for ep in available]
             return random.choices(available, weights=weights, k=1)[0]
 
-    def select_endpoint_for_model(self, model: str, *, tried=None):
+    def select_endpoint_for_model(self, model: str, *, tried=None, api_type=None):
         """从可用端点中筛选支持指定模型的端点，再按策略选择。
-        P1.3: HTML 软熔断优先跳过；全冷却时降级到"最小活跃"（同 CopilotProxy._select_endpoint 语义）。"""
+        P1.3: HTML 软熔断优先跳过；全冷却时降级到"最小活跃"（同 CopilotProxy._select_endpoint 语义）。
+        `api_type='decision'` 换用判定类部署表；其他调用方看不到那张表。"""
         available = self.get_available_endpoints()
-        matched = self._prefer_untried(self._prefer_html_fresh([ep for ep in available if model in ep.deployments]), tried)
+        matched = self._prefer_untried(self._prefer_html_fresh(
+            [ep for ep in available if model in _azure_models_for(ep, api_type)]), tried)
         if not matched:
             return None
 
@@ -3716,6 +3768,8 @@ class LoadBalancer:
             }
             if hasattr(ep, "deployments"):
                 stat["deployments"] = ep.deployments
+                if getattr(ep, "decision_deployments", None):
+                    stat["decision_deployments"] = dict(ep.decision_deployments)
             elif getattr(ep, "provider", None) == "azure_anthropic" and ep.models:
                 # Foundry declares its models as `deployments` in config and has
                 # no Models API to ask, so this list is the only statement of
@@ -4386,6 +4440,15 @@ class AzureOpenAIProxy:
         """代理 Azure OpenAI Chat Completions API"""
         return await self._proxy(body, stream=stream, api_type="chat")
 
+    async def proxy_decision(self, body: dict):
+        """代理 Microsoft Decision（`/providers/microsoft/v1/systemone`），只有非流式。
+
+        与两个生成式入口共用同一条重试/熔断/结算路径，所以「执行状态不明不重放」
+        原样适用：判定请求虽然没有工具副作用，但每次执行都计费，不明状态下重放
+        等于替调用方多花一次钱。
+        """
+        return await self._proxy(body, stream=False, api_type="decision")
+
     async def _proxy(self, body: dict, stream: bool, api_type: str):
         model = body.get("model", "unknown")
         max_retries = 3
@@ -4397,10 +4460,13 @@ class AzureOpenAIProxy:
             body["stream_options"] = {"include_usage": True}
 
         for attempt in range(max_retries):
-            endpoint = self.load_balancer.select_endpoint_for_model(model, tried=tried)
+            endpoint = self.load_balancer.select_endpoint_for_model(
+                model, tried=tried, api_type="decision" if api_type == "decision" else None)
             if not endpoint:
-                if any(model in ep.deployments for ep in self.load_balancer.endpoints):
-                    raise self.load_balancer.unavailable([ep for ep in self.load_balancer.endpoints if model in ep.deployments])
+                declared = [ep for ep in self.load_balancer.endpoints
+                            if model in _azure_models_for(ep, api_type)]
+                if declared:
+                    raise self.load_balancer.unavailable(declared)
                 raise HTTPException(
                     status_code=404,
                     detail={"error": {"message": f"No endpoint available for model '{model}'"}},
@@ -4422,9 +4488,13 @@ class AzureOpenAIProxy:
                 attempt_ended = True
 
             url = azure_request_url(endpoint, api_type)
-            label = "Responses" if api_type == "responses" else "Chat"
+            label = {"responses": "Responses", "decision": "Decision"}.get(api_type, "Chat")
             headers = await azure_auth_headers(endpoint)
             logger.info(f"[Azure {label}][{model}] -> {endpoint.name} (attempt {attempt + 1})")
+            # 判定面的对外名与部署名可以不同（`MAI-Decision-1.1` -> `Decision-1.1`），
+            # 上游只认部署名；用量与日志仍记对外名，与调用方看到的一致。
+            upstream_body = ({**body, "model": endpoint.decision_deployments[model]}
+                             if api_type == "decision" else body)
 
             try:
                 if stream:
@@ -4433,7 +4503,7 @@ class AzureOpenAIProxy:
                         endpoint, url, body, headers, model, api_type, start_time, attempt_lease=attempt_lease
                     )
                 result = await self._normal_request(
-                    endpoint, url, body, headers, model, api_type, start_time
+                    endpoint, url, upstream_body, headers, model, api_type, start_time
                 )
                 success,neutral = _buffered_settlement(result)
                 await end_attempt(success=success,is_client_error=neutral)
@@ -8024,6 +8094,7 @@ def load_config(config_path: str = "config.yaml") -> tuple:
                 deployments=ep.get("deployments", []),
                 weight=ep.get("weight", 1),
                 auth=auth,
+                decision_deployments=_parse_decision_deployments(ep),
             ))
             logger.info(f"Loaded Azure OpenAI endpoint: {ep['name']} (deployments: {ep.get('deployments', [])})")
 
@@ -8359,6 +8430,29 @@ async def _inject_request_id_middleware(request: Request, call_next):
         response.headers.setdefault("X-Request-Id", rid)
         response.headers.setdefault("OpenAI-Request-Id", rid)
     return response
+
+
+def _parse_decision_deployments(ep: dict) -> dict:
+    """`decision_deployments`：列表（对外名 = 部署名）或 {对外名: 部署名}。
+
+    写错没有症状（模型只是静默地不出现），所以与 `${ENV}` 引用同一个判断：拒绝启动。
+    同一个名字既是生成式部署又是判定部署也拒绝 —— 那会让它同时出现在两张候选表里。
+    """
+    raw = ep.get("decision_deployments")
+    if raw is None:
+        return {}
+    where = f'azure_openai.endpoints[{ep.get("name")!r}].decision_deployments'
+    if isinstance(raw, list):
+        raw = {item: item for item in raw}
+    if not isinstance(raw, dict):
+        raise ValueError(f'{where} must be a list or a mapping')
+    for public, deployment in raw.items():
+        if not (isinstance(public, str) and public.strip() and isinstance(deployment, str) and deployment.strip()):
+            raise ValueError(f'{where} entries must be nonempty strings')
+    overlap = set(raw) & set(ep.get("deployments") or [])
+    if overlap:
+        raise ValueError(f'{where} overlaps deployments: {sorted(overlap)}')
+    return dict(raw)
 
 
 def _admission_tenant(scope):
@@ -8832,6 +8926,26 @@ def _model_pinned_to_openai_style_provider(model: str) -> bool:
     return any(p in OPENAI_STYLE_PROVIDERS for p in store.model_preference(model))
 
 
+def _decision_models() -> set:
+    endpoints = getattr(getattr(azure_proxy, "load_balancer", None), "endpoints", None) or []
+    return {m for ep in endpoints
+            for m in (getattr(ep, "decision_deployments", None) or {})}
+
+
+def _reject_decision_model_on_openai(model: str, api_type: str):
+    """判定模型不是生成式模型：在 chat/responses 上给出可操作的 400，而不是 404。
+
+    错误码沿用 GHCP 对「模型存在但入口不对」的 `unsupported_api_for_model`，
+    客户端已经按它分支，不需要再认一个新码。
+    """
+    if model in _decision_models():
+        raise HTTPException(status_code=400, detail={"error": {
+            "code": "unsupported_api_for_model",
+            "message": (f"Model '{model}' is a decision model and is not accessible via the "
+                        f"{api_type} endpoint; use POST /v1/decision."),
+        }})
+
+
 def _reject_anthropic_on_openai(model: str):
     """claude-* 默认不走 OpenAI 风格端点；逐模型显式指派后才放行。
 
@@ -8880,6 +8994,10 @@ def _collect_model_catalog(azure=None, copilot=None, databricks=None) -> dict:
             for model in getattr(ep, "deployments", []) or []:
                 if model:
                     catalog.setdefault(str(model), ())
+            # 判定模型的入口是确定的（只有一个），所以与配置发现来的生成式条目不同，
+            # 这里**要**声明 —— 否则对话客户端会把它当成可聊天的模型去选。
+            for model in getattr(ep, "decision_deployments", None) or {}:
+                catalog[str(model)] = (DECISION_ENTRY_POINT,)
 
     if copilot:
         wildcards = []
@@ -9287,6 +9405,7 @@ async def _route_openai(body: dict, stream: bool, api_type: str, request_id: Opt
     避免 fallback 时被 Azure 抛误导性 404（Azure 没该 deployment 但显示 'No endpoint available'）"""
     model = body.get("model", "")
     _reject_anthropic_on_openai(model)
+    _reject_decision_model_on_openai(model, api_type)
 
     azure_supports = _azure_supports_model(model)
     copilot_can = copilot_proxy is not None and copilot_proxy.can_handle(model, api_type)
@@ -9624,6 +9743,45 @@ async def responses(request: Request, x_api_key: Optional[str] = Header(None, al
         body, stream=stream, request_id=request_id,
         disconnect_checker=_stream_disconnect_checker(request, stream),
     )
+
+
+@app.post("/v1/decision")
+async def decision(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    """Microsoft Decision 透传：请求与响应都是上游原样形状，只把 base URL 换成网关。"""
+    request_id = (safe_id(request.headers.get("x-request-id")) or f"req_{uuid.uuid4().hex[:8]}")
+    request.state.request_id = request_id
+    # 先鉴权再报配置：未鉴权的调用方不该探得出网关配了哪些 provider。
+    actual_key = _extract_api_key(request, x_api_key)
+    if not _verify_lb_api_key(actual_key):
+        logger.warning(f"[Decision][{request_id}] auth failed auth_headers={_request_auth_header_names(request)}")
+        raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key"}})
+    if not azure_proxy:
+        raise HTTPException(status_code=404, detail={"error": {"message": "No Azure provider configured"}})
+    request.state.tenant = _lookup_tenant(actual_key) or "default"
+    _CURRENT_TENANT.set(request.state.tenant)
+    _note_tenant_request(request.state.tenant)
+
+    body_bytes = await _read_bounded_request_body(request)
+    if len(body_bytes) > MAX_RAW_REQUEST_SIZE:
+        raise HTTPException(status_code=413, detail={"error": {"type": "request_too_large",
+            "message": f"Request exceeds LB raw limit ({MAX_RAW_REQUEST_SIZE/1024/1024:.0f}MB)"}})
+    try:
+        body = json.loads(body_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"error": {"message": f"Invalid JSON body: {e}"}})
+    problem = decision_request_error(body)
+    if problem:
+        raise HTTPException(status_code=400, detail={"error": {"code": "invalid_request", "message": problem}})
+    model = body["model"]
+    note_request_context(model, stream=False, body_size=len(body_bytes))
+    _log_openai_request(request_id, "/v1/decision", request, body, len(body_bytes), False)
+    if model not in _decision_models():
+        raise HTTPException(status_code=404, detail={"error": {
+            "code": "model_not_found", "message": f"No decision deployment for model '{model}'"}})
+    allowed = _allowed_providers(request.state.tenant)
+    if "azure_openai" not in allowed:
+        _reject_provider(allowed, model)
+    return await azure_proxy.proxy_decision(body)
 
 
 @app.post("/v1/chat/completions")

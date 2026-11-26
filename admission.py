@@ -16,7 +16,7 @@ BODY_BUDGET = int(os.getenv('INFERENCE_BODY_MEMORY_BYTES', str(128*1024*1024)))
 BODY_READ_TIMEOUT = float(os.getenv('REQUEST_BODY_TIMEOUT_SECONDS', '120'))
 TENANT_LIMITS = json.loads(os.getenv('INFERENCE_TENANT_LIMITS', '{}'))
 CURRENT_LEASE = ContextVar('inference_admission_lease', default=None)
-ROUTES = {'/v1/messages','/v1/responses','/v1/chat/completions'}
+ROUTES = {'/v1/messages','/v1/responses','/v1/chat/completions','/v1/decision'}
 REASONS = ('queue_full','queue_timeout','body_memory_budget','draining','maintenance')
 
 
