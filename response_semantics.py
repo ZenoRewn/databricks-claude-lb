@@ -141,6 +141,10 @@ def assess_json(payload, api):
     elif api == 'responses':
         if payload.get('status') == 'completed' and isinstance(payload.get('id'), str) and isinstance(payload.get('output'), list):
             return ResultAssessment('completed', usage=usage)
+    elif api == 'decision':
+        # Microsoft Decision: success is a typed `answers` object, never prose.
+        if isinstance(payload.get('answers'), dict) and payload['answers']:
+            return ResultAssessment('completed', usage=usage)
     elif api == 'chat':
         choices = payload.get('choices')
         if isinstance(choices, list) and choices and all(isinstance(c, dict) for c in choices):

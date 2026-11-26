@@ -67,6 +67,7 @@ Copilot 的 opaque-state 拒绝是请求级问题，不应污染账户熔断；�
 | `/v1/messages/count_tokens` | POST | 需要 | 本地输入 Token 估算，包含 system/tools；响应头声明低置信度及未知图片/状态开销，不能作为精确硬阈值 |
 | `/v1/responses` | POST | 需要 | OpenAI Responses API（按模型分流：Copilot 优先 → Azure fallback；`claude-*` 拒绝） |
 | `/v1/responses`、`/v1/responses/{tail}` | GET | 不需要 | **501** + `Allow: POST`：Codex 的 background/polling 模式未实现。必须是 501 而不是 404/405 —— 后两者会触发客户端指数重试风暴 |
+| `/v1/decision` | POST | 需要 | Microsoft Decision（Foundry `MAI-Decision-1.1` 等判定模型）透传：请求体/响应体与官方 `/providers/microsoft/v1/systemone` 完全一致（`state` + 类型化 `questions` → `answers` + `usage`），只把 base URL 换成网关；`model` 用网关对外名，转发时改写为 `decision_deployments` 里的部署名。非流式；无 `answers` 的 200 判失败。判定模型在 chat/responses 上回 400 `unsupported_api_for_model` 并指向本入口；它们与生成式 `deployments` 是不相交的候选集。执行状态不明同样不重放（每次执行都计费）。按 `azure_openai` provider 受 per-key allowlist 约束、记用量 |
 | `/v1/chat/completions` | POST | 需要 | OpenAI Chat Completions API（按模型分流：Copilot 优先 → Azure fallback；`claude-*` 拒绝） |
 | `/v1/models`、`/v1/models/{id}`、`/models`、`/models/{id}` | GET | **可选** | 模型清单（客户端发现用），含 Databricks Claude 与 OpenAI 风格两侧。核验过的条目带非标准 `supported_endpoints` 字段标明可用入口（`/v1/messages`、`/v1/responses`、`/v1/chat/completions`），配置发现来的条目不带该字段而不是替上游断言。清单是**运维人工核验的时点快照，不是供应商能力认证**。第三种鉴权模式：**带了 key 就必须有效（否则 401），完全不带则放行** —— 见 `_verify_optional_models_auth` |
 | `/health`、`/health/live` | GET | 不需要 | Liveness probe（仅检查进程） |

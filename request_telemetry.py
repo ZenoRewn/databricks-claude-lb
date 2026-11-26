@@ -22,8 +22,9 @@ from response_semantics import REASONS, assess_json, exception_reason, failure_r
 from safe_diagnostics import safe_fields, safe_identifier, DIAGNOSTIC_DROPS, transport_details
 
 logger = logging.getLogger('main')
-ROUTES = {'/v1/messages':'messages', '/v1/responses':'responses', '/v1/chat/completions':'chat'}
-APIS = ('messages','responses','chat')
+ROUTES = {'/v1/messages':'messages', '/v1/responses':'responses', '/v1/chat/completions':'chat',
+          '/v1/decision':'decision'}
+APIS = ('messages','responses','chat','decision')
 PROVIDERS = ('databricks','azure_openai','copilot')
 SEND_RESULTS = ('http_1xx', 'http_2xx', 'http_3xx', 'http_4xx', 'http_5xx',
                 'transport_error', 'startup_timeout', 'cancelled', 'unknown')
