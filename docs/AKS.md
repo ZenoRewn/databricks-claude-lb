@@ -4,7 +4,9 @@ Author: Zeno Ren
 
 ## 当前运行版本
 
-最近一次已记录的 AKS 发布：**2026-11-18，应用源码 `31b84fc`**：GPT-6.2 Astra/Sol 接入，并修复让 Copilot 价格刷新整份被拒的两处解析阻塞（促销后价格句、图像模型表）；维护约 64 秒、7 条探针全通过。见 [本次回执](reviews/2026-11-18-gpt-6-2-onboarding/REPORT.md)。上一次为 2026-10-27 的 `461de98`，见 [其回执](reviews/2026-10-27-identity-all-output-items/REPORT.md)。
+最近一次已记录的 AKS 发布：**2026-11-26，应用源码 `2aace34`**：接入 Foundry `MAI-Decision-1.1`（`POST /v1/decision`）。上线后另改了两处：给托管身份加 `Foundry User` 角色，把 eastus2 endpoint 换成 `services.ai.azure.com`。见 [本次回执](reviews/2026-11-26-mai-decision/REPORT.md)。
+
+上一次：**2026-11-18，应用源码 `31b84fc`**：GPT-6.2 Astra/Sol 接入，并修复让 Copilot 价格刷新整份被拒的两处解析阻塞（促销后价格句、图像模型表）；维护约 64 秒、7 条探针全通过。见 [本次回执](reviews/2026-11-18-gpt-6-2-onboarding/REPORT.md)。上一次为 2026-10-27 的 `461de98`，见 [其回执](reviews/2026-10-27-identity-all-output-items/REPORT.md)。
 
 更早：**2026-10-26，应用源码 `c638187`**：per-model 路由有了 config 基线（`model_routing`），并让策略库加载失败后重试到成功。修的是一条被误读成「配置丢失」的降级 —— `zeno-sea-mysql` 处于 Stopped，`reload()` 每次启动超时，而这一层的基线是硬编码默认顺序，所以每次发布都像规则被清空（实际一条没丢）。维护 51.7 秒、11 阶段一次通过。**ConfigMap 加 `model_routing` 是独立的第二步**，先用校验 Pod 跑过 `load_config` 才动生产；顺序不能反，旧镜像忽略该段而新镜像会校验它。见 [本次回执](reviews/2026-10-26-routing-config-baseline/REPORT.md)。
 
